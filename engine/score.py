@@ -56,7 +56,7 @@ NON_US = re.compile(
     r"switzerland|zurich|geneva|austria|vienna|sweden|stockholm|norway|oslo|"
     r"denmark|copenhagen|finland|helsinki|belgium|brussels|portugal|lisbon|"
     r"greece|athens|czech|prague|hungary|budapest|romania|bucharest|ukraine|"
-    r"kyiv|serbia|belgrade|bulgaria|sofia|croatia|estonia|latvia|lithuania|belarus|minsk|"
+    r"kyiv|uk|serbia|belgrade|bulgaria|sofia|croatia|estonia|latvia|lithuania|belarus|minsk|"
     r"kazakhstan|armenia|georgia \(country\)|moldova|slovakia|slovenia|bratislava|"
     r"gmbh|s\.r\.l|b\.v\.|pty ltd|sarl|\(all genders\))\b", re.I)
 
@@ -341,6 +341,15 @@ def score(job: Job, p: Profile) -> Job:
             job.gate, job.score = "SLOT-BLOCKED", base
             job.reasons = [f"product specialization not held: {m.group(0)}"]
             return job
+        # Body can REQUIRE an unheld product even when the title is clean
+        # (e.g. "3 years specializing in B2B commerce" under a plain SA title).
+        for m in p.products_block.finditer(text):
+            ctx = text[max(0, m.start() - 70):m.start()]
+            if re.search(r"(\d\+? ?years?|require[sd]?|must have|deep (knowledge|expertise)|"
+                         r"speciali[sz]|expert(ise)? in|proficien)", ctx, re.I):
+                job.gate, job.score = "SLOT-BLOCKED", base
+                job.reasons = [f"body requires unheld product: '{text[max(0, m.start()-40):m.end()][-60:]}'"]
+                return job
 
     # --- hard rails ------------------------------------------------------
     if not exempt:
