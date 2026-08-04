@@ -145,6 +145,7 @@ class Profile:
     dream_companies: set = field(default_factory=set)
     signals: list[tuple[re.Pattern, int, str]] = field(default_factory=list)
     search_terms: list[str] = field(default_factory=list)
+    lane_title_context: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: str | Path) -> "Profile":
@@ -161,6 +162,7 @@ class Profile:
             block_quota=bool(exc.get("quota", True)),
             dream_companies={c.lower() for c in (cfg.get("dream_companies") or [])},
             search_terms=list(cfg.get("search_terms") or []),
+            lane_title_context=dict(cfg.get("lane_title_context") or {}),
         )
         metros = loc.get("metros") or []
         p.metro_re = _compile_alt(metros) if metros else None
@@ -287,6 +289,12 @@ def score(job: Job, p: Profile) -> Job:
     reasons: list[str] = []
     text = job.text
     title = job.title or ""
+    # Some employers never repeat their own name in titles (e.g. a company's
+    # internal reqs). lane_title_context: {registry_lane: prefix} makes the
+    # implicit context explicit before title matching.
+    ctx = p.lane_title_context.get(job.lane or "")
+    if ctx and ctx.lower() not in title.lower():
+        title = f"{ctx} {title}"
     exempt = job.company.lower() in p.dream_companies or getattr(job, "rails_exempt", False)
     job.rails_exempt = exempt
 

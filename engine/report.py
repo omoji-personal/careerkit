@@ -10,7 +10,8 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
-OUT_DIR = Path(__file__).resolve().parent.parent / "out"
+import os
+OUT_DIR = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "out"
 
 
 def _row_block(r: sqlite3.Row, idx: int) -> str:

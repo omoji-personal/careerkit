@@ -9,6 +9,7 @@ provenance for each sighting.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from .models import Job
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "jobs.db"
+DB_PATH = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "data" / "jobs.db"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
