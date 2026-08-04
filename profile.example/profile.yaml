@@ -1,0 +1,90 @@
+# CareerKit profile — EXAMPLE (fake person: Jordan Reyes, marketing-ops lead).
+# /setup builds yours at profile/profile.yaml. This file is the ONLY place
+# scoring rules live; /audit reviews what the gates kill.
+
+identity:
+  name: Jordan Reyes
+  email: jordan.reyes.example@gmail.com
+  phone: "(555) 010-2299"
+  city: Denver
+  state: CO
+  linkedin: https://www.linkedin.com/in/jordan-reyes-example
+  website: https://jordanreyes.example.com
+
+location:
+  remote_us: true          # remote-US roles pass
+  metros: [Denver, Boulder, ", CO"]   # onsite/hybrid pass only here
+  relocation: false        # true -> out-of-metro US offices become VERIFY, not fail
+
+comp:
+  screen_floor: 110000     # below this ceiling -> excluded (0 disables comp gating)
+  accept_floor: 125000     # below this -> surfaced as "thin", never auto-killed
+
+# Role families DERIVED in /setup from the person's real history.
+# titles: literal terms, or /raw regex/ between slashes. weight = base score.
+lanes:
+  - key: mops-lead
+    weight: 52
+    titles: ["/marketing (operations|ops) (manager|lead|director)/", "marketing operations"]
+  - key: revops
+    weight: 48
+    titles: ["/rev(enue)? ?op(eration)?s (manager|lead|director|analyst)/"]
+  - key: lifecycle
+    weight: 44
+    titles: ["/lifecycle (marketing )?(manager|lead)/", "marketing automation manager"]
+  - key: martech
+    weight: 40
+    titles: ["/martech (manager|lead|architect)/", "/marketing technolog(y|ist)/"]
+  - key: campaign-ops
+    weight: 34
+    titles: ["campaign operations", "email marketing manager"]
+
+# For dream companies only: broader families judged on fit, not mechanics.
+dream_lanes:
+  - key: growth-pm
+    weight: 46
+    titles: ["/growth (product )?manager/", "product operations"]
+
+exclusions:
+  titles: [designer, copywriter, "/sales (development|manager)/", intern, internship,
+           "/(software|data) engineer/", recruiter]
+  products: []             # tools genuinely outside their depth, e.g. [adobe experience manager]
+  certs_refused: []        # certs that hard-block only when REQUIRED by the posting
+  competing_platforms: []  # ecosystems to slot-block by title
+  body_patterns: []        # e.g. [{terms: ["/\\d\\+? years.{0,20}sql required/"], label: sql-primary}]
+  clearance: true          # kill clearance-gated roles
+  quota: true              # kill quota-carrying roles
+
+# The role must mention at least one of these somewhere, or it is not in
+# domain (empty list disables the check). Keeps broad titles honest.
+domain_terms: [marketo, hubspot, pardot, braze, iterable, "marketing automation",
+               "lead scoring", segment, "customer.io", klaviyo, eloqua]
+
+# Positive signals: nudge the score, never gate.
+signals:
+  - {terms: [plg, "product.led"], points: 6, label: PLG motion}
+  - {terms: [b2b saas], points: 4, label: B2B SaaS}
+  - {terms: ["attribution", "funnel analytics"], points: 4, label: analytics depth}
+
+dream_companies: []        # judged on fit, not rails (use sparingly)
+
+# Feed search queries (aggregators). Derived from lanes in /setup.
+search_terms: ["marketing operations", "revenue operations", "marketing automation",
+               "lifecycle marketing"]
+
+autonomy:
+  submit: ask_each         # ask_each | per_batch  (no standing auto-submit exists)
+  outreach: draft_only     # draft_only | ask_each
+  linkedin_edits: confirm_each
+
+work_auth:
+  authorized_us: true
+  sponsorship: false
+
+eeo:                       # collected once, applied consistently; 'decline' is valid
+  policy: answer           # answer | decline
+  gender: Female
+  hispanic: "No"
+  race: Decline To Self Identify
+  veteran: not_a_veteran
+  disability: "No"

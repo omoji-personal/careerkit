@@ -1,0 +1,7 @@
+profile/
+data/
+out/
+__pycache__/
+*.pyc
+.DS_Store
+*.local.*

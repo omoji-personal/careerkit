@@ -1,0 +1,329 @@
+"""Cross-employer aggregator feeds.
+
+Low precision by design: these ponds are stocked with startup SaaS and developer
+roles. A prior 380-posting pull yielded zero usable hits. They are kept because
+they are nearly free to poll and they occasionally surface an employer we did
+not know about, which then gets promoted into the registry permanently. Treat
+them as DISCOVERY, not as a shortlist.
+
+Adapters needing a free key are included but stay dormant until the key exists
+in keys.yaml, so wiring one up later is a one-line change, not a build.
+"""
+from __future__ import annotations
+
+# Search terms are injected from the user profile by engine.cli.
+TERMS: tuple = ("program manager",)  # placeholder; set_search_terms() overrides
+
+def set_search_terms(terms):
+    global TERMS
+    TERMS = tuple(terms) or TERMS
+
+import json
+import re
+from typing import Callable
+
+from .http import fetch, fetch_json
+from .models import Job, strip_html
+
+FEEDS: dict[str, Callable[[dict], list[Job]]] = {}
+
+
+def feed(name: str):
+    def deco(fn):
+        FEEDS[name] = fn
+        return fn
+    return deco
+
+
+def _j(**kw) -> Job:
+    kw.setdefault("lane", "aggregator")
+    kw.setdefault("employer_tier", "D")
+    return Job(**kw)
+
+
+@feed("remotive")
+def remotive(_cfg: dict) -> list[Job]:
+    out = []
+    for q in TERMS:
+        d = fetch_json(f"https://remotive.com/api/remote-jobs?search={q}&limit=100")
+        for j in (d or {}).get("jobs", []) or []:
+            out.append(_j(
+                company=j.get("company_name", ""), title=j.get("title", ""),
+                url=j.get("url", ""), location=j.get("candidate_required_location", ""),
+                description=strip_html(j.get("description", "")),
+                posted_at=(j.get("publication_date") or "")[:10],
+                comp_text=j.get("salary", "") or "", external_id=str(j.get("id", "")),
+                remote_flag=True, source="remotive", raw=j,
+            ))
+    return out
+
+
+@feed("remoteok")
+def remoteok(_cfg: dict) -> list[Job]:
+    d = fetch_json("https://remoteok.com/api")
+    out = []
+    for j in (d or [])[1:] if isinstance(d, list) else []:
+        out.append(_j(
+            company=j.get("company", ""), title=j.get("position", ""),
+            url=j.get("url", ""), location=j.get("location", "") or "Remote",
+            description=strip_html(j.get("description", "")),
+            posted_at=(j.get("date") or "")[:10],
+            comp_min=j.get("salary_min"), comp_max=j.get("salary_max"),
+            external_id=str(j.get("id", "")), remote_flag=True,
+            source="remoteok", raw=j,
+        ))
+    return out
+
+
+@feed("arbeitnow")
+def arbeitnow(_cfg: dict) -> list[Job]:
+    out = []
+    for page in (1, 2, 3):
+        d = fetch_json(f"https://www.arbeitnow.com/api/job-board-api?page={page}")
+        for j in (d or {}).get("data", []) or []:
+            out.append(_j(
+                company=j.get("company_name", ""), title=j.get("title", ""),
+                url=j.get("url", ""), location=j.get("location", ""),
+                description=strip_html(j.get("description", "")),
+                remote_flag=bool(j.get("remote")), external_id=str(j.get("slug", "")),
+                source="arbeitnow", raw=j,
+            ))
+    return out
+
+
+@feed("himalayas")
+def himalayas(_cfg: dict) -> list[Job]:
+    out = []
+    for page in (1, 2):
+        d = fetch_json(f"https://himalayas.app/jobs/api?limit=100&offset={(page-1)*100}")
+        for j in (d or {}).get("jobs", []) or []:
+            out.append(_j(
+                company=j.get("companyName", ""), title=j.get("title", ""),
+                url=j.get("applicationLink", "") or j.get("guid", ""),
+                location=", ".join(j.get("locationRestrictions", []) or []) or "Remote",
+                description=strip_html(j.get("description", "")),
+                comp_min=j.get("minSalary"), comp_max=j.get("maxSalary"),
+                posted_at=str(j.get("pubDate", ""))[:10], remote_flag=True,
+                external_id=str(j.get("guid", "")), source="himalayas", raw=j,
+            ))
+    return out
+
+
+@feed("weworkremotely")
+def weworkremotely(_cfg: dict) -> list[Job]:
+    out = []
+    for cat in ("remote-customer-support-jobs", "remote-management-and-finance-jobs",
+                "remote-product-jobs", "remote-programming-jobs"):
+        st, tx = fetch(f"https://weworkremotely.com/categories/{cat}.rss")
+        if st != 200:
+            continue
+        for item in re.findall(r"<item>(.*?)</item>", tx, re.S):
+            def g(tag):
+                m = re.search(rf"<{tag}>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</{tag}>", item, re.S)
+                return m.group(1).strip() if m else ""
+            title = g("title")
+            company, _, role = title.partition(":")
+            out.append(_j(
+                company=company.strip(), title=(role or title).strip(),
+                url=g("link"), location=g("region") or "Remote",
+                description=strip_html(g("description")), posted_at=g("pubDate")[:16],
+                remote_flag=True, external_id=g("link"), source="weworkremotely", raw={},
+            ))
+    return out
+
+
+@feed("jobicy")
+def jobicy(_cfg: dict) -> list[Job]:
+    out = []
+    for q in TERMS:
+        d = fetch_json(f"https://jobicy.com/api/v2/remote-jobs?count=50&tag={q}")
+        for j in (d or {}).get("jobs", []) or []:
+            out.append(_j(
+                company=j.get("companyName", ""), title=j.get("jobTitle", ""),
+                url=j.get("url", ""), location=j.get("jobGeo", ""),
+                description=strip_html(j.get("jobDescription", "")),
+                comp_min=j.get("annualSalaryMin"), comp_max=j.get("annualSalaryMax"),
+                posted_at=(j.get("pubDate") or "")[:10], remote_flag=True,
+                external_id=str(j.get("id", "")), source="jobicy", raw=j,
+            ))
+    return out
+
+
+@feed("themuse")
+def themuse(_cfg: dict) -> list[Job]:
+    """Free, no key. No full-text search, so filter by category + location."""
+    out = []
+    cats = ["Project & Product Management", "IT", "Data and Analytics",
+            "Business & Strategy", "Customer Service"]
+    locs = ["Flexible / Remote", "Atlanta, GA"]
+    for cat in cats:
+        for loc in locs:
+            for page in (0, 1):
+                url = ("https://www.themuse.com/api/public/jobs?"
+                       f"category={cat.replace(' ', '%20').replace('&', '%26')}"
+                       f"&location={loc.replace(' ', '%20').replace('/', '%2F')}"
+                       f"&page={page}&descending=true")
+                d = fetch_json(url)
+                for j in (d or {}).get("results", []) or []:
+                    out.append(_j(
+                        company=(j.get("company") or {}).get("name", ""),
+                        title=j.get("name", ""),
+                        url=(j.get("refs") or {}).get("landing_page", ""),
+                        location=", ".join(l.get("name", "") for l in (j.get("locations") or [])),
+                        description=strip_html(j.get("contents", "")),
+                        posted_at=(j.get("publication_date") or "")[:10],
+                        department=(j.get("categories") or [{}])[0].get("name", ""),
+                        external_id=str(j.get("id", "")), source="themuse", raw=j,
+                    ))
+    return out
+
+
+@feed("workingnomads")
+def workingnomads(_cfg: dict) -> list[Job]:
+    d = fetch_json("https://www.workingnomads.com/api/exposed_jobs/")
+    out = []
+    for j in d or []:
+        out.append(_j(
+            company=j.get("company_name", ""), title=j.get("title", ""),
+            url=j.get("url", ""), location=j.get("location", "") or "Remote",
+            description=strip_html(j.get("description", "")),
+            posted_at=(j.get("pub_date") or "")[:10], remote_flag=True,
+            external_id=str(j.get("id", "")), source="workingnomads", raw=j,
+        ))
+    return out
+
+
+# --------------------------------------------------------------------------
+# Key-gated feeds. Registration is free but must be done by the account owner;
+# drop the key into keys.yaml and these light up with no code change.
+# --------------------------------------------------------------------------
+
+@feed("adzuna")
+def adzuna(cfg: dict) -> list[Job]:
+    app_id, app_key = cfg.get("app_id"), cfg.get("app_key")
+    if not (app_id and app_key):
+        return []
+    out = []
+    for what in TERMS:
+        d = fetch_json(
+            f"https://api.adzuna.com/v1/api/jobs/us/search/1?app_id={app_id}&app_key={app_key}"
+            f"&results_per_page=50&what={what.replace(' ', '%20')}&content-type=application/json"
+        )
+        for j in (d or {}).get("results", []) or []:
+            lo = int(j["salary_min"]) if j.get("salary_min") else None
+            hi = int(j["salary_max"]) if j.get("salary_max") else None
+            # Adzuna PREDICTS salary when the employer did not publish one, and
+            # signals it two ways: salary_is_predicted, or an identical min/max.
+            # Measured: 150 of 195 results came back single-point. Treating those
+            # as a published band would manufacture false confidence, so they are
+            # demoted to a note and the role scores as comp-unknown.
+            predicted = str(j.get("salary_is_predicted", "")) == "1" or (
+                lo is not None and lo == hi)
+            comp_note = ""
+            if predicted and lo:
+                comp_note = f"Adzuna ESTIMATE ~${lo:,} (employer published no band)"
+                lo = hi = None
+            out.append(_j(
+                company=(j.get("company") or {}).get("display_name", ""),
+                title=j.get("title", ""), url=j.get("redirect_url", ""),
+                location=(j.get("location") or {}).get("display_name", ""),
+                description=strip_html(j.get("description", "")),
+                comp_min=lo, comp_max=hi, comp_text=comp_note,
+                posted_at=(j.get("created") or "")[:10],
+                external_id=str(j.get("id", "")), source="adzuna", raw=j,
+            ))
+    return out
+
+
+@feed("usajobs")
+def usajobs(cfg: dict) -> list[Job]:
+    key, email = cfg.get("api_key"), cfg.get("email")
+    if not (key and email):
+        return []
+    out = []
+    for kw in TERMS:
+        st, tx = fetch(
+            f"https://data.usajobs.gov/api/search?Keyword={kw.replace(' ', '%20')}&ResultsPerPage=100",
+            headers={"Host": "data.usajobs.gov", "User-Agent": email, "Authorization-Key": key},
+        )
+        if st != 200:
+            continue
+        try:
+            d = json.loads(tx)
+        except Exception:
+            continue
+        for item in d.get("SearchResult", {}).get("SearchResultItems", []) or []:
+            j = item.get("MatchedObjectDescriptor", {})
+            pay = (j.get("PositionRemuneration") or [{}])[0]
+            out.append(_j(
+                company=j.get("OrganizationName", ""), title=j.get("PositionTitle", ""),
+                url=j.get("PositionURI", ""),
+                location=", ".join(l.get("LocationName", "") for l in (j.get("PositionLocation") or [])[:3]),
+                description=strip_html((j.get("UserArea", {}).get("Details", {}) or {}).get("JobSummary", "")),
+                comp_min=int(float(pay.get("MinimumRange", 0) or 0)) or None,
+                comp_max=int(float(pay.get("MaximumRange", 0) or 0)) or None,
+                posted_at=(j.get("PublicationStartDate") or "")[:10],
+                external_id=str(j.get("PositionID", "")), source="usajobs", raw=j,
+            ))
+    return out
+
+
+@feed("findwork")
+def findwork(cfg: dict) -> list[Job]:
+    key = cfg.get("api_key")
+    if not key:
+        return []
+    out = []
+    for q in TERMS:
+        st, tx = fetch(f"https://findwork.dev/api/jobs/?search={q}&location=usa",
+                       headers={"Authorization": f"Token {key}"})
+        if st != 200:
+            continue
+        try:
+            d = json.loads(tx)
+        except Exception:
+            continue
+        for j in d.get("results", []) or []:
+            out.append(_j(
+                company=j.get("company_name", ""), title=j.get("role", ""),
+                url=j.get("url", ""), location=j.get("location", ""),
+                description=strip_html(j.get("text", "")),
+                posted_at=(j.get("date_posted") or "")[:10],
+                remote_flag=bool(j.get("remote")), external_id=str(j.get("id", "")),
+                source="findwork", raw=j,
+            ))
+    return out
+
+
+@feed("careerjet")
+def careerjet(cfg: dict) -> list[Job]:
+    affid = cfg.get("affid")
+    if not affid:
+        return []
+    out = []
+    for kw in TERMS:
+        d = fetch_json(
+            f"https://public.api.careerjet.net/search?locale_code=en_US&affid={affid}"
+            f"&keywords={kw.replace(' ', '%20')}&location=USA&pagesize=99&sort=date"
+        )
+        for j in (d or {}).get("jobs", []) or []:
+            out.append(_j(
+                company=j.get("company", ""), title=j.get("title", ""),
+                url=j.get("url", ""), location=j.get("locations", ""),
+                description=strip_html(j.get("description", "")),
+                posted_at=(j.get("date") or "")[:10],
+                comp_text=j.get("salary", "") or "", external_id=j.get("url", ""),
+                source="careerjet", raw=j,
+            ))
+    return out
+
+
+def run_feed(name: str, cfg: dict) -> tuple[list[Job], str | None]:
+    fn = FEEDS.get(name)
+    if not fn:
+        return [], f"no feed named {name!r}"
+    try:
+        jobs = fn(cfg)
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
+    return jobs, None if jobs else "0 postings (or dormant: needs key)"
