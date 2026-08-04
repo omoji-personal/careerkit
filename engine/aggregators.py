@@ -407,3 +407,48 @@ def linkedin_guest(cfg: dict) -> list[Job]:
             if got < 5:
                 break
     return out
+
+
+@feed("jobspy")
+def jobspy_feed(cfg: dict) -> list[Job]:
+    """Optional multi-portal feed via the python-jobspy library (Indeed,
+    ZipRecruiter, Glassdoor, Google). Install: pip install python-jobspy.
+    Indeed is the workhorse (no rate limiting per their docs); we skip
+    LinkedIn here because the polite linkedin_guest feed covers it."""
+    try:
+        from jobspy import scrape_jobs
+    except ImportError:
+        raise RuntimeError("python-jobspy not installed (optional dependency)")
+    sites = cfg.get("sites") or ["indeed", "zip_recruiter"]
+    hours = int(cfg.get("hours_old", 72))
+    want = int(cfg.get("results_per_term", 25))
+    loc = cfg.get("location", "United States")
+    out = []
+    for term in TERMS:
+        try:
+            df = scrape_jobs(site_name=sites, search_term=term, location=loc,
+                             results_wanted=want, hours_old=hours,
+                             country_indeed=cfg.get("country_indeed", "USA"))
+        except Exception:
+            continue
+        for _, r in df.iterrows():
+            def g(k):
+                v = r.get(k)
+                return "" if v is None or (isinstance(v, float) and v != v) else v
+            comp_lo, comp_hi = r.get("min_amount"), r.get("max_amount")
+            def num(v):
+                try:
+                    return int(v) if v == v and v is not None else None
+                except Exception:
+                    return None
+            out.append(_j(
+                company=str(g("company")), title=str(g("title")),
+                url=str(g("job_url")), location=str(g("location")),
+                description=str(g("description"))[:6000],
+                posted_at=str(g("date_posted"))[:10],
+                comp_min=num(comp_lo), comp_max=num(comp_hi),
+                remote_flag=bool(r.get("is_remote") is True),
+                external_id=str(g("id")) or str(g("job_url")),
+                source=f"jobspy:{g('site')}", raw={},
+            ))
+    return out
