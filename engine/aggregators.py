@@ -327,3 +327,83 @@ def run_feed(name: str, cfg: dict) -> tuple[list[Job], str | None]:
     except Exception as e:
         return [], f"{type(e).__name__}: {e}"
     return jobs, None if jobs else "0 postings (or dormant: needs key)"
+
+
+@feed("linkedin_guest")
+def linkedin_guest(cfg: dict) -> list[Job]:
+    """LinkedIn public guest job search (unauthenticated HTML cards).
+
+    Uses linkedin.com/jobs-guest endpoints - the same public pages a
+    logged-out visitor sees. Deliberately polite: small page counts, a
+    freshness window (default 7 days; set since_seconds), throttled requests,
+    and detail fetches only for cards whose title matches a search term.
+    LinkedIn throttles/blocks aggressive callers; if this feed starts
+    returning 0 with prior success, back off - do not add retries.
+    """
+    import html as _html
+    import time as _time
+    from urllib.parse import quote as _q
+
+    since = int(cfg.get("since_seconds", 604800))
+    loc = cfg.get("location", "United States")
+    pages = int(cfg.get("pages", 2))
+    detail_cap = int(cfg.get("detail_cap", 40))
+    ua = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"}
+
+    card_re = re.compile(
+        r'base-card__full-link"\s+href="([^"]+)"[^>]*>\s*<span[^>]*>([^<]+)</span>',
+        re.S)
+    title_re = re.compile(r'base-search-card__title">\s*([^<]+)')
+    comp_re = re.compile(r'base-search-card__subtitle[^>]*>\s*(?:<a[^>]*>)?\s*([^<]+)')
+    loc_re = re.compile(r'job-search-card__location">\s*([^<]+)')
+    time_re = re.compile(r'datetime="([^"]+)"')
+    desc_re = re.compile(r'show-more-less-html__markup[^>]*>(.*?)</div>', re.S)
+
+    out, details = [], 0
+    for term in TERMS:
+        for p in range(pages):
+            url = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/"
+                   f"search?keywords={_q(term)}&location={_q(loc)}"
+                   f"&f_TPR=r{since}&start={p * 25}")
+            status, text = fetch(url, headers=ua)
+            if status != 200 or not text:
+                break
+            cards = text.split('<div class="base-card')
+            got = 0
+            for c in cards[1:]:
+                href = re.search(r'href="(https://www\.linkedin\.com/jobs/view/[^"]+)"', c)
+                t = title_re.search(c)
+                if not href or not t:
+                    continue
+                got += 1
+                jurl = href.group(1).split("?")[0]
+                jid = re.search(r"(\d{6,})/?$", jurl)
+                title = _html.unescape(t.group(1).strip())
+                comp = comp_re.search(c)
+                lc = loc_re.search(c)
+                dt = time_re.search(c)
+                desc = ""
+                if jid and details < detail_cap and any(
+                        w.lower() in title.lower() for w in term.split()):
+                    _time.sleep(1.0)
+                    ds, dtext = fetch("https://www.linkedin.com/jobs-guest/jobs/api/"
+                                      f"jobPosting/{jid.group(1)}", headers=ua)
+                    if ds == 200 and dtext:
+                        m = desc_re.search(dtext)
+                        if m:
+                            desc = strip_html(m.group(1))
+                            details += 1
+                out.append(_j(
+                    company=_html.unescape(comp.group(1).strip()) if comp else "",
+                    title=title, url=jurl,
+                    location=_html.unescape(lc.group(1).strip()) if lc else "",
+                    description=desc,
+                    posted_at=(dt.group(1) if dt else "")[:10],
+                    external_id=jid.group(1) if jid else jurl,
+                    source="linkedin_guest", raw={},
+                ))
+            _time.sleep(1.2)
+            if got < 5:
+                break
+    return out
