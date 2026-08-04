@@ -12,6 +12,7 @@ from pathlib import Path
 
 import os
 import datetime as _dt
+import datetime as _dt
 OUT_DIR = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "out"
 
 
@@ -23,7 +24,9 @@ def _row_block(r: sqlite3.Row, idx: int) -> str:
         comp = "not stated"
     age = "NEW" if r["first_seen"] == r["last_seen"] else f"first seen {r['first_seen']}"
     lines = [
-        f"### {idx}. {r['title']} - {r['company']}",
+        f"### {idx}. {r['title']} - {r['company']}"
+        + (" \u26a0 STALE (not sighted in 2+ days - verify live before acting)"
+           if str(r["last_seen"] or "")[:10] < (_dt.date.today() - _dt.timedelta(days=2)).isoformat() else ""),
         f"- **Score** {r['score']} | **{r['gate']}** | {age}",
         f"- **Location** {r['location'] or 'not stated'} | **Comp** {comp}",
         f"- **Source** {r['source']}" + (f" | lane: {r['lane']}" if r["lane"] else ""),
