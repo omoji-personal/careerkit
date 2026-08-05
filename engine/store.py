@@ -63,6 +63,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_group ON jobs(group_key);
 _MIGRATIONS = [
     ("jobs", "group_key", "TEXT"),
     ("jobs", "delisted_on", "TEXT"),
+    ("jobs", "misses", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -129,7 +130,7 @@ def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Jo
                     "gate=?, reasons=?, comp_min=COALESCE(?,comp_min), "
                     "comp_max=COALESCE(?,comp_max), url=?, title=?, location=?, "
                     "description=COALESCE(NULLIF(?,''),description), "
-                    "group_key=?, delisted_on=NULL WHERE uid=?",
+                    "group_key=?, delisted_on=NULL, misses=0 WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
                      j.description[:20000], j.group_key, j.uid),
@@ -186,11 +187,21 @@ def reconcile(con: sqlite3.Connection, seen_uids: set[str], demoted: dict[str, t
             con.commit()
             return 0, dem
         marks = ",".join("?" * len(healthy_sources))
+        # Count the miss first; only retire on the SECOND consecutive one.
+        # Board counts are stable run to run (15,879 / 15,932 / 15,935 across
+        # three real runs), so a single absence is decent evidence - but not
+        # good enough. A partial or transient response would retire live jobs,
+        # and hiding a live job is the exact failure this tool exists to
+        # prevent, whereas showing a dead one for one more run is cheap.
         cur.execute(
-            f"UPDATE jobs SET delisted_on=? WHERE delisted_on IS NULL "
+            f"UPDATE jobs SET misses = misses + 1 WHERE delisted_on IS NULL "
             f"AND last_seen < ? AND source IN ({marks}) "
             f"AND status NOT IN ('applied','rejected','ignored')",
-            (today, today, *healthy_sources),
+            (today, *healthy_sources),
+        )
+        cur.execute(
+            "UPDATE jobs SET delisted_on=? WHERE delisted_on IS NULL AND misses >= 2",
+            (today,),
         )
         delisted = cur.rowcount
     con.commit()

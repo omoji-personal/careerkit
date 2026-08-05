@@ -22,6 +22,7 @@ import json
 import re
 from typing import Callable
 
+from . import http
 from .http import fetch, fetch_json
 from .models import Job, strip_html
 
@@ -318,15 +319,44 @@ def careerjet(cfg: dict) -> list[Job]:
     return out
 
 
+# Feeds that cannot run without credentials, and the keys each one needs in
+# profile/keys.yaml. Used to tell "you never configured this" apart from "this
+# is broken", which the single conflated message could not.
+FEED_KEYS = {
+    "adzuna": ("app_id", "app_key"),
+    "usajobs": ("api_key", "email"),
+    "findwork": ("api_key",),
+    "careerjet": ("affid",),
+}
+
+
 def run_feed(name: str, cfg: dict) -> tuple[list[Job], str | None]:
+    """Returns (jobs, error_or_None).
+
+    An empty result used to report "0 postings (or dormant: needs key)"
+    whatever the cause, so a feed that ran fine and simply had nothing in range
+    looked identical to one that was never configured and to one that was
+    broken. A run on 2026-08-05 showed adzuna succeeding and still being
+    counted as a failure. Same defect as run_adapter had; same fix."""
     fn = FEEDS.get(name)
     if not fn:
         return [], f"no feed named {name!r}"
+    required = FEED_KEYS.get(name)
+    if required and not all(cfg.get(k) for k in required):
+        missing = ", ".join(k for k in required if not cfg.get(k))
+        return [], f"dormant: add {missing} to profile/keys.yaml"
     try:
         jobs = fn(cfg)
     except Exception as e:
         return [], f"{type(e).__name__}: {e}"
-    return jobs, None if jobs else "0 postings (or dormant: needs key)"
+    if jobs:
+        return jobs, None
+    st = http.last_status()
+    if st == 200:
+        return [], None                       # ran fine, nothing in range
+    if st is None:
+        return [], "no response (network/DNS/timeout)"
+    return [], f"HTTP {st}"
 
 
 @feed("linkedin_guest")

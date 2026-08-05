@@ -165,7 +165,10 @@ def test_delisted_posting_stops_surfacing(db):
     db.execute("UPDATE jobs SET last_seen='2000-01-01'")
     db.commit()
     delisted, _ = store.reconcile(db, set(), {}, {"greenhouse"})
-    assert delisted == 1
+    assert delisted == 0, "retired on a single miss; a transient would hide live jobs"
+    assert store.query(db), "still shown after one miss, correctly"
+    delisted, _ = store.reconcile(db, set(), {}, {"greenhouse"})
+    assert delisted == 1, "should retire on the second consecutive miss"
     assert not store.query(db)
 
 
@@ -188,9 +191,11 @@ def test_reseeing_a_delisted_posting_revives_it(db):
     db.execute("UPDATE jobs SET last_seen='2000-01-01'")
     db.commit()
     store.reconcile(db, set(), {}, {"greenhouse"})
+    store.reconcile(db, set(), {}, {"greenhouse"})         # two misses -> retired
     assert not store.query(db)
     store.upsert(db, [j])                                  # board listed it again
     assert store.query(db)
+    assert db.execute("SELECT misses FROM jobs").fetchone()["misses"] == 0
 
 
 # --------------------------------------------------------------------------
