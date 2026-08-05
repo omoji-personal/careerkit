@@ -350,8 +350,17 @@ def score(job: Job, p: Profile) -> Job:
     # Some employers never repeat their own name in titles (e.g. a company's
     # internal reqs). lane_title_context: {registry_lane: prefix} makes the
     # implicit context explicit before title matching.
+    if not title.strip() and not (job.description or "").strip():
+        job.gate, job.score = "EXCLUDED", 0
+        job.reasons = ["malformed posting: no title and no body"]
+        return job
     ctx = p.lane_title_context.get(job.lane or "")
-    if ctx and ctx.lower() not in title.lower():
+    # Only ever ENRICHES a real title. Applied to an empty one the prefix
+    # becomes the whole string, so a malformed posting matched the lane on the
+    # injected word alone and scored as in-family. Seen live 2026-08-05: a
+    # Salesforce Workday row with no title, no body, and the board root as its
+    # URL was surfaced as VERIFY.
+    if ctx and title.strip() and ctx.lower() not in title.lower():
         title = f"{ctx} {title}"
     exempt = job.company.lower() in p.dream_companies or getattr(job, "rails_exempt", False)
     job.rails_exempt = exempt

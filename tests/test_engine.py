@@ -365,3 +365,32 @@ def test_aggregator_rows_need_no_adoption(db):
     db.commit()
     new, again = store.upsert(db, [j])
     assert len(new) == 0 and len(again) == 1
+
+
+def test_titleless_posting_is_rejected():
+    """Seen live 2026-08-05: a Salesforce Workday row arrived with no title, no
+    body, and the board root as its URL. lane_title_context prefixed the lane
+    word onto the empty title, the lane matched on that word alone, and the
+    junk row surfaced as VERIFY."""
+    from engine.score import Profile, score
+    p = Profile()
+    p.lanes = [(50, __import__('re').compile(r"(salesforce)", 2), "sf")]
+    p.lane_title_context = {"sf-direct": "Salesforce"}
+    j = J(company="Salesforce", title="", description="")
+    j.lane = "sf-direct"
+    out = score(j, p)
+    assert out.gate == "EXCLUDED", f"junk row scored {out.gate}"
+
+
+def test_context_prefix_still_enriches_a_real_title():
+    from engine.score import Profile, score
+    import re
+    p = Profile()
+    p.lanes = [(50, re.compile(r"(salesforce solution architect)", re.I), "sf")]
+    p.lane_title_context = {"sf-direct": "Salesforce"}
+    p.domain_terms = None
+    j = J(company="Salesforce", title="Solution Architect", description="d" * 400,
+          location="Remote, US")
+    j.lane = "sf-direct"
+    out = score(j, p)
+    assert out.gate in ("QUALIFIED", "VERIFY"), out.reasons
