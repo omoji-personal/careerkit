@@ -133,7 +133,7 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
       <div><b>Public job feeds</b><span>14</span></div>
       <div><b>Auto-discoverable</b><span>13 platforms</span></div>
       <div><b>One run</b><span>19,550 read, <em class="sig">161</em> passed</span></div>
-      <div><b>Regression tests</b><span>157</span></div>
+      <div><b>Regression suite</b><span>160+ cases</span></div>
       <div><b>Continuous integration</b><span>3.10 / 3.12 / 3.13</span></div>
       <div><b>Engine</b><span>Python, SQLite</span></div>
       <div><b>Licence</b><span>MIT</span></div>
@@ -388,10 +388,11 @@ claude              # open Claude Code in this folder
   <div class="note">
     <span class="h">The test suite is the point</span>
     The suite is written against defects that were really in the code rather than for
-    coverage, and it runs 162 cases across 122 test functions (several are parametrised
-    over the inputs that actually broke). When a batch of fixes went in, the fixes
-    themselves were attacked, and every serious defect in the second round had been
-    introduced by a fix from the first.
+    coverage. Every case names a failure that had shipped, and several are parametrised
+    over the exact inputs that broke. When a batch of fixes went in, the fixes themselves
+    were attacked, and every serious defect in the second round had been introduced by a
+    fix from the first. An exact count is deliberately not printed here: it was wrong
+    twice while this guide was being written, which is what a hand-synced number does.
   </div>
 </section>
 
