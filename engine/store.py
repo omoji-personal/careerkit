@@ -114,7 +114,15 @@ def _backup_before_migration(con: sqlite3.Connection) -> Path | None:
 
 
 def _migrate(con: sqlite3.Connection) -> None:
-    if _needs_migration(con) and DB_PATH.exists():
+    # A brand-new database needs every migration, so a first-time user's very
+    # first command announced "backed up before migrating" and wrote a snapshot
+    # of an empty file. Alarming, and about nothing. Back up only when there are
+    # rows that a bad migration could actually destroy.
+    try:
+        has_rows = con.execute("SELECT 1 FROM jobs LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        has_rows = False
+    if has_rows and _needs_migration(con) and DB_PATH.exists():
         b = _backup_before_migration(con)
         if b:
             print(f"  (database backed up to {b.name} before migrating)")

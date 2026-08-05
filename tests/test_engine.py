@@ -1604,3 +1604,23 @@ def test_new_instance_does_not_clone_a_local_path_by_default():
     src = (ROOT / "new-instance.sh").read_text()
     assert "remote get-url origin" in src
     assert "--local" in src, "an offline escape hatch should still exist"
+
+
+def test_a_brand_new_database_does_not_announce_a_migration_backup(tmp_path, monkeypatch, capsys):
+    """A fresh database needs every migration, so a first-time user's FIRST
+    command printed "backed up before migrating" and snapshotted an empty file.
+    Alarming, and about nothing."""
+    from engine import store
+    monkeypatch.setattr(store, "DB_PATH", tmp_path / "fresh.db")
+    con = store.connect()
+    out = capsys.readouterr().out
+    assert "backed up" not in out, f"noise on a first run: {out!r}"
+    assert not list(tmp_path.glob("*pre-migration*")), "snapshotted an empty database"
+
+    # but a database WITH rows still gets its snapshot when the schema changes
+    store.upsert(con, [J(url="https://b/1")])
+    con.execute("ALTER TABLE jobs DROP COLUMN miss_on")
+    con.commit()
+    con.close()
+    store.connect()
+    assert list(tmp_path.glob("*pre-migration*")), "real data must still be backed up"
