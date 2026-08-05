@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CareerKit, a job search engine you operate by talking to it</title>
+<style>
+/* CAREERKIT. Identity derived from what the engine does: it reads an enormous stream and
+   lets very few things through, judged against rails the reader wrote themselves.
+   Two rules, and they are constraints rather than decoration:
+     1. SIGNAL (#14654A) marks WHAT PASSED, and nothing else. A verdict of QUALIFIED, a
+        number that survived screening, the one recommended action. Never an ordinal,
+        never a heading, never decoration.
+     2. Rules are GATES: a hairline interrupted by upright bars. The bars are the screen.
+   Type: Optima sets, Menlo reads out, Charter carries prose.
+   System fonts only, so this prints identically offline with no network. */
+:root{
+  --paper:#FFFFFF; --ink:#14181C; --steel:#5C6B63; --faint:#69736C;
+  --rule:#C3CCC7; --signal:#14654A; --panel:#F1F4F2; --noise:#8D9A93;
+  --display:Optima,"Avenir Next","Segoe UI",Candara,sans-serif;
+  --mono:Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  --body:Charter,"Palatino Linotype",Palatino,Georgia,serif;
+  --measure:5.35in;
+  --rail:1.05in;
+}
+*{ box-sizing:border-box; }
+html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; background:var(--paper); }
+body{ margin:0; background:transparent; color:var(--ink);
+      font-family:var(--body); font-size:10pt; line-height:1.52; orphans:3; widows:3; }
+@page{ size:Letter; margin:0.85in 0.9in 0.95in 1.05in; }
+
+/* ── the gate rule: a hairline interrupted by upright bars ── */
+.gate{ height:11px; margin:0; border:0; position:relative;
+  background:linear-gradient(var(--ink),var(--ink)) bottom left/100% 1px no-repeat; }
+.gate::before{ content:""; position:absolute; left:0; bottom:0; width:74px; height:11px;
+  background:repeating-linear-gradient(to right,var(--ink) 0 1.6px,transparent 1.6px 12px); }
+.gate.fine{ margin-left:calc(-1 * var(--rail)); height:6px; opacity:.95;
+  background:linear-gradient(var(--rule),var(--rule)) bottom left/100% .75px no-repeat; }
+.gate.fine::before{ width:44px; height:6px;
+  background:repeating-linear-gradient(to right,var(--rule) 0 1px,transparent 1px 7px); }
+
+/* ── cover ── */
+.mark{ width:3.5in; display:block; margin:0 0 .22in; }
+.standfirst{ font-family:var(--display); font-size:18pt; line-height:1.2; font-weight:600;
+             letter-spacing:-.004em; margin:.22in 0 .1in; max-width:5.9in; text-wrap:balance; }
+.standfirst em{ font-style:normal; color:var(--signal); }
+.whoami{ font-family:var(--mono); font-size:8pt; color:var(--steel); line-height:1.5;
+         max-width:var(--measure); margin:0 0 .17in; }
+.lede{ font-size:10.2pt; line-height:1.5; max-width:var(--measure); color:#1F2429; margin:0 0 .4em; }
+.plate{ margin:.22in 0 0; border:1px solid var(--ink); background:var(--panel);
+        padding:.15in .19in .17in; }
+.plate-h{ font-family:var(--mono); font-size:7.6pt; letter-spacing:.2em; color:var(--steel);
+          text-transform:uppercase; margin-bottom:.09in; }
+.spec{ display:grid; grid-template-columns:1fr 1fr; gap:.05in .3in;
+       font-family:var(--mono); font-size:7.9pt; line-height:1.4; }
+.spec div{ display:flex; justify-content:space-between; gap:.12in;
+           border-bottom:1px dotted var(--rule); padding-bottom:.028in; }
+.spec b{ font-weight:normal; color:var(--steel); }
+.spec span{ color:var(--ink); text-align:right; white-space:nowrap; }
+.spec span.sig{ color:var(--signal); }
+
+.toc{ margin:.18in 0 0; }
+.toc-row{ display:flex; align-items:baseline; gap:.1in; font-family:var(--mono);
+          font-size:7.8pt; padding:.034in 0; border-bottom:1px dotted var(--rule); }
+.toc-n{ color:var(--steel); width:.22in; }
+.toc-t{ flex:1; color:var(--ink); }
+
+/* ── sections ── */
+.sec{ break-before:page; }
+h2{ font-family:var(--display); font-size:15.5pt; font-weight:600; letter-spacing:-.003em;
+    margin:0 0 .04in; line-height:1.16; }
+.kicker{ font-family:var(--mono); font-size:7.6pt; letter-spacing:.2em; color:var(--steel);
+         text-transform:uppercase; margin:0 0 .05in; }
+h3{ font-family:var(--display); font-size:11pt; font-weight:600; margin:.24in 0 .05in;
+    letter-spacing:-.002em; }
+p{ max-width:var(--measure); margin:0 0 .5em; }
+ul,ol{ max-width:var(--measure); margin:.2em 0 .6em; padding-left:1.05em; }
+li{ margin:0 0 .28em; }
+code,.m{ font-family:var(--mono); font-size:8.6pt; }
+strong{ font-weight:600; }
+em.sig{ font-style:normal; color:var(--signal); font-weight:600; }
+
+/* verdict table: the four gates */
+.verdicts{ width:100%; border-collapse:collapse; margin:.16in 0 .2em; max-width:var(--measure);
+           font-size:9pt; }
+.verdicts th{ font-family:var(--mono); font-size:7.4pt; letter-spacing:.14em; text-transform:uppercase;
+              color:var(--steel); text-align:left; border-bottom:1px solid var(--ink);
+              padding:0 .1in .05in 0; font-weight:normal; }
+.verdicts td{ vertical-align:top; padding:.07in .1in .07in 0; border-bottom:1px dotted var(--rule); }
+.verdicts td.v{ font-family:var(--mono); font-size:8pt; white-space:nowrap; }
+.verdicts td.v.pass{ color:var(--signal); font-weight:600; }
+
+.note{ border-left:2px solid var(--rule); padding:.02in 0 .02in .13in; margin:.16in 0;
+       max-width:var(--measure); color:#2A3036; }
+.note .h{ font-family:var(--mono); font-size:7.4pt; letter-spacing:.16em; text-transform:uppercase;
+          color:var(--steel); display:block; margin-bottom:.03in; }
+pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(--panel);
+     border:1px solid var(--rule); padding:.1in .13in; max-width:var(--measure);
+     white-space:pre-wrap; margin:.1in 0 .5em; }
+.cmd{ display:grid; grid-template-columns:1.42in 1fr; gap:.04in .16in; max-width:var(--measure);
+      font-size:9.2pt; margin:.1in 0 .5em; }
+.cmd dt{ font-family:var(--mono); font-size:8.4pt; color:var(--ink); }
+.cmd dd{ margin:0; color:#2A3036; }
+</style>
+</head>
+<body>
+
+<!-- ══ COVER ══ -->
+<section class="cover">
+  <img class="mark" src="../brand/careerkit-mark.svg" alt="CareerKit">
+  <hr class="gate">
+
+  <p class="standfirst">A job search engine you operate by talking to it. It read
+  19,550 postings and surfaced <em>161</em>.</p>
+
+  <p class="whoami">CareerKit / open source, MIT<br>
+  github.com/omoji-personal/careerkit</p>
+
+  <p class="lede">Finding job postings was never the hard part. The hard part is that
+  almost everything you find is noise, and the few that matter are buried by the time you
+  reach them. CareerKit polls employer applicant tracking systems directly, scores every
+  posting against rules you wrote yourself, and hands you the short list with its
+  reasoning attached.</p>
+
+  <p class="lede">It is built for people who do not write code. You talk to Claude Code;
+  Claude runs the machinery.</p>
+
+  <div class="plate">
+    <div class="plate-h">Specification</div>
+    <div class="spec">
+      <div><b>ATS platforms polled</b><span>17</span></div>
+      <div><b>Public job feeds</b><span>14</span></div>
+      <div><b>Auto-discoverable</b><span>13 platforms</span></div>
+      <div><b>One run</b><span class="sig">19,550 → 161</span></div>
+      <div><b>Regression tests</b><span>157</span></div>
+      <div><b>Continuous integration</b><span>3.10 / 3.12 / 3.13</span></div>
+      <div><b>Engine</b><span>Python, SQLite</span></div>
+      <div><b>Licence</b><span>MIT</span></div>
+    </div>
+  </div>
+
+  <div class="toc">
+    <div class="toc-row"><span class="toc-n">1</span><span class="toc-t">What it does</span></div>
+    <div class="toc-row"><span class="toc-n">2</span><span class="toc-t">Setup, and why the interview is not optional</span></div>
+    <div class="toc-row"><span class="toc-n">3</span><span class="toc-t">How scoring works: lanes, rails, gates</span></div>
+    <div class="toc-row"><span class="toc-n">4</span><span class="toc-t">The daily loop</span></div>
+    <div class="toc-row"><span class="toc-n">5</span><span class="toc-t">Calibration: keeping the filter honest</span></div>
+    <div class="toc-row"><span class="toc-n">6</span><span class="toc-t">What leaves your machine</span></div>
+    <div class="toc-row"><span class="toc-n">7</span><span class="toc-t">Failure modes worth knowing</span></div>
+    <div class="toc-row"><span class="toc-n">8</span><span class="toc-t">Reference</span></div>
+  </div>
+</section>
+
+<!-- ══ 1 ══ -->
+<section class="sec">
+  <p class="kicker">One</p>
+  <h2>What it does</h2>
+  <hr class="gate fine">
+
+  <p>CareerKit watches the job boards employers actually post on, rather than the search
+  pages that aggregate them. That distinction is most of the value: an employer's own
+  applicant tracking system lists the requisition the day it opens, with its real title,
+  location and requisition id, and it stops listing it the day it closes.</p>
+
+  <p>Every posting it collects is scored against your rules. The output is a report,
+  ordered, with the reasoning attached to each entry, so you can tell the difference
+  between a role that matched and a role that merely appeared.</p>
+
+  <h3>The ratio is the product</h3>
+  <p>In a single run against 273 employer boards and 14 feeds, CareerKit pulled 19,550
+  postings. 275 were in your job family at all. <em class="sig">161</em> cleared every
+  screenable rail. The other 19,389 were screened out with a recorded reason, and you can
+  read those reasons whenever you want to argue with them.</p>
+
+  <div class="note">
+    <span class="h">Why this matters</span>
+    A filter you cannot inspect is a filter you cannot trust. Every screening decision
+    keeps its reason, and <code>audit</code> exists specifically so you can review what
+    was killed and overrule it.
+  </div>
+
+  <h3>What it is not</h3>
+  <p>It is not a mass-application tool. It fills a form completely and stops at the submit
+  button, because the certification on an application is yours to make. It does not create
+  accounts, handle passwords, or answer "prove you are human" checks.</p>
+</section>
+
+<!-- ══ 2 ══ -->
+<section class="sec">
+  <p class="kicker">Two</p>
+  <h2>Setup, and why the interview is not optional</h2>
+  <hr class="gate fine">
+
+  <p>You need Claude Code (Pro plan minimum), Python 3.10 or newer, and git. macOS and
+  Linux work as they are; on Windows, run the shell scripts from Git Bash or WSL.</p>
+
+<pre>git clone https://github.com/omoji-personal/careerkit.git
+cd careerkit
+./setup.sh          # checks prerequisites, builds .venv, installs deps
+claude              # open Claude Code in this folder
+/setup              # about 40 minutes</pre>
+
+  <p><code>/setup</code> interviews you: what you do, what you want next, where you will
+  work, what you will not do, and what is true about you. It writes
+  <code>profile/profile.yaml</code> and <code>profile/claims.md</code>.</p>
+
+  <p>It is not skippable. Until that file exists the engine has no rules to score against,
+  and it will tell you so rather than guess. A tool that guesses your criteria produces a
+  report that looks exactly as confident as a correct one.</p>
+
+  <h3>The claims register</h3>
+  <p><code>profile/claims.md</code> is the list of things that may be said about you.
+  Nothing goes into a resume, cover letter, form answer or outreach message unless it is
+  in there. When you tell Claude something new about yourself, it gets added, with your
+  confirmation, before it is used.</p>
+</section>
+
+<!-- ══ 3 ══ -->
+<section class="sec">
+  <p class="kicker">Three</p>
+  <h2>How scoring works: lanes, rails, gates</h2>
+  <hr class="gate fine">
+
+  <p><strong>Lanes</strong> are the job families you want, each with its own titles and
+  weight. <strong>Rails</strong> are the hard constraints: location, compensation floor,
+  clearance, product specialisations you do not hold, role families you rule out.
+  <strong>Gates</strong> are the four possible verdicts.</p>
+
+  <table class="verdicts">
+    <tr><th>Verdict</th><th>Meaning</th><th>What to do</th></tr>
+    <tr><td class="v pass">QUALIFIED</td>
+        <td>Passes every screenable rail, with evidence found in the posting.</td>
+        <td>Read it. This is the short list.</td></tr>
+    <tr><td class="v">VERIFY</td>
+        <td>Looks right, but one rail could not be evidenced from the text.</td>
+        <td>Check the one open question yourself.</td></tr>
+    <tr><td class="v">SLOT-BLOCKED</td>
+        <td>Clears the rails, but the role family is one you rule out.</td>
+        <td>Nothing, unless your criteria changed.</td></tr>
+    <tr><td class="v">EXCLUDED</td>
+        <td>Fails a hard rail. Never surfaces in the report.</td>
+        <td>Review in bulk with <code>audit</code>.</td></tr>
+  </table>
+
+  <h3>Your rules are the only rules</h3>
+  <p><code>profile/profile.yaml</code> is the single place scoring rules exist. To change
+  what surfaces, change that file, usually by asking Claude to run <code>/criteria</code>.
+  Never by editing engine code.</p>
+
+  <p>This is enforced, not merely intended: a test walks the source tree and fails the
+  build if a personal term, a home city or an employer name appears in the engine. The
+  engine cannot develop a private opinion about what you want.</p>
+
+  <div class="note">
+    <span class="h">If a rule is unusable</span>
+    The engine prints what it ignored and carries on, except in exclusion lists, where an
+    uncompilable rule raises instead. Dropping an exclusion fails open: the rail
+    disappears and everything you banned starts surfacing, silently.
+  </div>
+</section>
+
+<!-- ══ 4 ══ -->
+<section class="sec">
+  <p class="kicker">Four</p>
+  <h2>The daily loop</h2>
+  <hr class="gate fine">
+
+  <dl class="cmd">
+    <dt>/search</dt><dd>Sweep every board and feed, report what is genuinely new since the last run.</dd>
+    <dt>/evaluate &lt;url&gt;</dt><dd>An honest fit read on any posting, from anywhere. Names the real disqualifiers.</dd>
+    <dt>/apply &lt;url&gt;</dt><dd>Build the application pack and fill the form. You review and submit.</dd>
+    <dt>/prep &lt;company&gt;</dt><dd>Interview preparation from your own story bank.</dd>
+    <dt>/track</dt><dd>Where everything stands.</dd>
+    <dt>/ingest &lt;url&gt;</dt><dd>Score and register anything you found elsewhere, so the engine knows about it.</dd>
+    <dt>/compose</dt><dd>Resume, cover letter and profile work, gated by your claims register.</dd>
+    <dt>/outreach</dt><dd>Referrals, thank-yous and nudges. Draft only by default.</dd>
+    <dt>/criteria</dt><dd>Change what surfaces.</dd>
+    <dt>/audit</dt><dd>Review what the gates killed. Run it monthly.</dd>
+  </dl>
+
+  <h3>Running the engine directly</h3>
+  <p>Claude does this for you, but it is an ordinary command line tool.</p>
+<pre>./careerkit.py pull            # poll everything, score, write a report
+./careerkit.py doctor          # profile, sources, freshness, drift: one check
+./careerkit.py status          # what is in the database, which sources are broken
+./careerkit.py audit           # what the gates killed, and why
+./careerkit.py report          # rebuild the report ( --format json|csv to export )
+./careerkit.py history         # every status change, in order
+./careerkit.py claims-lint out/cover.md
+./careerkit.py mark UID applied
+./careerkit.py ingest-url -- URL     # register one posting you found elsewhere
+./careerkit.py ingest-urls FILE      # ... or a file of them
+./careerkit.py discover NAME         # find a company's board and register it
+./careerkit.py verify                # confirm each board belongs to the right company
+./careerkit.py db check|backup       # integrity check, manual backup</pre>
+</section>
+
+<!-- ══ 5 ══ -->
+<section class="sec">
+  <p class="kicker">Five</p>
+  <h2>Calibration: keeping the filter honest</h2>
+  <hr class="gate fine">
+
+  <p>A screening tool drifts toward the mistake you cannot see. Rails that are slightly
+  too tight remove real matches, and because you never see what was removed, the reports
+  keep looking reasonable. This is the failure that costs the most and announces itself
+  the least.</p>
+
+  <p><code>audit</code> is the answer. It re-scores and shows you every kill with its
+  reason, grouped, with examples. You argue with it, and what you disagree with becomes a
+  profile change.</p>
+
+  <div class="note">
+    <span class="h">Run it monthly</span>
+    A filter nobody reviews is a filter nobody can trust. Thirty minutes of arguing with
+    your own gates is worth more than any amount of additional sourcing.
+  </div>
+
+  <h3>Zero results is a claim</h3>
+  <p>"Nothing new this week" can mean nothing was posted, or it can mean a board changed
+  its API and has been returning an error for eleven days. CareerKit tracks the health of
+  every source separately, reports consecutive failures, and flags a source that returned
+  nothing when it had postings last run. A quiet week has to earn the description.</p>
+</section>
+
+<!-- ══ 6 ══ -->
+<section class="sec">
+  <p class="kicker">Six</p>
+  <h2>What leaves your machine</h2>
+  <hr class="gate fine">
+
+  <p>Worth being precise about, because "nothing" would be untrue.</p>
+
+  <ul>
+    <li><strong>To Anthropic:</strong> everything Claude reads. Your resume, your claims
+    register, postings, your interview answers. Governed by your own Claude plan's data
+    terms, the same as any other conversation.</li>
+    <li><strong>To job boards and feeds:</strong> ordinary outbound web requests from your
+    machine, throttled to one request per host every 0.7 seconds. Your identity is not
+    attached to them.</li>
+    <li><strong>One exception:</strong> the USAJobs feed requires your registered email in
+    a request header. That is their API's rule. Skip the feed if you would rather not.</li>
+    <li><strong>No telemetry.</strong> Nothing is reported to the author or anyone else.</li>
+  </ul>
+
+  <p>Delete <code>profile/</code>, <code>data/</code> and <code>out/</code> and nothing
+  personal remains locally.</p>
+
+  <h3>On scraping</h3>
+  <p>Every feed declares what it is: an official public API, one that needs your own key,
+  or a scraper. Two read public search pages rather than official APIs. They are off by
+  default, can be rate limited or blocked, and their terms of use are yours to read. Any
+  run whose results include a scraper says so in the report.</p>
+</section>
+
+<!-- ══ 7 ══ -->
+<section class="sec">
+  <p class="kicker">Seven</p>
+  <h2>Failure modes worth knowing</h2>
+  <hr class="gate fine">
+
+  <p>A job-search engine that is subtly wrong does not crash. It hands you a clean,
+  confident report with the wrong jobs in it. Most of the engineering here is aimed at
+  that. Some of what it now defends against, all of it found in this code:</p>
+
+  <ul>
+    <li>Two different openings with the same title at one employer collapsing into one
+    entry, so marking one applied silently hid the other.</li>
+    <li>A blank entry in an exclusions list compiling to a pattern that matched every
+    posting ever written. Zero results is indistinguishable from a quiet day.</li>
+    <li>Postings that had closed continuing to surface as live, because nothing wrote back
+    that they were gone.</li>
+    <li>A stipend of $500 beside a real salary band being read as $500,000 and becoming
+    the top of the range.</li>
+    <li>"New since last time" meaning "first seen today", so two runs in one day announced
+    the same roles twice.</li>
+    <li>A consistency check whose pattern matched nothing, so it reported no problems
+    forever. A check that cannot fail is worse than no check.</li>
+  </ul>
+
+  <div class="note">
+    <span class="h">The test suite is the point</span>
+    There are 157 tests and each one pins down a defect that was really in the code. When
+    a batch of fixes went in, the fixes themselves were attacked, and every serious defect
+    in the second round had been introduced by a fix from the first.
+  </div>
+</section>
+
+<!-- ══ 8 ══ -->
+<section class="sec">
+  <p class="kicker">Eight</p>
+  <h2>Reference</h2>
+  <hr class="gate fine">
+
+  <h3>Layout</h3>
+  <dl class="cmd">
+    <dt>profile/</dt><dd>Yours. Profile, claims, style, employer registry, tracker. Gitignored.</dd>
+    <dt>data/</dt><dd>The SQLite database and HTTP cache. Gitignored.</dd>
+    <dt>out/</dt><dd>Generated reports, one per run, plus an immutable copy of each. Gitignored.</dd>
+    <dt>engine/</dt><dd>Adapters, feeds, scoring, storage, reporting. No personal data, ever.</dd>
+    <dt>.claude/skills/</dt><dd>The workflows Claude follows for each command.</dd>
+  </dl>
+
+  <h3>Sharing it</h3>
+  <p><code>./new-instance.sh &lt;name&gt;</code> clones a fully separate instance with its
+  own profile, database and reports. Instances never see each other's data. Use one per
+  person. Instances clone from the public repository, so <code>git pull</code> inside one
+  really does bring engine fixes.</p>
+
+  <h3>Licence</h3>
+  <p>MIT. Use it, fork it, change it. If you improve the engine, the improvement belongs
+  in the template so every instance inherits it.</p>
+
+  <hr class="gate">
+  <p class="whoami" style="margin-top:.14in">github.com/omoji-personal/careerkit</p>
+</section>
+
+</body>
+</html>

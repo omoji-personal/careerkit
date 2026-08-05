@@ -30,10 +30,16 @@ command -v git >/dev/null || {
 }
 echo "  git $(git --version | awk '{print $3}')"
 
+# Python puts the venv binaries in Scripts/ on Windows and bin/ everywhere else.
+# The README tells Windows users to run this from Git Bash, where the shell is
+# POSIX but the Python is native, so hardcoding bin/ broke setup for exactly the
+# users least able to diagnose it.
+venv_bin() { [ -d .venv/Scripts ] && echo .venv/Scripts || echo .venv/bin; }
+
 # Gating on "does the folder exist" can never repair a BROKEN venv - the
-# common case after `brew upgrade python`, which leaves .venv/bin/python a
+# common case after `brew upgrade python`, which leaves the interpreter a
 # dangling symlink. Test that it actually runs, and rebuild if it does not.
-if [ -d .venv ] && ! .venv/bin/python -c "import sys" >/dev/null 2>&1; then
+if [ -d .venv ] && ! "$(venv_bin)/python" -c "import sys" >/dev/null 2>&1; then
   echo "  .venv is broken (interpreter will not run); rebuilding ..."
   rm -rf .venv
 fi
@@ -45,7 +51,7 @@ if [ ! -d .venv ]; then
     exit 1; }
 fi
 # shellcheck disable=SC1091
-. .venv/bin/activate
+. "$(venv_bin)/activate"
 python -m pip install --quiet --upgrade pip
 python -m pip install --quiet -r requirements-dev.txt
 echo "  dependencies installed into .venv"

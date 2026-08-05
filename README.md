@@ -1,18 +1,25 @@
-# CareerKit
+<img src="brand/careerkit-mark.svg" alt="CareerKit" width="360">
 
-Your job search, run by Claude Code with real machinery underneath: an engine
-that watches employer job boards and scores every posting against YOUR rules,
-plus workflows for evaluating roles, building applications, interview prep,
-outreach, and pipeline tracking. Nothing personal lives in this repo. Your
-profile, database, and tracker are gitignored and stay on your machine.
+**A job search engine you operate by talking to it.** Against one set of
+criteria it read 19,550 postings and surfaced 161.
+
+It watches the job boards employers actually post on, 17 applicant tracking
+platforms plus 14 public feeds, and scores every posting against rules you wrote
+yourself. Then it helps you evaluate roles, build applications, prepare for
+interviews, and keep track of where everything stands.
 
 It is built for people who are not programmers. You talk to Claude; Claude runs
-the machinery.
+the machinery. Nothing personal lives in this repo: your profile, database and
+tracker are gitignored and stay on your machine.
+
+**[Read the guide](guide/Careerkit-Guide.pdf)** for how scoring actually works,
+what leaves your machine, and the failure modes worth knowing about.
 
 ## What you need
 
 - [Claude Code](https://claude.com/claude-code) (Pro plan minimum; expect
-  meaningful usage on setup and application days)
+  meaningful usage on setup and application days). Install it with
+  `npm install -g @anthropic-ai/claude-code`, which needs Node 18 or newer.
 - Python 3.10 or newer, and git
 - Chrome + the Claude-in-Chrome extension, only if you want it filling forms
   and editing LinkedIn for you
@@ -61,8 +68,11 @@ all live there. To change what surfaces, change that file, usually by asking
 Claude to run `/criteria`. Never by editing engine code.
 
 If a rule you wrote is unusable (an empty list item, a broken regex) the engine
-prints what it ignored and carries on. It will not silently match everything or
-match nothing, which is the failure that costs you jobs without telling you.
+prints what it ignored and carries on, except in exclusion lists, where an
+unusable rule raises instead. Dropping an exclusion fails open: the rail
+disappears and everything you banned starts surfacing. Either way it will not
+silently match everything or match nothing, which is the failure that costs you
+jobs without telling you.
 
 ## What actually leaves your machine
 
@@ -84,12 +94,18 @@ Worth being precise about, because "nothing" would be a lie.
 
 Delete `profile/`, `data/` and `out/` and nothing personal remains locally. (`out/` holds your generated reports, which name the roles you were matched to.)
 
-**On scraping:** every feed declares what it actually is, in
-`engine/aggregators.py` under `SOURCE_POLICY`: an official public API, one that
-needs your own API key, or a scraper. Two (`linkedin_guest`, `jobspy`) read
-public search pages rather than official APIs. They are off by default, can be
-rate-limited or blocked, and their terms of use are yours to read. Any run whose
-results include a scraper says so in the report.
+**On scraping.** Two feeds (`linkedin_guest`, `jobspy`) read public search pages
+rather than official APIs. They are off by default, can be rate-limited or
+blocked, and their terms of use are yours to read. Any run whose results include
+one says so in the report. Every feed declares what it is in
+`engine/aggregators.py` under `SOURCE_POLICY`: official API, needs-your-own-key,
+or scraper.
+
+Two employer platforms are also read from HTML rather than an API, because they
+publish no JSON: **iCIMS** parses its server-rendered search page, and
+**Jobvite** parses its careers page. Unlike the two feeds above, these are active
+whenever you have an employer registered on that platform. If that matters to
+you, deactivate those entries in `profile/employers.yaml`.
 
 ## Rules the copilot lives by
 
@@ -132,9 +148,9 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py pull --no-cache      # really re-fetch, ignoring the 6h cache
 ```
 
-`doctor` is the one to run if something feels off. It checks your profile parses,
-that sources are answering, that the last run finished and is recent, and that
-your database and `tracker.md` agree about what you have applied to.
+`doctor` is the one to run if something feels off. It checks that your profile
+parses, that no source has been failing repeatedly, that the last run finished and was recent, and that your database
+and `tracker.md` agree about what you have applied to.
 
 `claims-lint` is a mechanical backstop for the truth rule: it flags numbers and
 proper names in a draft that do not appear in `profile/claims.md`. It reads

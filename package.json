@@ -1,0 +1,11 @@
+{
+  "name": "careerkit-guide",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Build tooling for the CareerKit guide PDF. The engine itself is Python and needs none of this.",
+  "type": "module",
+  "scripts": { "guide": "node guide/build-pdf.mjs" },
+  "author": "Omid Mojtahedi",
+  "license": "MIT",
+  "devDependencies": { "playwright": "^1.62.1" }
+}
