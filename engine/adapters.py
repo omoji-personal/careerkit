@@ -30,8 +30,19 @@ def adapter(name: str):
     return deco
 
 
+def board_id(cfg: dict) -> str:
+    """Stable identity for a board: platform + the slug/tenant that addresses it.
+
+    Health used to key on the registry DISPLAY NAME, so renaming an employer in
+    employers.yaml stranded every row written under the old name; they matched
+    no healthy board and could never be retired."""
+    key = cfg.get("slug") or cfg.get("tenant") or cfg.get("domain") or cfg.get("guid") or ""
+    return f"{cfg.get('ats', '')}:{key}".lower()
+
+
 def _base(cfg: dict) -> dict:
     return {
+        "board": board_id(cfg),
         "company": cfg.get("name") or cfg.get("slug", ""),
         "lane": cfg.get("lane", ""),
         "employer_tier": cfg.get("tier", ""),
@@ -702,6 +713,11 @@ def run_adapter(cfg: dict) -> tuple[list[Job], str | None]:
         # An empty list means one of two very different things. Report which.
         st = http.last_status()
         if st == 200:
+            if http.last_parse_ok() is False:
+                # 200 with a body we could not parse: a challenge page, an SSO
+                # redirect, or the API changed shape. Reporting this as an empty
+                # board is how an employer leaves coverage without a word.
+                return [], "HTTP 200 but the response was not usable JSON"
             return [], None                       # board is fine, nothing open
         if st is None:
             return [], "no response (network/DNS/timeout)"

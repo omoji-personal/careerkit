@@ -23,6 +23,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
   uid            TEXT PRIMARY KEY,
   group_key      TEXT,
+  board          TEXT,
   company        TEXT, title TEXT, url TEXT, location TEXT,
   source         TEXT, lane TEXT, employer_tier TEXT,
   posted_at      TEXT, department TEXT,
@@ -67,6 +68,7 @@ _MIGRATIONS = [
     ("source_health", "prev_count", "INTEGER"),
     ("jobs", "schema_v", "INTEGER DEFAULT 2"),
     ("jobs", "miss_on", "TEXT"),
+    ("jobs", "board", "TEXT"),
 ]
 
 
@@ -181,19 +183,20 @@ def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Jo
                     "gate=?, reasons=?, comp_min=COALESCE(?,comp_min), "
                     "comp_max=COALESCE(?,comp_max), url=?, title=?, location=?, "
                     "description=COALESCE(NULLIF(?,''),description), "
-                    "source=?, group_key=?, delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
+                    "source=?, board=COALESCE(NULLIF(?,''),board), group_key=?, "
+                    "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
-                     j.description[:20000], j.source, j.group_key, j.uid),
+                     j.description[:20000], j.source, j.board, j.group_key, j.uid),
                 )
                 again.append(j)
             else:
                 cur.execute(
-                    "INSERT INTO jobs (uid,group_key,company,title,url,location,source,lane,"
+                    "INSERT INTO jobs (uid,group_key,board,company,title,url,location,source,lane,"
                     "employer_tier,posted_at,department,comp_min,comp_max,comp_text,"
                     "score,gate,reasons,description,first_seen,last_seen) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (j.uid, j.group_key, j.company, j.title, j.url, j.location, j.source,
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (j.uid, j.group_key, j.board, j.company, j.title, j.url, j.location, j.source,
                      j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
                      j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
                      j.description[:20000], today, today),
@@ -244,15 +247,26 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
         if not healthy_boards and not healthy_feeds:
             con.commit()
             return 0, dem
-        # Board identity is (source, company); a feed has no per-employer
-        # identity so it matches on source alone. Concatenating with a NUL
-        # separator keeps the pair comparison to one IN clause.
-        board_keys = [f"{s}\x00{c}" for s, c in healthy_boards]
+        # Two matching paths, deliberately. `board` is the stable id
+        # (platform:slug) and survives an employer being renamed in the
+        # registry. Rows written before that column existed carry none, so they
+        # still match on (source, company); dropping that path would freeze
+        # every pre-existing row as permanently un-retirable.
+        #
+        # healthy_boards entries are (source, company) or (source, company,
+        # board_id). Normalise once here rather than branching below.
+        norm = [(t[0], t[1], (t[2] if len(t) > 2 else "")) for t in healthy_boards]
         clauses, params = [], []
-        if board_keys:
-            clauses.append("(source || x'00' || company) IN (%s)"
-                           % ",".join("?" * len(board_keys)))
-            params += board_keys
+        board_ids = sorted({b for _, _, b in norm if b})
+        if board_ids:
+            clauses.append("board IN (%s)" % ",".join("?" * len(board_ids)))
+            params += board_ids
+        pairs = sorted({f"{src}\x00{co}" for src, co, _ in norm})
+        if pairs:
+            clauses.append("((board IS NULL OR board = '') AND "
+                           "(source || x'00' || company) IN (%s))"
+                           % ",".join("?" * len(pairs)))
+            params += pairs
         if healthy_feeds:
             # A feed may namespace its rows ("jobspy:indeed") while the registry
             # knows it as "jobspy", so compare the part before the colon.

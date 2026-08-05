@@ -121,7 +121,8 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
                 prev = prev_counts.get(label)
                 collapsed = prev and prev >= 10 and len(jobs) < prev * 0.5
                 if not collapsed:
-                    healthy_boards.add((e.get("ats"), e.get("name") or e.get("slug", "")))
+                    healthy_boards.add((e.get("ats"), e.get("name") or e.get("slug", ""),
+                                        _adapters.board_id(e)))
                 else:
                     print(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
             all_jobs.extend(jobs)

@@ -894,3 +894,67 @@ def test_a_board_pinned_at_its_page_ceiling_is_flagged():
     assert at_page_ceiling("workable", 100)
     assert not at_page_ceiling("workable", 43)
     assert not at_page_ceiling("greenhouse", 550)
+
+
+def test_a_200_carrying_html_is_not_a_healthy_empty_board():
+    """A WAF challenge or SSO redirect returns 200 with HTML. json.loads fails,
+    the adapter returns [], and reporting that as "nothing open" is how an
+    employer leaves coverage without a word."""
+    from engine import http, adapters
+
+    @adapters.adapter("_t_challenge")
+    def _challenge(cfg):
+        http._local.last_status = 200
+        http._local.last_parse_ok = False        # as fetch_json would set it
+        return []
+
+    jobs, err = adapters.run_adapter({"ats": "_t_challenge", "name": "X"})
+    assert err and "not usable JSON" in err
+
+
+def test_a_genuinely_empty_board_is_still_healthy():
+    """The fix above must not re-introduce the false alarms that made the
+    'sources failing' list worth ignoring."""
+    from engine import http, adapters
+
+    @adapters.adapter("_t_empty")
+    def _empty(cfg):
+        http._local.last_status = 200
+        http._local.last_parse_ok = True
+        return []
+
+    jobs, err = adapters.run_adapter({"ats": "_t_empty", "name": "Y"})
+    assert err is None
+
+
+def test_board_identity_survives_a_registry_rename(db):
+    """Health keyed on the display name stranded every row when an employer was
+    renamed in employers.yaml. A stable platform:slug id survives it."""
+    from engine import store
+    j = J(company="Acme Corp", external_id="1")
+    j.board = "greenhouse:acme"
+    store.upsert(db, [j])
+    assert db.execute("SELECT board FROM jobs").fetchone()["board"] == "greenhouse:acme"
+    db.execute("UPDATE jobs SET last_seen='2000-01-01'")
+    db.commit()
+    # registry renamed the company, but the slug did not move
+    healthy = {("greenhouse", "Acme Incorporated", "greenhouse:acme")}
+    for d in ("2000-01-02", "2000-01-03"):
+        db.execute("UPDATE jobs SET miss_on=?", (d,))
+        db.commit()
+        store.reconcile(db, {}, healthy, set())
+    assert not store.query(db), "rename broke the link; the row could not retire"
+
+
+def test_rows_without_a_board_id_still_match_on_name(db):
+    """Rows written before the board column existed must keep working."""
+    from engine import store
+    j = J(company="Acme", external_id="2")     # Job.board defaults to ""
+    store.upsert(db, [j])
+    db.execute("UPDATE jobs SET last_seen='2000-01-01', board=NULL")
+    db.commit()
+    for d in ("2000-01-02", "2000-01-03"):
+        db.execute("UPDATE jobs SET miss_on=?", (d,))
+        db.commit()
+        store.reconcile(db, {}, {("greenhouse", "Acme")}, set())
+    assert not store.query(db), "legacy row could no longer be retired"

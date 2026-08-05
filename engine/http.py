@@ -162,6 +162,7 @@ def reset_status() -> None:
     previously polled board left behind. A healthy 200 from the last employer
     then reports the next one as "fine, nothing open" when it never ran at all."""
     _local.last_status = None
+    _local.last_parse_ok = None
 
 
 def last_status() -> int | None:
@@ -177,12 +178,25 @@ def last_status() -> int | None:
 
 def fetch_json(url: str, **kw) -> Any:
     status, text = fetch(url, **kw)
+    _local.last_parse_ok = None
     if status != 200 or not text:
         return None
     try:
-        return json.loads(text)
+        d = json.loads(text)
+        _local.last_parse_ok = True
+        return d
     except Exception:
+        # A 200 whose body is not JSON is a WAF challenge, an SSO redirect or a
+        # changed API - never "no openings". Recording it is what stops the
+        # board from dropping out of coverage silently.
+        _local.last_parse_ok = False
         return None
+
+
+def last_parse_ok() -> bool | None:
+    """True/False for the most recent fetch_json on this thread, None if the
+    last fetch did not go through fetch_json at all."""
+    return getattr(_local, "last_parse_ok", None)
 
 
 def clear_cache() -> int:

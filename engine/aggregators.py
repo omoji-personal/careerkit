@@ -378,6 +378,8 @@ def run_feed(name: str, cfg: dict) -> tuple[list[Job], str | None]:
         return jobs, None
     st = http.last_status()
     if st == 200:
+        if http.last_parse_ok() is False:
+            return [], "HTTP 200 but the response was not usable JSON"
         return [], None                       # ran fine, nothing in range
     if st is None:
         return [], "no response (network/DNS/timeout)"

@@ -58,6 +58,7 @@ class Job:
     lane: str = ""                   # which employer lane this company sits in
     rails_exempt: bool = False       # owner carve-out: judge on fit, not mechanical rails
     employer_tier: str = ""          # A / B / C from the registry
+    board: str = ""                  # stable board id, e.g. 'greenhouse:acme'
     raw: dict[str, Any] = field(default_factory=dict)
 
     # populated by the scorer
