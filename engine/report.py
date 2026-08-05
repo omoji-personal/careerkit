@@ -12,6 +12,8 @@ from pathlib import Path
 
 import os
 import datetime as _dt
+
+from .models import sanitize_external
 OUT_DIR = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "out"
 
 
@@ -41,20 +43,28 @@ def _row_block(rows: list[sqlite3.Row], idx: int) -> str:
         comp = "not stated"
     age = "NEW" if r["first_seen"] == r["last_seen"] else f"first seen {r['first_seen']}"
     lines = [
-        f"### {idx}. {r['title']} - {r['company']}"
+        f"### {idx}. {sanitize_external(r['title'], 120)} - {sanitize_external(r['company'], 60)}"
         + (f"  ({len(rows)} open reqs)" if len(rows) > 1 else "")
         + (" \u26a0 STALE (not sighted in 2+ days - verify live before acting)"
            if str(r["last_seen"] or "")[:10] < (_dt.date.today() - _dt.timedelta(days=2)).isoformat() else ""),
         f"- **Score** {r['score']} | **{r['gate']}** | {age}",
-        f"- **Location** {r['location'] or 'not stated'} | **Comp** {comp}",
+        f"- **Location** {sanitize_external(r['location'], 80) or 'not stated'} | **Comp** {comp}",
         f"- **Source** {r['source']}" + (f" | lane: {r['lane']}" if r["lane"] else ""),
-        f"- **Why** {r['reasons']}",
+        f"- **Why** {sanitize_external(r['reasons'], 300)}",
         f"- {r['url']}",
     ]
     if len(rows) > 1:
-        lines.append(f"- **Also open at:** " + " \u00b7 ".join(
-            f"{(o['location'] or 'location not stated')[:34]} ({o['gate'].lower()}, {o['score']})"
-            for o in rows[1:8]) + (" ..." if len(rows) > 8 else ""))
+        # Every sibling carries its own uid and URL. Listing location and score
+        # alone made the grouping destructive in practice: the user could see
+        # that other requisitions existed but could not open or mark any of them.
+        lines.append(f"- **Also open ({len(rows) - 1} more):**")
+        for o in rows[1:12]:
+            lines.append(
+                f"  - {sanitize_external(o['location'], 40) or 'location not stated'} "
+                f"| {o['gate'].lower()} {o['score']} | `{o['uid']}`\n"
+                f"    {o['url']}")
+        if len(rows) > 12:
+            lines.append(f"  - ...and {len(rows) - 12} more")
     return "\n".join(lines)
 
 

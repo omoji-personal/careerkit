@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import re
 import sqlite3
 import sys
@@ -179,7 +180,7 @@ def cmd_pull(args) -> None:
             excluded[j.reasons[0].split(":")[0][:38]] += 1
 
     keep = [j for j in scored if j.gate in ("QUALIFIED", "VERIFY")]
-    new, again = store.upsert(con, keep)
+    new, again = store.upsert(con, keep, run_id=run_id)
 
     # Close the loop: a posting that STOPPED qualifying is written back, and a
     # posting that vanished from a healthy board is marked delisted. Without
@@ -205,6 +206,18 @@ def cmd_pull(args) -> None:
     store.finish_run(con, run_id, len(all_jobs), len(new),
                      sum(1 for r in rows if r["gate"] == "QUALIFIED"), detail)
     path = write_report(con, rows, health=health, run_detail=detail)
+    # Keep an immutable artifact per run. The dated filename is overwritten by a
+    # second run on the same day, which loses the evidence of what the first one
+    # actually surfaced.
+    try:
+        import shutil
+        runs_dir = path.parent / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        shutil.copy2(path, runs_dir / f"{stamp}-run-{run_id:04d}.md")
+        shutil.copy2(path, path.parent / "latest.md")
+    except Exception as e:
+        print(f"  (could not write the run artifact: {e})")
 
     screened = len(all_jobs) - len(keep)
     print(f"\n  pulled      {len(all_jobs)}")
@@ -448,6 +461,30 @@ def cmd_status(args) -> None:
             print(f"  {b['source']:<46} x{b['consecutive_failures']}  {(b['last_error'] or '')[:50]}")
 
 
+def cmd_db(args) -> None:
+    """Integrity check and manual backup.
+
+    The database holds months of first_seen dates and application status that
+    cannot be re-derived from any job board, so it deserves the same care as the
+    profile."""
+    con = store.connect()
+    if args.action == "check":
+        row = con.execute("PRAGMA quick_check").fetchone()
+        verdict = str(row[0]) if row else "unknown"
+        n = con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        print(f"{store.DB_PATH}\n  integrity : {verdict}\n  postings  : {n}")
+        if verdict.lower() != "ok":
+            sys.exit("Database reports a problem. Restore the newest "
+                     "jobs.pre-migration-*.db beside it.")
+    else:
+        dest = store.DB_PATH.with_suffix(
+            f".backup-{datetime.now().strftime('%Y-%m-%dT%H-%M-%S')}.db")
+        import sqlite3 as _s
+        with _s.connect(dest) as b:
+            con.backup(b)
+        print(f"Backed up to {dest}")
+
+
 def cmd_mark(args) -> None:
     con = store.connect()
     try:
@@ -496,6 +533,10 @@ def main() -> None:
     sp.add_argument("--min-score", type=int, default=0)
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("db", help="database integrity and backup")
+    sp.set_defaults(fn=cmd_db)
+    sp.add_argument("action", choices=["check", "backup"])
 
     sp = sub.add_parser("mark"); sp.set_defaults(fn=cmd_mark)
     sp.add_argument("uid"); sp.add_argument("status"); sp.add_argument("--notes")

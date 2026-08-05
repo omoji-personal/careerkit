@@ -69,10 +69,50 @@ _MIGRATIONS = [
     ("jobs", "schema_v", "INTEGER DEFAULT 2"),
     ("jobs", "miss_on", "TEXT"),
     ("jobs", "board", "TEXT"),
+    ("jobs", "first_seen_run", "INTEGER"),
+    ("jobs", "last_seen_run", "INTEGER"),
+    ("runs", "state", "TEXT"),
 ]
 
 
+def _needs_migration(con: sqlite3.Connection) -> bool:
+    for table, col, _ in _MIGRATIONS:
+        try:
+            cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+        except sqlite3.Error:
+            return True
+        if col not in cols:
+            return True
+    return False
+
+
+def _backup_before_migration(con: sqlite3.Connection) -> Path | None:
+    """Integrity-check and copy the database before altering it.
+
+    A migration that corrupts a user's job history is unrecoverable: the rows
+    are months of first_seen dates and application status that cannot be
+    re-derived from any board. Cheap insurance, taken only when a migration is
+    actually pending."""
+    try:
+        row = con.execute("PRAGMA quick_check").fetchone()
+        if row and str(row[0]).lower() != "ok":
+            raise sqlite3.DatabaseError(f"quick_check: {row[0]}")
+    except sqlite3.Error:
+        raise
+    dest = DB_PATH.with_suffix(f".pre-migration-{date.today().isoformat()}.db")
+    try:
+        with sqlite3.connect(dest) as bck:
+            con.backup(bck)
+        return dest
+    except Exception:
+        return None       # a failed backup must not block the user's run
+
+
 def _migrate(con: sqlite3.Connection) -> None:
+    if _needs_migration(con) and DB_PATH.exists():
+        b = _backup_before_migration(con)
+        if b:
+            print(f"  (database backed up to {b.name} before migrating)")
     for table, col, decl in _MIGRATIONS:
         cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
@@ -126,7 +166,8 @@ def connect() -> sqlite3.Connection:
     return con
 
 
-def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
+def upsert(con: sqlite3.Connection, jobs: list[Job],
+           run_id: int | None = None) -> tuple[list[Job], list[Job]]:
     """Insert or refresh. Returns (new_jobs, seen_again)."""
     today = date.today().isoformat()
     new, again = [], []
@@ -184,22 +225,23 @@ def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Jo
                     "comp_max=COALESCE(?,comp_max), url=?, title=?, location=?, "
                     "description=COALESCE(NULLIF(?,''),description), "
                     "source=?, board=COALESCE(NULLIF(?,''),board), group_key=?, "
+                    "last_seen_run=COALESCE(?,last_seen_run), "
                     "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
-                     j.description[:20000], j.source, j.board, j.group_key, j.uid),
+                     j.description[:20000], j.source, j.board, j.group_key, run_id, j.uid),
                 )
                 again.append(j)
             else:
                 cur.execute(
                     "INSERT INTO jobs (uid,group_key,board,company,title,url,location,source,lane,"
                     "employer_tier,posted_at,department,comp_min,comp_max,comp_text,"
-                    "score,gate,reasons,description,first_seen,last_seen) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "score,gate,reasons,description,first_seen,last_seen,first_seen_run,last_seen_run) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (j.uid, j.group_key, j.board, j.company, j.title, j.url, j.location, j.source,
                      j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
                      j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
-                     j.description[:20000], today, today),
+                     j.description[:20000], today, today, run_id, run_id),
                 )
                 new.append(j)
             cur.execute(
@@ -388,6 +430,16 @@ def query(con: sqlite3.Connection, *, gates: tuple[str, ...] = ("QUALIFIED", "VE
     sql += " ORDER BY score DESC, first_seen DESC LIMIT ?"
     params.append(limit)
     return list(con.execute(sql, params))
+
+
+def is_new_this_run(row, run_id: int | None) -> bool:
+    """New means first seen in THIS run, not merely first seen today.
+
+    first_seen == last_seen made a row inserted an hour ago still read NEW, and
+    made two runs on one day indistinguishable."""
+    if run_id is not None and row["first_seen_run"] is not None:
+        return row["first_seen_run"] == run_id
+    return row["first_seen"] == row["last_seen"]      # pre-run-id rows
 
 
 def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "") -> None:

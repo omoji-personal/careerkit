@@ -126,6 +126,29 @@ _CO_SUFFIX = {
 }
 
 
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_ZERO_WIDTH = ("​", "‌", "‍", "﻿")
+_MD_LEAD = re.compile(r"^\s{0,3}(#{1,6}\s|>|[-*+]\s|\d+\.\s)", re.M)
+
+
+def sanitize_external(text: str, limit: int = 0) -> str:
+    """Make text that came from a job board safe to render into a report.
+
+    Posting text is written into a Markdown file the agent later reads back, so
+    a posting can forge headings, lists, links and code fences in our own
+    output, and can hide instructions from a human reader using zero-width
+    characters while leaving them perfectly visible to a model.
+
+    This reduces blast radius. It is NOT a solution to prompt injection, and the
+    contract in CLAUDE.md still governs what the agent may act on."""
+    t = _CTRL_RE.sub(" ", text or "")
+    for z in _ZERO_WIDTH:
+        t = t.replace(z, "")
+    t = _MD_LEAD.sub(lambda m: "\\" + m.group(0).lstrip(), t)
+    t = t.replace("`" * 3, "'" * 3)
+    return t[:limit] if limit else t
+
+
 def _norm_company(c: str) -> str:
     c = (c or "").lower()
     c = re.sub(r"[^a-z0-9 ]", " ", c)
