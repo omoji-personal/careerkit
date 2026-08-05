@@ -1379,3 +1379,85 @@ def test_database_uses_wal_so_an_interrupted_pull_does_not_need_recovery(db):
     that no job board can re-derive."""
     mode = db.execute("PRAGMA journal_mode").fetchone()[0]
     assert mode.lower() == "wal", f"journal_mode is {mode}"
+
+
+# --------------------------------------------------------------------------
+# the shared pull loop (engine/pull.py)
+# --------------------------------------------------------------------------
+
+def _reg(*employers, feeds=()):
+    return {"employers": list(employers), "feeds": list(feeds)}
+
+
+def test_tier_filter_keeps_employers_that_have_no_tier(monkeypatch):
+    """`e.get("tier") in tier` silently excluded every employer with no tier
+    key, so `--tier C` polled FEWER boards than a plain pull. One front end had
+    the default and the other did not."""
+    from engine import pull as _pull
+    polled = []
+
+    def fake_run_adapter(cfg):
+        polled.append(cfg["name"])
+        return [], None
+
+    monkeypatch.setattr(_pull, "run_adapter", fake_run_adapter)
+    reg = _reg({"name": "HasC", "ats": "greenhouse", "slug": "a", "tier": "C"},
+               {"name": "NoTier", "ats": "greenhouse", "slug": "b"},
+               {"name": "TierA", "ats": "greenhouse", "slug": "c", "tier": "A"})
+    _pull.fetch_all(reg, {}, None, tier=["C"], echo=lambda *a: None)
+    assert polled == ["HasC", "NoTier"], f"tier filter dropped an employer: {polled}"
+
+
+def test_inactive_employers_are_not_polled(monkeypatch):
+    from engine import pull as _pull
+    polled = []
+    monkeypatch.setattr(_pull, "run_adapter",
+                        lambda cfg: (polled.append(cfg["name"]), ([], None))[1])
+    reg = _reg({"name": "On", "ats": "greenhouse", "slug": "a"},
+               {"name": "Off", "ats": "greenhouse", "slug": "b", "active": False})
+    _pull.fetch_all(reg, {}, None, echo=lambda *a: None)
+    assert polled == ["On"]
+
+
+def test_a_collapsed_board_is_not_treated_as_healthy(db, monkeypatch):
+    """A truncating board reports success with a short list. Treated as healthy,
+    reconcile() retires every row it dropped as though the jobs had closed."""
+    from engine import pull as _pull, store
+    store.record_health(db, "greenhouse:Acme", 100, None)
+    monkeypatch.setattr(_pull, "run_adapter",
+                        lambda cfg: ([J(company="Acme", url="https://b/1")], None))
+    r = _pull.fetch_all(_reg({"name": "Acme", "ats": "greenhouse", "slug": "a"}),
+                        {}, db, echo=lambda *a: None)
+    assert r["healthy_boards"] == set(), "a board that fell 100 -> 1 is not healthy"
+
+
+def test_pull_stamps_the_run_id_so_new_means_new_since_last_run(db, monkeypatch):
+    """One front end passed run_id to upsert and the other did not. Omitting it
+    is silent: rows land with no run stamp and 'new' falls back to a date test
+    for the rest of their life."""
+    from engine import pull as _pull
+    from engine.report import is_new
+    from engine.score import Profile
+
+    job = J(company="Acme", title="Product Manager", url="https://b/1")
+    monkeypatch.setattr(_pull, "run_adapter", lambda cfg: ([job], None))
+    monkeypatch.setattr(_pull, "write_report", lambda *a, **k: Path("/dev/null"))
+    monkeypatch.setattr("engine.score.score_all", lambda jobs, p: jobs)
+
+    reg = _reg({"name": "Acme", "ats": "greenhouse", "slug": "a"})
+    r1 = _pull.run_pull(db, reg, {}, Profile(), echo=lambda *a: None)
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,)).fetchone()
+    assert row["first_seen_run"] == r1["run_id"], "run id was not stamped"
+    assert is_new(row)
+
+    _pull.run_pull(db, reg, {}, Profile(), echo=lambda *a: None)
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,)).fetchone()
+    assert not is_new(row), "second run must not re-announce the same posting"
+
+
+def test_no_cli_reimplements_the_pull_loop():
+    """The loop was copied into two front ends and they drifted without a
+    symptom. Anything that polls must call engine.pull, not rebuild it."""
+    src = (ROOT / "careerkit.py").read_text()
+    assert "_pull.run_pull" in src or "run_pull(" in src
+    assert "def _fetch_all" not in src, "the pull loop has been re-inlined into the CLI"

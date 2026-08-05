@@ -1,0 +1,158 @@
+"""The pull loop: poll every source, score, persist, reconcile, report.
+
+This lives in the engine rather than in a CLI on purpose. Two front ends drive
+it (this repo's `careerkit.py`, and the author's personal `sourcer.py`, which
+imports this same engine), and while the loop was copied into both they drifted
+silently and expensively:
+
+  - one passed `run_id` to `upsert` and the other did not, so run-scoped
+    freshness worked in one tool and fell back to a date comparison in the other
+  - one defaulted a missing employer `tier` to "C" and the other dropped those
+    employers entirely from any tier-filtered pull
+  - the page-ceiling truncation warning existed in one and not the other
+
+None of those announce themselves. A copied loop means every engine fix has to
+be applied twice and being wrong the second time looks exactly like working.
+"""
+from __future__ import annotations
+
+from collections import Counter
+
+from . import adapters as _adapters
+from . import store
+from .adapters import run_adapter
+from .aggregators import run_feed
+from .report import write_report
+
+
+def fetch_all(reg: dict, keys: dict, con=None, *, employers_only: bool = False,
+              feeds_only: bool = False, tier=None, echo=print) -> dict:
+    """Poll every active board and feed. Never raises for one bad source.
+
+    Returns the jobs plus the health facts reconcile() needs: which boards and
+    feeds answered well enough that their missing rows can be treated as
+    genuinely closed."""
+    prev_counts = {}
+    if con is not None:
+        prev_counts = {r["source"]: r["last_count"]
+                       for r in con.execute("SELECT source, last_count FROM source_health")}
+    all_jobs, ok, errors = [], 0, {}
+    healthy_boards, healthy_feeds = set(), set()
+
+    if not feeds_only:
+        emps = [e for e in reg.get("employers", []) if e.get("active", True)]
+        if tier:
+            # A missing tier defaults to C rather than vanishing. Filtering on
+            # `e.get("tier") in tier` silently excluded every employer that had
+            # no tier key, so `--tier C` polled fewer boards than plain `pull`.
+            emps = [e for e in emps if (e.get("tier") or "C") in tier]
+        echo(f"Polling {len(emps)} employer boards...")
+        for e in emps:
+            jobs, err = run_adapter(e)
+            label = f"{e.get('ats')}:{e.get('name')}"
+            if con is not None:
+                store.record_health(con, label, len(jobs), err)
+            if err:
+                errors[label] = err
+            else:
+                ok += 1
+                # Board identity, not platform identity. And a board whose count
+                # collapsed is treated as UNHEALTHY for retirement purposes: a
+                # truncating board (broken pagination, an API that starts
+                # capping) reports success with a short list, and its missing
+                # rows would otherwise be retired as closed.
+                prev = prev_counts.get(label)
+                collapsed = prev and prev >= 10 and len(jobs) < prev * 0.5
+                if not collapsed:
+                    healthy_boards.add((e.get("ats"), e.get("name") or e.get("slug", ""),
+                                        _adapters.board_id(e)))
+                else:
+                    echo(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
+            all_jobs.extend(jobs)
+            capped = _adapters.at_page_ceiling(e.get("ats"), len(jobs))
+            echo(f"  {label:<46} {len(jobs):>4}"
+                 + (f"  [{err}]" if err else "")
+                 + ("  !! at page ceiling, likely truncated" if capped else ""))
+
+    if not employers_only:
+        feeds = [f for f in reg.get("feeds", []) if f.get("active", True)]
+        echo(f"\nPolling {len(feeds)} aggregator feeds...")
+        for f in feeds:
+            cfg = dict(f)
+            cfg.update(keys.get(f["name"], {}) or {})
+            jobs, err = run_feed(f["name"], cfg)
+            if con is not None:
+                store.record_health(con, f"feed:{f['name']}", len(jobs), err)
+            if err:
+                errors[f["name"]] = err
+            else:
+                ok += 1
+                # Same collapse guard as employer boards: a feed that loops over
+                # several search terms can have most of them throttled, succeed
+                # on one, and report success with a fraction of its usual rows.
+                prev = prev_counts.get(f"feed:{f['name']}")
+                if not (prev and prev >= 10 and len(jobs) < prev * 0.5):
+                    healthy_feeds.add(f["name"])
+                else:
+                    echo(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
+            all_jobs.extend(jobs)
+            echo(f"  feed:{f['name']:<41} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
+
+    return {"jobs": all_jobs, "sources_ok": ok, "errors": errors,
+            "healthy_boards": healthy_boards, "healthy_feeds": healthy_feeds}
+
+
+def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = False,
+             feeds_only: bool = False, tier=None, min_score: int = 0,
+             discovered=(), echo=print) -> dict:
+    """One complete pull. Returns the numbers the caller prints."""
+    from .score import score_all
+
+    run_id = store.start_run(con)
+    fetched = fetch_all(reg, keys, con, employers_only=employers_only,
+                        feeds_only=feeds_only, tier=tier, echo=echo)
+    all_jobs = fetched["jobs"]
+
+    echo(f"\nScoring {len(all_jobs)} postings...")
+    scored = score_all(all_jobs, profile)
+    excluded: Counter = Counter()
+    for j in scored:
+        if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.reasons:
+            excluded[j.reasons[0].split(":")[0][:38]] += 1
+
+    keep = [j for j in scored if j.gate in ("QUALIFIED", "VERIFY")]
+    # run_id is what makes "new" mean "first seen THIS run" rather than "first
+    # seen today". Omitting it is silent: rows land with no run stamp and the
+    # report falls back to the date comparison for the rest of their life.
+    new, _again = store.upsert(con, keep, run_id=run_id)
+
+    # Close the loop: a posting that STOPPED qualifying is written back, and a
+    # posting that vanished from a healthy board is marked delisted. Without
+    # this, both kept surfacing as live qualified roles indefinitely.
+    # Best gate wins. Aggregator sightings of one role all share a uid, so a
+    # copy listed under a foreign location scores EXCLUDED while the clean copy
+    # scores QUALIFIED. Writing the demotion back blindly overwrote the row
+    # upsert had just created and deleted the role on the run it was found.
+    kept_uids = {j.uid for j in keep}
+    demoted = {j.uid: (j.score, j.gate, " | ".join(j.reasons))
+               for j in scored
+               if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.uid not in kept_uids}
+    n_delisted, n_demoted = store.reconcile(
+        con, demoted, fetched["healthy_boards"], fetched["healthy_feeds"],
+        known_boards={(e.get("ats"), e.get("name") or e.get("slug", ""))
+                      for e in reg.get("employers", [])})
+
+    rows = store.query(con, min_score=min_score, limit=300)
+    health = list(con.execute(
+        "SELECT * FROM source_health ORDER BY consecutive_failures DESC, source"))
+    detail = {"pulled": len(all_jobs), "sources_ok": fetched["sources_ok"],
+              "excluded_breakdown": dict(excluded.most_common(12)),
+              "errors": fetched["errors"], "discovered": list(discovered)}
+    qualified = sum(1 for r in rows if r["gate"] == "QUALIFIED")
+    store.finish_run(con, run_id, len(all_jobs), len(new), qualified, detail)
+    path = write_report(con, rows, health=health, run_detail=detail)
+
+    return {"run_id": run_id, "path": path, "pulled": len(all_jobs),
+            "kept": len(keep), "new": len(new), "qualified": qualified,
+            "delisted": n_delisted, "demoted": n_demoted,
+            "excluded": excluded, "errors": fetched["errors"], "rows": rows}

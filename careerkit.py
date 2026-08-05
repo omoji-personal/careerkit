@@ -61,12 +61,11 @@ from engine import http as _http
 from engine import store  # noqa: E402
 from engine import aggregators  # noqa: E402
 from engine import adapters as _adapters
-from engine.adapters import run_adapter  # noqa: E402
-from engine.aggregators import run_feed  # noqa: E402
 from engine import discover as _discover
 from engine.discover import discover_many  # noqa: E402
+from engine import pull as _pull
 from engine.report import write_report  # noqa: E402
-from engine.score import Profile, ProfileError, score, score_all  # noqa: E402
+from engine.score import Profile, ProfileError, score  # noqa: E402
 from engine import search as _search
 from engine.search import resolve, workday_parts  # noqa: E402
 from engine.verify import verify_entry  # noqa: E402
@@ -96,71 +95,12 @@ def save_employers(data: dict) -> None:
     EMPLOYERS.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 
 
-def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier=None):
-    prev_counts = {}
-    if con is not None:
-        prev_counts = {r["source"]: r["last_count"]
-                       for r in con.execute("SELECT source, last_count FROM source_health")}
-    all_jobs, ok, errors = [], 0, {}
-    healthy_boards, healthy_feeds = set(), set()
-    if not feeds_only:
-        emps = [e for e in reg.get("employers", []) if e.get("active", True)]
-        if tier:
-            emps = [e for e in emps if (e.get("tier") or "C") in tier]   # missing tier defaulted to C rather than vanishing
-        print(f"Polling {len(emps)} employer boards...")
-        for e in emps:
-            jobs, err = run_adapter(e)
-            label = f"{e.get('ats')}:{e.get('name')}"
-            if con is not None:
-                store.record_health(con, label, len(jobs), err)
-            if err:
-                errors[label] = err
-            else:
-                ok += 1
-                # Board identity, not platform identity. And a board whose
-                # count collapsed is treated as UNHEALTHY for retirement
-                # purposes: a truncating board (broken pagination, an API that
-                # starts capping) reports success with a short list, and its
-                # missing rows would otherwise be retired as closed.
-                prev = prev_counts.get(label)
-                collapsed = prev and prev >= 10 and len(jobs) < prev * 0.5
-                if not collapsed:
-                    healthy_boards.add((e.get("ats"), e.get("name") or e.get("slug", ""),
-                                        _adapters.board_id(e)))
-                else:
-                    print(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
-            all_jobs.extend(jobs)
-            capped = _adapters.at_page_ceiling(e.get("ats"), len(jobs))
-            print(f"  {label:<46} {len(jobs):>4}"
-                  + (f"  [{err}]" if err else "")
-                  + ("  !! at page ceiling, likely truncated" if capped else ""))
-    if not employers_only:
-        feeds = [f for f in reg.get("feeds", []) if f.get("active", True)]
-        print(f"\nPolling {len(feeds)} aggregator feeds...")
-        for f in feeds:
-            cfg = dict(f)
-            cfg.update(keys.get(f["name"], {}) or {})
-            jobs, err = run_feed(f["name"], cfg)
-            if con is not None:
-                store.record_health(con, f"feed:{f['name']}", len(jobs), err)
-            if err:
-                errors[f["name"]] = err
-            else:
-                ok += 1
-                # Same collapse guard as employer boards: a feed that loops over
-                # several search terms can have most of them throttled, succeed
-                # on one, and report success with a fraction of its usual rows.
-                prev = prev_counts.get(f"feed:{f['name']}")
-                if not (prev and prev >= 10 and len(jobs) < prev * 0.5):
-                    healthy_feeds.add(f["name"])
-                else:
-                    print(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
-            all_jobs.extend(jobs)
-            print(f"  feed:{f['name']:<41} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
-    return all_jobs, ok, errors, healthy_boards, healthy_feeds
 
 
 def cmd_pull(args) -> None:
+    """Thin wrapper. The loop itself lives in engine/pull.py because a second
+    front end (the author's personal sourcer.py) drives the same engine, and
+    while the loop was copied into both they drifted without a symptom."""
     _http.set_cache_enabled(not getattr(args, "no_cache", False))
     profile = load_profile()
     aggregators.set_search_terms(profile.search_terms)
@@ -169,51 +109,13 @@ def cmd_pull(args) -> None:
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     keys = load_yaml(KEYS, {})
     con = store.connect()
-    run_id = store.start_run(con)
 
-    all_jobs, ok_sources, errors, healthy_boards, healthy_feeds = _fetch_all(
-        reg, keys, con, employers_only=args.employers, feeds_only=args.feeds,
-        tier=args.tier)
+    r = _pull.run_pull(con, reg, keys, profile,
+                       employers_only=args.employers, feeds_only=args.feeds,
+                       tier=args.tier, min_score=args.min_score,
+                       discovered=take_discovered())
+    path = r["path"]
 
-    print(f"\nScoring {len(all_jobs)} postings...")
-    scored = score_all(all_jobs, profile)
-    excluded = Counter()
-    for j in scored:
-        if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.reasons:
-            excluded[j.reasons[0].split(":")[0][:38]] += 1
-
-    keep = [j for j in scored if j.gate in ("QUALIFIED", "VERIFY")]
-    new, again = store.upsert(con, keep, run_id=run_id)
-
-    # Close the loop: a posting that STOPPED qualifying is written back, and a
-    # posting that vanished from a healthy board is marked delisted. Without
-    # this, both kept surfacing as live qualified roles indefinitely.
-    # Best gate wins. Aggregator sightings of one role all share a uid, so a
-    # copy listed under a foreign location scores EXCLUDED while the clean copy
-    # scores QUALIFIED. Writing the demotion back blindly overwrote the row
-    # upsert had just created and deleted the role on the run it was found.
-    kept_uids = {j.uid for j in keep}
-    demoted = {j.uid: (j.score, j.gate, " | ".join(j.reasons))
-               for j in scored
-               if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.uid not in kept_uids}
-    n_delisted, n_demoted = store.reconcile(
-        con, demoted, healthy_boards, healthy_feeds,
-        known_boards={(e.get("ats"), e.get("name") or e.get("slug", ""))
-                      for e in reg.get("employers", [])})
-
-    rows = store.query(con, min_score=args.min_score, limit=300)
-    health = list(con.execute(
-        "SELECT * FROM source_health ORDER BY consecutive_failures DESC, source"))
-    detail = {"pulled": len(all_jobs), "sources_ok": ok_sources,
-              "excluded_breakdown": dict(excluded.most_common(12)), "errors": errors,
-              # Employers `discover` registered since the last pull. The report
-              # has always had a section for these; nothing populated it, so the
-              # section could never render and the user was never told which
-              # employers had newly entered the polling set.
-              "discovered": take_discovered()}
-    store.finish_run(con, run_id, len(all_jobs), len(new),
-                     sum(1 for r in rows if r["gate"] == "QUALIFIED"), detail)
-    path = write_report(con, rows, health=health, run_detail=detail)
     # Keep an immutable artifact per run. The dated filename is overwritten by a
     # second run on the same day, which loses the evidence of what the first one
     # actually surfaced.
@@ -222,20 +124,19 @@ def cmd_pull(args) -> None:
         runs_dir = path.parent / "runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-        shutil.copy2(path, runs_dir / f"{stamp}-run-{run_id:04d}.md")
+        shutil.copy2(path, runs_dir / f"{stamp}-run-{r['run_id']:04d}.md")
         shutil.copy2(path, path.parent / "latest.md")
     except Exception as e:
         print(f"  (could not write the run artifact: {e})")
 
-    screened = len(all_jobs) - len(keep)
-    print(f"\n  pulled      {len(all_jobs)}")
-    print(f"  in-family   {len(keep)}")
-    print(f"  screened    {screened}   ("
-          f"{', '.join(f'{k} {v}' for k, v in excluded.most_common(5))})")
-    print(f"  NEW         {len(new)}")
-    print(f"  qualified   {sum(1 for r in rows if r['gate'] == 'QUALIFIED')}")
-    if n_delisted or n_demoted:
-        print(f"  closed out  {n_delisted} delisted, {n_demoted} no longer qualify")
+    print(f"\n  pulled      {r['pulled']}")
+    print(f"  in-family   {r['kept']}")
+    print(f"  screened    {r['pulled'] - r['kept']}   ("
+          f"{', '.join(f'{k} {v}' for k, v in r['excluded'].most_common(5))})")
+    print(f"  NEW         {r['new']}")
+    print(f"  qualified   {r['qualified']}")
+    if r["delisted"] or r["demoted"]:
+        print(f"  closed out  {r['delisted']} delisted, {r['demoted']} no longer qualify")
     dropped = store.dropped_to_zero(con)
     if dropped:
         print(f"\n  !! {len(dropped)} source(s) returned 0 but had postings last run "
@@ -263,8 +164,8 @@ def cmd_audit(args) -> None:
     _search.set_core_terms(profile.search_terms)
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     keys = load_yaml(KEYS, {})
-    all_jobs, _, _, _, _ = _fetch_all(reg, keys, None, employers_only=args.employers,
-                                feeds_only=False)
+    all_jobs = _pull.fetch_all(reg, keys, None, employers_only=args.employers,
+                               feeds_only=False)["jobs"]
     import re as _re
     flt = _re.compile(args.grep, _re.I) if args.grep else None
     kills = Counter()
