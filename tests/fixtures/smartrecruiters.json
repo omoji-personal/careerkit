@@ -1,0 +1,71 @@
+{
+ "offset": 0,
+ "limit": 100,
+ "totalFound": 1,
+ "content": [
+  {
+   "id": "743999671674844",
+   "name": "CNA  / LPN - Consistent Hours. Start Next Week.",
+   "uuid": "0761de07-8adc-465d-af91-905f0df48ec1",
+   "jobAdId": "94d67882-f96d-4aa8-b331-b2edb903a96a",
+   "defaultJobAd": true,
+   "refNumber": "REF30D",
+   "company": {
+    "identifier": "Knight",
+    "name": "Knight Gayles"
+   },
+   "releasedDate": "2018-06-08T02:11:28.000Z",
+   "location": {
+    "city": "St. Louis",
+    "region": "MO",
+    "country": "us",
+    "address": "2025 Zumbehl Rd num 306",
+    "postalCode": "63303",
+    "remote": false,
+    "hybrid": false,
+    "fullLocation": "St. Louis, MO, United States"
+   },
+   "industry": {
+    "id": "medical_practice",
+    "label": "Medical Practice"
+   },
+   "department": {},
+   "function": {
+    "id": "health_care_provider",
+    "label": "Health Care Provider"
+   },
+   "typeOfEmployment": {
+    "id": "part-time",
+    "label": "Part-time"
+   },
+   "experienceLevel": {
+    "id": "not_applicable",
+    "label": "Not Applicable"
+   },
+   "customField": [
+    {
+     "fieldId": "COUNTRY",
+     "fieldLabel": "Country/Region",
+     "valueId": "us",
+     "valueLabel": "United States"
+    },
+    {
+     "fieldId": "58b87b7be4b06dbf7dd55192",
+     "fieldLabel": "Brands",
+     "valueId": "default",
+     "valueLabel": "Knight Gayles"
+    }
+   ],
+   "visibility": "PUBLIC",
+   "ref": "https://api.smartrecruiters.com/v1/companies/knight/postings/743999671674844",
+   "creator": {
+    "name": "Human Resources Talent Manager"
+   },
+   "language": {
+    "code": "en",
+    "label": "English",
+    "labelNative": "English (US)"
+   }
+  }
+ ]
+}

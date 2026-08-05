@@ -300,7 +300,11 @@ def findwork(cfg: dict) -> list[Job]:
         return []
     out = []
     for q in TERMS:
-        st, tx = fetch(f"https://findwork.dev/api/jobs/?search={q}&location=usa",
+        # quote_plus, like every other feed here. Interpolated raw, a term
+        # containing "&" ("R&D Manager") ended the query string early and the
+        # board answered a different search than the one asked for, while a
+        # space produced a malformed URL.
+        st, tx = fetch(f"https://findwork.dev/api/jobs/?search={quote_plus(q)}&location=usa",
                        headers={"Authorization": f"Token {key}"})
         if st != 200:
             continue

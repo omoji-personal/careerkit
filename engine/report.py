@@ -13,8 +13,46 @@ from pathlib import Path
 import os
 import datetime as _dt
 
-from .models import sanitize_external
+from .models import ATS_SOURCES, sanitize_external
 OUT_DIR = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "out"
+
+
+def is_new(r) -> bool:
+    """First sighting was THIS run, not merely today.
+
+    "new" used to mean first_seen == last_seen, which is a date comparison. Two
+    pulls on the same day therefore both reported the same roles as new, and the
+    user re-read a list they had already worked through. The run ids answer the
+    question that was actually being asked. Rows written before the run columns
+    existed have no ids, so they fall back to the date test."""
+    keys = r.keys() if hasattr(r, "keys") else []
+    if "first_seen_run" in keys and r["first_seen_run"] is not None:
+        return r["first_seen_run"] == r["last_seen_run"]
+    return r["first_seen"] == r["last_seen"]
+
+
+def _sighting_rank(r) -> tuple:
+    """Which sighting of one role represents it in the report.
+
+    The same opening arrives from the employer's own ATS and from two or three
+    aggregators, all scoring identically. Whichever the database happened to
+    return first used to win, so the URL the user clicked was arbitrary between
+    runs. It should never be arbitrary: the employer's ATS link is the canonical
+    application, while an aggregator link is a redirect that can be stale,
+    tracking-wrapped, or dead while the role is still open.
+
+    Order: highest score, then employer ATS over aggregator, then the sighting
+    carrying the most usable detail, then uid so the result is total and two
+    runs over unchanged data produce byte-identical reports."""
+    src = (r["source"] or "").lower()
+    return (
+        -(r["score"] or 0),
+        0 if src in ATS_SOURCES else 1,
+        0 if r["comp_min"] else 1,
+        0 if (r["location"] or "").strip() else 1,
+        -len(r["description"] or "") if "description" in r.keys() else 0,
+        r["uid"] or "",
+    )
 
 
 def _group(rows: list[sqlite3.Row]) -> list[list[sqlite3.Row]]:
@@ -29,8 +67,13 @@ def _group(rows: list[sqlite3.Row]) -> list[list[sqlite3.Row]]:
     by: dict = {}
     for r in rows:
         by.setdefault(r["group_key"] or r["uid"], []).append(r)
-    out = [sorted(v, key=lambda x: -x["score"]) for v in by.values()]
-    out.sort(key=lambda g: (-g[0]["score"], g[0]["company"]))
+    out = [sorted(v, key=_sighting_rank) for v in by.values()]
+    # Total order: score, then company, then group key. Without the last term
+    # two groups tying on both sorted by insertion order, so the report's
+    # numbering shuffled between runs on unchanged data and diffing two reports
+    # was useless.
+    out.sort(key=lambda g: (-g[0]["score"], g[0]["company"].lower(),
+                            g[0]["group_key"] or g[0]["uid"]))
     return out
 
 
@@ -41,7 +84,7 @@ def _row_block(rows: list[sqlite3.Row], idx: int) -> str:
         comp = f"${r['comp_min']:,}" + (f" - ${r['comp_max']:,}" if r["comp_max"] else "+")
     else:
         comp = "not stated"
-    age = "NEW" if r["first_seen"] == r["last_seen"] else f"first seen {r['first_seen']}"
+    age = "NEW" if is_new(r) else f"first seen {r['first_seen']}"
     lines = [
         f"### {idx}. {sanitize_external(r['title'], 120)} - {sanitize_external(r['company'], 60)}"
         + (f"  ({len(rows)} open reqs)" if len(rows) > 1 else "")
@@ -75,7 +118,7 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     today = date.today().isoformat()
     path = OUT_DIR / (filename or f"sourcing-{today}.md")
 
-    new_rows = [r for r in rows if r["first_seen"] == r["last_seen"]]
+    new_rows = [r for r in rows if is_new(r)]
     qual = _group([r for r in rows if r["gate"] == "QUALIFIED"])
     verify = _group([r for r in rows if r["gate"] == "VERIFY"])
 

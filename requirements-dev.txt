@@ -1,0 +1,5 @@
+# Development. ./setup.sh installs these too, because the regression suite is
+# what stops shipped bugs from coming back and running it should never require
+# a second setup step.
+-r requirements.txt
+pytest>=8.0

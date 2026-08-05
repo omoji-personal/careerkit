@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       # No network in CI: every test uses synthetic payloads and a throwaway
       # database, which is also what keeps them honest.
       - run: python -m pytest tests/ -q

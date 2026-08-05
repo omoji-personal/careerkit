@@ -122,6 +122,16 @@ Claude does this for you, but it is a normal CLI:
 
 `./run-tests.sh` runs the regression suite. Every test in it locks down a bug
 that actually shipped, so it is worth keeping green if you change the engine.
+It also runs each adapter against a saved real payload, so a job board changing
+its JSON shape fails a test instead of quietly returning nothing.
+
+`./careerkit.py status` additionally reports where the database and your
+`tracker.md` disagree: an application recorded in one but not the other. Those
+two do drift, and a role missing from the database resurfaces later as a fresh
+find you have already acted on.
+
+To install it as an ordinary command instead (`careerkit pull`), run
+`pip install -e .`.
 
 ## License
 

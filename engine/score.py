@@ -20,6 +20,7 @@ the profile and move to the human-screening stage.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -132,7 +133,7 @@ QUOTA = re.compile(
     r"pipeline generation|prospecting|net new business)\b", re.I)
 
 # Comp.
-_MONEY = re.compile(r"\$\s?(\d{2,3})(?:,(\d{3}))?(?:\s?[kK])?(?:\.\d+)?")
+_MONEY = re.compile(r"\$\s?(\d{1,3})(?:,(\d{3}))?(?:\s?[kK])?(?:\.\d+)?")
 _RANGE_CTX = re.compile(
     r"(base (salary|pay|compensation)|salary range|pay range|compensation range|"
     r"hiring range|target salary|annual (salary|base))", re.I)
@@ -148,6 +149,100 @@ def _is_word_char(c: str) -> bool:
 
 class ProfileError(ValueError):
     """A profile rule could not be compiled and silence would be unsafe."""
+
+
+# The shape the loader actually reads. Anything the loader ignores is a key the
+# user believes is doing work: `screen-floor` instead of `screen_floor` leaves
+# the comp floor at 0, `metro` instead of `metros` turns off metro scoring, and
+# both fail silently while producing a plausible-looking report. Values are the
+# accepted Python types after YAML parsing.
+PROFILE_SCHEMA: dict = {
+    "comp": {"screen_floor": (int, float), "accept_floor": (int, float)},
+    "location": {"remote_us": bool, "relocation": bool, "metros": list,
+                 "home_metro": str, "states": list},
+    "exclusions": {"titles": list, "products": list, "certs_refused": list,
+                   "body_patterns": list, "competing_platforms": list,
+                   "clearance": bool, "quota": bool, "companies": list},
+    "lanes": list, "dream_lanes": list, "dream_companies": list,
+    "search_terms": list, "lane_title_context": dict, "signals": list,
+    "domain_terms": list, "notes": str,
+    # Read by the application and outreach skills rather than the scorer. They
+    # belong in the schema anyway: a typo in `work_auth` is how a form answer
+    # goes missing, and validating only the scorer's half would flag the
+    # shipped template as full of unknown keys.
+    "autonomy": {"submit": str, "outreach": str, "linkedin_edits": str,
+                 "policy": str, "ask_each": bool, "auto_apply": bool},
+    "identity": {"name": str, "email": str, "phone": str, "city": str,
+                 "state": str, "linkedin": str, "website": str, "github": str},
+    "work_auth": {"authorized_us": bool, "sponsorship": (bool, str), "visa": str},
+    "eeo": {"gender": str, "race": str, "hispanic": str, "veteran": str,
+            "disability": str, "policy": str},
+}
+_LANE_KEYS = {"key", "titles", "weight", "label", "note"}
+
+
+def _closest(key: str, known) -> str:
+    """Nearest known key by cheap edit distance, so the warning is actionable."""
+    import difflib
+    m = difflib.get_close_matches(key, list(known), n=1, cutoff=0.6)
+    return f" (did you mean '{m[0]}'?)" if m else ""
+
+
+def validate_profile(cfg: dict) -> list[str]:
+    """Return human-readable problems with a parsed profile.
+
+    Structural mistakes raise (a rule the engine cannot honour must never be
+    silently skipped); unknown or misspelled keys are returned as warnings so a
+    profile with one typo still runs."""
+    warn: list[str] = []
+    if not isinstance(cfg, dict):
+        raise ProfileError("profile.yaml must be a mapping at the top level, "
+                           f"got {type(cfg).__name__}.")
+    for key, val in cfg.items():
+        if key not in PROFILE_SCHEMA:
+            warn.append(f"unknown key '{key}'{_closest(key, PROFILE_SCHEMA)} - ignored")
+            continue
+        spec = PROFILE_SCHEMA[key]
+        if isinstance(spec, dict):
+            if val is None:
+                continue
+            if not isinstance(val, dict):
+                raise ProfileError(f"profile.yaml: '{key}' must be a mapping, "
+                                   f"got {type(val).__name__}.")
+            for sub, sval in val.items():
+                if sub not in spec:
+                    warn.append(f"unknown key '{key}.{sub}'{_closest(sub, spec)} - ignored")
+                elif sval is not None and not isinstance(sval, spec[sub]):
+                    raise ProfileError(
+                        f"profile.yaml: '{key}.{sub}' must be "
+                        f"{getattr(spec[sub], '__name__', 'one of ' + str(spec[sub]))}, "
+                        f"got {type(sval).__name__} ({sval!r}).")
+        elif val is not None and not isinstance(val, spec):
+            raise ProfileError(f"profile.yaml: '{key}' must be {spec.__name__}, "
+                               f"got {type(val).__name__}.")
+    for section in ("lanes", "dream_lanes"):
+        for i, lane in enumerate(cfg.get(section) or []):
+            where = f"{section}[{i}]"
+            if not isinstance(lane, dict):
+                raise ProfileError(f"profile.yaml: {where} must be a mapping with "
+                                   f"'titles', got {type(lane).__name__}.")
+            if not lane.get("titles"):
+                # A lane with no titles matches nothing, so the whole lane is
+                # dead weight the user thinks is live.
+                warn.append(f"{where} ('{lane.get('key', '?')}') has no titles - "
+                            "it can never match a posting")
+            for k in lane:
+                if k not in _LANE_KEYS:
+                    warn.append(f"unknown key '{where}.{k}'{_closest(k, _LANE_KEYS)} - ignored")
+    comp = cfg.get("comp") or {}
+    if comp.get("accept_floor") and comp.get("screen_floor") and \
+            comp["accept_floor"] < comp["screen_floor"]:
+        warn.append(f"comp.accept_floor ({comp['accept_floor']}) is below "
+                    f"comp.screen_floor ({comp['screen_floor']}) - screening is "
+                    "stricter than accepting, which is probably backwards")
+    if not (cfg.get("lanes") or cfg.get("dream_lanes")):
+        warn.append("no lanes defined - nothing can score above the title gate")
+    return warn
 
 
 # Strings no sane rule should match. A pattern that matches all of these is
@@ -252,6 +347,8 @@ class Profile:
     @classmethod
     def load(cls, path: str | Path) -> "Profile":
         cfg = yaml.safe_load(Path(path).read_text()) or {}
+        for problem in validate_profile(cfg):
+            print(f"  profile warning: {problem}", file=sys.stderr)
         comp = cfg.get("comp") or {}
         loc = cfg.get("location") or {}
         exc = cfg.get("exclusions") or {}
@@ -320,21 +417,42 @@ def extract_comp(job: Job) -> tuple[int | None, int | None]:
     for m in _RANGE_CTX.finditer(text):
         window = text[m.start(): m.start() + 320]
         hourly = bool(re.search(r"\bper hour\b|/\s?h(?:ou)?r\b|\bhourly\b", window, re.I))
-        vals = []
+        weekly = bool(re.search(r"\bper week\b|/\s?w(?:ee)?k\b|\bweekly\b", window, re.I))
+        monthly = bool(re.search(r"\bper month\b|/\s?mo(?:nth)?\b|\bmonthly\b", window, re.I))
+        # A bare 2-3 digit figure is only shorthand for thousands when the window
+        # says so. Without this a "$500 home office stipend" sitting next to a
+        # salary line was read as $500,000 and inflated the band.
+        thousands_ok = bool(re.search(r"\d\s?[kK]\b", window)) or bool(
+            re.search(r"\$\s?\d{2,3},\d{3}", window))
+        vals, explicit = [], []
         for mm in _MONEY.finditer(window):
             a, b = mm.group(1), mm.group(2)
             raw = int(a + b) if b else int(a)
             if hourly and raw < 500:
                 v = raw * 2080
+            elif weekly and raw < 20_000:
+                v = raw * 52
+            elif monthly and raw < 60_000:
+                v = raw * 12
+            elif b:
+                v = raw
+            elif thousands_ok:
+                v = raw * 1000
             else:
-                v = raw if b else raw * 1000
+                continue        # a bare small figure with no thousands signal
             if 40_000 <= v <= 1_500_000:   # 500k dropped real exec bands whole
                 vals.append(v)
-        if len(vals) >= 2:
-            best = [min(vals), max(vals)]
+                if b or re.match(r"\$\s?\d{1,3}\s?[kK]", mm.group(0)):
+                    explicit.append(v)      # states its own magnitude
+        # A figure that states its own magnitude (a comma or a k suffix) beats a
+        # bare one in the same window. Otherwise a "$500 home office stipend"
+        # next to a real band was read as $500,000 and inflated the maximum.
+        use = explicit if len(explicit) >= 2 else vals
+        if len(use) >= 2:
+            best = [min(use), max(use)]
             break
-        if vals and not best:
-            best = vals[:1]
+        if use and not best:
+            best = use[:1]
     if not best:
         return None, None
     return (best[0], best[-1] if len(best) > 1 else None)

@@ -166,6 +166,52 @@ def connect() -> sqlite3.Connection:
     return con
 
 
+class RunLock:
+    """One mutating run at a time, per database.
+
+    A pull takes minutes and writes throughout. Two of them (a scheduled run and
+    the user asking Claude to search) interleaved: both read the same rows, both
+    counted misses against them, and reconcile() retired postings that the other
+    run had just re-sighted. SQLite's own locking serializes individual writes,
+    which is not the same as serializing a run.
+
+    Advisory and best-effort by design. If the lock file cannot be created the
+    run proceeds rather than refusing to work."""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or DB_PATH.with_suffix(".lock")
+        self._fh = None
+
+    def __enter__(self):
+        import fcntl
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._fh = open(self.path, "w")
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._fh.write(str(os.getpid()))
+            self._fh.flush()
+        except BlockingIOError:
+            if self._fh:
+                self._fh.close()
+                self._fh = None
+            raise RuntimeError(
+                f"another CareerKit run is already writing to {DB_PATH.name}. "
+                f"Wait for it to finish, or remove {self.path} if no run is active.")
+        except (OSError, ImportError):
+            self._fh = None      # unlockable filesystem: proceed unprotected
+        return self
+
+    def __exit__(self, *exc):
+        if self._fh:
+            import fcntl
+            try:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._fh.close()
+                self._fh = None
+        return False
+
+
 def upsert(con: sqlite3.Connection, jobs: list[Job],
            run_id: int | None = None) -> tuple[list[Job], list[Job]]:
     """Insert or refresh. Returns (new_jobs, seen_again)."""

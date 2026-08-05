@@ -995,3 +995,321 @@ def test_new_is_scoped_to_the_run_not_the_calendar_day(db):
     store.upsert(db, [j], run_id=r2)
     row = db.execute("SELECT * FROM jobs").fetchone()
     assert not store.is_new_this_run(row, r2), "still NEW on the second run of the day"
+
+
+@pytest.mark.parametrize("body,want", [
+    ("salary range $120,000 - $150,000", (120_000, 150_000)),
+    # 500k discarded real exec bands whole, so the role read as comp-unknown
+    ("salary range $600,000 - $700,000", (600_000, 700_000)),
+    # a bare figure beside a real band was multiplied by 1000 and inflated the max
+    ("base salary $120,000 - $150,000 plus a $500 home office stipend", (120_000, 150_000)),
+    ("salary range $120k - $150k", (120_000, 150_000)),
+    ("salary range $55 - $70 per hour", (114_400, 145_600)),
+    ("Founded in 2019. Base salary depends on experience.", (None, None)),
+])
+def test_comp_parsing_edges(body, want):
+    from engine.score import extract_comp
+    assert extract_comp(J(description=body)) == want
+
+
+# --------------------------------------------------------------------------
+# profile.yaml schema validation (CK-009)
+# --------------------------------------------------------------------------
+
+def test_profile_typo_is_reported_not_silently_ignored():
+    """`screen-floor` instead of `screen_floor` left the comp floor at 0 and
+    the run looked completely normal."""
+    from engine.score import validate_profile
+    warns = validate_profile({"comp": {"screen-floor": 150000},
+                              "lanes": [{"key": "a", "titles": ["x"]}]})
+    assert any("screen-floor" in w for w in warns)
+    assert any("screen_floor" in w for w in warns), "warning should name the fix"
+
+
+def test_profile_wrong_type_raises_rather_than_scoring_wrong():
+    from engine.score import validate_profile, ProfileError
+    with pytest.raises(ProfileError):
+        validate_profile({"location": {"metros": "Atlanta"}})     # str, not list
+    with pytest.raises(ProfileError):
+        validate_profile({"exclusions": ["senior"]})              # list, not map
+    with pytest.raises(ProfileError):
+        validate_profile({"lanes": ["Product Manager"]})          # str, not lane map
+
+
+def test_profile_lane_without_titles_is_flagged():
+    from engine.score import validate_profile
+    warns = validate_profile({"lanes": [{"key": "pm", "weight": 40}]})
+    assert any("no titles" in w for w in warns)
+
+
+def test_profile_backwards_comp_floors_flagged():
+    from engine.score import validate_profile
+    warns = validate_profile({"comp": {"screen_floor": 180000, "accept_floor": 120000},
+                              "lanes": [{"key": "a", "titles": ["x"]}]})
+    assert any("backwards" in w for w in warns)
+
+
+def test_valid_profile_produces_no_warnings():
+    from engine.score import validate_profile
+    assert validate_profile({
+        "comp": {"screen_floor": 150000, "accept_floor": 165000},
+        "location": {"remote_us": True, "metros": ["Atlanta"], "relocation": False},
+        "exclusions": {"titles": ["intern"], "clearance": True},
+        "lanes": [{"key": "sf", "titles": ["Salesforce"], "weight": 40}],
+        "search_terms": ["salesforce"],
+    }) == []
+
+
+def test_the_authors_own_profile_validates_if_present():
+    """The template ships with a real profile shape; a schema that rejects it
+    is a schema bug, not a profile bug."""
+    import pathlib, yaml
+    from engine.score import validate_profile
+    p = pathlib.Path(__file__).parent.parent / "profile.example" / "profile.yaml"
+    if not p.exists():
+        pytest.skip("no example profile")
+    assert validate_profile(yaml.safe_load(p.read_text()) or {}) == []
+
+
+# --------------------------------------------------------------------------
+# deterministic merge (CK-008)
+# --------------------------------------------------------------------------
+
+def _sight(**kw):
+    """A stand-in for one sqlite3.Row sighting of a role."""
+    base = {"uid": "u1", "group_key": "g1", "score": 70, "source": "greenhouse",
+            "company": "Acme", "title": "PM", "url": "https://x", "location": "Atlanta, GA",
+            "comp_min": None, "description": ""}
+    base.update(kw)
+
+    class R(dict):
+        def keys(self): return list(super().keys())
+        def __getitem__(self, k): return super().__getitem__(k)
+    return R(base)
+
+
+def test_employer_ats_sighting_represents_the_role_not_the_aggregator():
+    """Both sightings score the same; whichever the DB returned first used to
+    win, so the URL the user clicked changed between runs."""
+    from engine.report import _group
+    agg = _sight(uid="a", source="jobspy", url="https://aggregator/redirect")
+    ats = _sight(uid="b", source="greenhouse", url="https://boards.greenhouse.io/acme/1")
+    for order in ([agg, ats], [ats, agg]):
+        assert _group(order)[0][0]["url"] == "https://boards.greenhouse.io/acme/1"
+
+
+def test_grouping_is_stable_under_input_permutation():
+    from engine.report import _group
+    import itertools
+    rows = [_sight(uid=f"u{i}", group_key=f"g{i}", score=s, company=c)
+            for i, (s, c) in enumerate([(80, "Beta"), (80, "Alpha"), (70, "Zeta"), (80, "Alpha")])]
+    shapes = {tuple(g[0]["uid"] for g in _group(list(p)))
+              for p in itertools.islice(itertools.permutations(rows), 24)}
+    assert len(shapes) == 1, f"report order depends on input order: {shapes}"
+
+
+def test_richer_sighting_wins_within_the_same_source_class():
+    from engine.report import _group
+    bare = _sight(uid="a", source="lever", location="", comp_min=None)
+    rich = _sight(uid="b", source="lever", location="Atlanta, GA", comp_min=150000)
+    assert _group([bare, rich])[0][0]["uid"] == "b"
+
+
+# --------------------------------------------------------------------------
+# tracker.md vs database drift (CK-004)
+# --------------------------------------------------------------------------
+
+def test_tracker_drift_detects_both_directions(db, tmp_path, monkeypatch):
+    """Two writers, no reconciliation: a role applied in tracker.md but not the
+    database resurfaces in the next report as a fresh opportunity."""
+    import importlib
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    tracker = tmp_path / "tracker.md"
+    tracker.write_text(
+        "## APPLIED\n"
+        "- 2026-08-01 Acme, PM https://boards.greenhouse.io/acme/1\n"
+        "## SEEN\n"
+        "- Beta https://jobs.lever.co/beta/2\n")
+    monkeypatch.setattr(ck, "TRACKER", tracker)
+
+    j1 = J(company="Acme", title="PM", url="https://boards.greenhouse.io/acme/1")
+    j2 = J(company="Gamma", title="PM", url="https://boards.greenhouse.io/gamma/9")
+    store.upsert(db, [j1, j2])
+    store.set_status(db, j2.uid, "applied")      # in the DB, absent from tracker
+
+    d = ck.tracker_drift(db)
+    assert [r["company"] for r in d["missing_from_tracker"]] == ["Gamma"]
+    assert [u for u, _ in d["missing_from_db"]] == ["https://boards.greenhouse.io/acme/1"]
+
+
+def test_tracker_drift_is_quiet_when_the_two_agree(db, tmp_path, monkeypatch):
+    import importlib
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    j = J(company="Acme", title="PM", url="https://boards.greenhouse.io/acme/1")
+    store.upsert(db, [j])
+    store.set_status(db, j.uid, "applied")
+    t = tmp_path / "tracker.md"
+    t.write_text("## APPLIED\n- 2026-08-01 Acme https://boards.greenhouse.io/acme/1\n")
+    monkeypatch.setattr(ck, "TRACKER", t)
+    d = ck.tracker_drift(db)
+    assert not d["missing_from_tracker"] and not d["missing_from_db"]
+
+
+def test_tracker_drift_survives_a_missing_tracker(db, tmp_path, monkeypatch):
+    import importlib
+    ck = importlib.import_module("careerkit")
+    monkeypatch.setattr(ck, "TRACKER", tmp_path / "nope.md")
+    assert ck.tracker_drift(db)["tracker_exists"] is False
+
+
+# --------------------------------------------------------------------------
+# run-based "new" (CK-010) and run locking (CK-011)
+# --------------------------------------------------------------------------
+
+def test_a_second_pull_the_same_day_does_not_re_announce_everything(db):
+    """'new' meant first_seen == last_seen, a DATE test, so two runs in one day
+    both reported the same roles as new."""
+    from engine import store
+    from engine.report import is_new
+    r1 = store.start_run(db)
+    j = J(company="Acme", title="PM", url="https://b/1")
+    store.upsert(db, [j], run_id=r1)
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert is_new(row), "first sighting must read as new"
+
+    r2 = store.start_run(db)
+    store.upsert(db, [j], run_id=r2)
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert row["first_seen"] == row["last_seen"], "same calendar day, by construction"
+    assert not is_new(row), "second run the same day must not re-announce it"
+
+
+def test_run_lock_refuses_a_concurrent_writer(tmp_path):
+    """Two pulls interleaved: both counted misses against the same rows and
+    reconcile() retired postings the other run had just re-sighted."""
+    from engine import store
+    lock = tmp_path / "jobs.lock"
+    with store.RunLock(lock):
+        with pytest.raises(RuntimeError, match="already writing"):
+            with store.RunLock(lock):
+                pass
+    with store.RunLock(lock):        # released, so the next run proceeds
+        pass
+
+
+# --------------------------------------------------------------------------
+# resolver / adapter / skill parity (CK-013, CK-018)
+# --------------------------------------------------------------------------
+
+def test_every_ats_the_resolver_recognises_has_an_adapter():
+    """Discovery resolves an employer to an ATS name and writes it into the
+    registry. If nothing can poll that name the employer is added and then
+    silently never fetched, which reads as 'that company has no openings'."""
+    import re as _re
+    from engine import adapters
+    src = (ROOT / "engine" / "search.py").read_text()
+    named = set(_re.findall(r'"ats":\s*"([a-z_]+)"', src))
+    named |= set(_re.findall(r'ats\s*=\s*"([a-z_]+)"', src))
+    missing = sorted(named - set(adapters.REGISTRY) - {"", "unknown"})
+    assert not missing, f"resolver can produce ATS names with no adapter: {missing}"
+
+
+def test_every_documented_cli_command_exists():
+    """README and the skills tell the user (and Claude) to run these. A command
+    that was renamed leaves instructions that fail at the moment of use."""
+    import re as _re
+    import subprocess
+    registered = set(_re.findall(r'sub\.add_parser\("([a-z-]+)"',
+                                 (ROOT / "careerkit.py").read_text()))
+    docs = [ROOT / "README.md", ROOT / "CLAUDE.md"]
+    docs += sorted((ROOT / ".claude" / "skills").glob("*/SKILL.md"))
+    referenced = set()
+    for d in docs:
+        if d.exists():
+            referenced |= set(_re.findall(r"careerkit\.py\s+([a-z][a-z-]+)", d.read_text()))
+    unknown = sorted(referenced - registered)
+    assert not unknown, f"documented commands that do not exist: {unknown}"
+
+
+def test_mark_rejects_an_invalid_status_at_the_cli():
+    """A typo'd status used to leave the job in the active list while the user
+    believed it was filed."""
+    from engine.store import VALID_STATUS
+    import re as _re
+    src = (ROOT / "careerkit.py").read_text()
+    m = _re.search(r'sub\.add_parser\("mark"\)(.*?)\n\n', src, _re.S)
+    assert m and "VALID_STATUS" in m.group(1), \
+        "mark should constrain status to VALID_STATUS in argparse, not only in the store"
+    assert set(VALID_STATUS) >= {"applied", "rejected"}
+
+
+# --------------------------------------------------------------------------
+# HTTP diagnostics (CK-014)
+# --------------------------------------------------------------------------
+
+def test_a_200_html_block_page_is_not_read_as_no_openings(monkeypatch):
+    """A WAF challenge and an SSO redirect both return 200 with HTML. Treated
+    as an empty board they look exactly like 'this employer has nothing open',
+    and the board drops out of coverage without ever failing."""
+    from engine import http
+    monkeypatch.setattr(http, "fetch",
+                        lambda url, **k: (200, "<html>Access Denied</html>"))
+    assert http.fetch_json("https://x/y") is None
+    assert http.last_parse_ok() is False, "parse failure must be distinguishable"
+
+
+def test_valid_json_records_a_successful_parse(monkeypatch):
+    from engine import http
+    monkeypatch.setattr(http, "fetch", lambda url, **k: (200, '{"jobs": []}'))
+    assert http.fetch_json("https://x/y") == {"jobs": []}
+    assert http.last_parse_ok() is True
+
+
+def test_retry_is_bounded_and_does_not_hammer_a_rate_limited_board(monkeypatch):
+    """A 429 must not be retried indefinitely; a 5xx gets the bounded retry."""
+    from engine import http
+    calls = {"n": 0}
+
+    class Resp:
+        def __init__(self, code): self.status_code, self.text = code, ""
+
+    def fake_request(method, url, **kw):
+        calls["n"] += 1
+        return Resp(429)
+
+    monkeypatch.setattr(http._session, "request", fake_request)
+    monkeypatch.setattr(http.time, "sleep", lambda s: None)
+    monkeypatch.setattr(http, "_throttle", lambda url: None)
+    status, _ = http.fetch("https://x/rate-limited", use_cache=False)
+    assert status == 429
+    assert calls["n"] == 1, f"429 should not be retried, made {calls['n']} requests"
+
+    calls["n"] = 0
+    monkeypatch.setattr(http._session, "request",
+                        lambda m, u, **k: Resp(503))
+    http.fetch("https://x/down", use_cache=False, tries=2)
+    assert calls["n"] <= 2, "retries must stay bounded"
+
+
+def test_every_search_term_in_a_query_string_is_url_encoded():
+    """One feed interpolated the term raw while every sibling encoded it. A term
+    containing "&" ("R&D Manager") ended the query string early, so the board
+    answered a different search than the one asked for and the wrong result set
+    looked perfectly normal."""
+    import re as _re
+    bad = []
+    for f in ("engine/aggregators.py", "engine/search.py", "engine/adapters.py"):
+        for n, line in enumerate((ROOT / f).read_text().splitlines(), 1):
+            if "http" not in line:
+                continue
+            # a {var} landing in a query string without an encoder around it
+            # only free-text parameters: a page number or a GUID needs no
+            # encoding, and flagging those would make the guard noise.
+            for m in _re.finditer(
+                    r"[?&](search|q|query|keywords?|tag|term|Keyword)=\{([a-z_]+)\}",
+                    line, _re.I):
+                if not _re.search(r"(quote_plus|quote|urlencode)\(", line):
+                    bad.append(f"{f}:{n}: {line.strip()[:90]}")
+    assert not bad, "unencoded search terms in a query string:\n" + "\n".join(bad)

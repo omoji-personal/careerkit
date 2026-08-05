@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "careerkit"
+version = "1.0.0"
+description = "A job search run by Claude Code, with a real sourcing engine underneath"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = ["PyYAML>=6.0", "requests>=2.31"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+# Adds Indeed / ZipRecruiter / Glassdoor / Google. Optional on purpose: these
+# read public search pages rather than official APIs.
+scrape = ["python-jobspy>=1.1.80"]
+
+[project.scripts]
+careerkit = "careerkit:main"
+
+[tool.setuptools]
+py-modules = ["careerkit"]
+
+[tool.setuptools.packages.find]
+include = ["engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

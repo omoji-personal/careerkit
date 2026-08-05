@@ -73,6 +73,7 @@ ROOT = Path(__file__).resolve().parent
 PROFILE = ROOT / "profile" / "profile.yaml"
 EMPLOYERS = ROOT / "profile" / "employers.yaml"
 KEYS = ROOT / "profile" / "keys.yaml"
+TRACKER = ROOT / "profile" / "tracker.md"
 
 
 def load_yaml(p: Path, default):
@@ -452,6 +453,19 @@ def cmd_status(args) -> None:
               f"(possible schema change):")
         for d in dropped[:20]:
             print(f"  {d['source']:<46} was {d['prev_count']}")
+    drift = tracker_drift(con)
+    if drift["missing_from_db"]:
+        print(f"\n{len(drift['missing_from_db'])} role(s) tracked as applied in "
+              f"tracker.md but not in the database - these will resurface as new:")
+        for url, sect in drift["missing_from_db"][:15]:
+            print(f"  [{sect}] {url}")
+        print("  fix: ./careerkit.py mark <uid> applied")
+    if drift["missing_from_tracker"]:
+        print(f"\n{len(drift['missing_from_tracker'])} application(s) in the database "
+              f"with no tracker.md entry (no date, contact, or resume version recorded):")
+        for r in drift["missing_from_tracker"][:15]:
+            print(f"  {r['company']} - {r['title']}  ({r['status']})")
+
     broken = list(con.execute(
         "SELECT * FROM source_health WHERE consecutive_failures >= 2 "
         "ORDER BY consecutive_failures DESC"))
@@ -459,6 +473,49 @@ def cmd_status(args) -> None:
         print(f"\n{len(broken)} sources failing repeatedly (silent coverage loss):")
         for b in broken[:20]:
             print(f"  {b['source']:<46} x{b['consecutive_failures']}  {(b['last_error'] or '')[:50]}")
+
+
+def tracker_drift(con) -> dict:
+    """Where the database and profile/tracker.md disagree.
+
+    Two things record the pipeline and neither knows about the other. The
+    database is written by `mark` and is what suppresses a role from future
+    reports; tracker.md is written by the skills and is what the user and the
+    agent actually read. They drift in both directions and both hurt:
+
+      - applied in the database, missing from tracker.md: the human record of
+        an application the user made has no date, no contact, no resume version.
+      - in tracker.md under APPLIED, not applied in the database: the role is
+        still 'new' to the engine, so it resurfaces in the next report as an
+        opportunity the user already took.
+
+    Matching is by URL, which is the only identifier both sides carry."""
+    import re as _re
+    text = TRACKER.read_text() if TRACKER.exists() else ""
+    section, in_tracker = "", {}
+    for line in text.splitlines():
+        # Real headings carry a parenthetical ("## APPLIED (do not resurface)"),
+        # so anchoring the caps run to end-of-line matched nothing and every URL
+        # fell into an unnamed section - the check reported zero drift forever.
+        h = _re.match(r"^#{1,4}\s*([A-Z][A-Z /-]*[A-Z])\b", line.strip())
+        if h:
+            section = h.group(1).strip()
+            continue
+        for url in _re.findall(r"https?://[^\s)\]>,]+", line):
+            in_tracker.setdefault(url.rstrip(".,"), section)
+
+    db_applied, missing_from_tracker, missing_from_db = {}, [], []
+    for r in con.execute("SELECT uid, url, company, title, status FROM jobs "
+                         "WHERE status IN ('applied','rejected')"):
+        db_applied[r["url"]] = r
+        if r["url"] not in in_tracker:
+            missing_from_tracker.append(r)
+    for url, sect in in_tracker.items():
+        if sect in ("APPLIED", "INTERVIEWING") and url not in db_applied:
+            missing_from_db.append((url, sect))
+    return {"missing_from_tracker": missing_from_tracker,
+            "missing_from_db": missing_from_db,
+            "tracker_exists": TRACKER.exists()}
 
 
 def cmd_db(args) -> None:
@@ -539,13 +596,26 @@ def main() -> None:
     sp.add_argument("action", choices=["check", "backup"])
 
     sp = sub.add_parser("mark"); sp.set_defaults(fn=cmd_mark)
-    sp.add_argument("uid"); sp.add_argument("status"); sp.add_argument("--notes")
+    # choices, not a free string: argparse rejects a typo before the database
+    # is touched and prints the valid set, instead of failing later or silently.
+    sp.add_argument("uid"); sp.add_argument("status", choices=store.VALID_STATUS)
+    sp.add_argument("--notes")
 
     args = p.parse_args()
+    # Commands that write are serialized against each other; read-only ones stay
+    # usable while a long pull is running.
+    MUTATING = {"pull", "audit", "discover", "ingest-url", "ingest-urls",
+                "verify", "mark"}
     try:
-        args.fn(args)
+        if args.cmd in MUTATING:
+            with store.RunLock():
+                args.fn(args)
+        else:
+            args.fn(args)
     except KeyboardInterrupt:
         sys.exit("\nStopped.")
+    except RuntimeError as e:
+        sys.exit(str(e))
     except FileNotFoundError as e:
         sys.exit(f"File not found: {e.filename}")
     except yaml.YAMLError as e:

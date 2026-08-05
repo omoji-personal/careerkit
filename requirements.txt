@@ -1,9 +1,7 @@
+# Runtime only. Test tooling lives in requirements-dev.txt so installing
+# CareerKit to USE it does not pull a test framework.
 PyYAML>=6.0
 requests>=2.31
-
-# Runs ./run-tests.sh. Small, and the suite is the thing that stops shipped
-# bugs from coming back, so it is not optional in practice.
-pytest>=8.0
 
 # Optional. Adds Indeed / ZipRecruiter / Glassdoor / Google via the `jobspy`
 # feed. Everything else works without it; the feed reports itself as dormant

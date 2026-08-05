@@ -47,7 +47,7 @@ fi
 # shellcheck disable=SC1091
 . .venv/bin/activate
 python -m pip install --quiet --upgrade pip
-python -m pip install --quiet -r requirements.txt
+python -m pip install --quiet -r requirements-dev.txt
 echo "  dependencies installed into .venv"
 
 mkdir -p profile data out
