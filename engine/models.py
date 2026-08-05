@@ -66,12 +66,18 @@ class Job:
     reasons: list[str] = field(default_factory=list)
 
     @property
+    def _basis(self) -> str:
+        return f"{self.company.lower().strip()}|{_norm_title(self.title)}"
+
+    @property
     def group_key(self) -> str:
         """Company + normalized title. The same role arrives via the employer
         ATS, two aggregators and a repost; this is what makes them ONE entry in
-        the report instead of four."""
-        basis = f"{self.company.lower().strip()}|{_norm_title(self.title)}"
-        return hashlib.sha256(basis.encode()).hexdigest()[:20]
+        the report instead of four.
+
+        This is also byte-identical to the pre-2026-08-05 uid, which is what
+        lets an existing database be migrated in place."""
+        return hashlib.sha256(self._basis.encode()).hexdigest()[:20]
 
     @property
     def uid(self) -> str:
@@ -84,8 +90,13 @@ class Job:
         and location were discarded, and marking the first 'applied' removed
         every sibling from the report permanently. Aggregator sightings keep the
         bare group_key because each aggregator mints its own id, so they still
-        collapse onto one another as before."""
-        basis = self.group_key
+        collapse onto one another as before.
+
+        Built from the raw basis string, NOT from the group_key hash: hashing a
+        hash would make an aggregator's uid differ from its group_key, breaking
+        both the "aggregators still collapse" property and in-place migration
+        of an existing database."""
+        basis = self._basis
         if self.external_id and self.source in ATS_SOURCES:
             basis = f"{basis}|{self.external_id}"
         return hashlib.sha256(basis.encode()).hexdigest()[:20]

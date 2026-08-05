@@ -309,3 +309,59 @@ def test_profile_with_no_usable_lanes_does_not_match_everything():
     p = Profile()
     j = score(J(title="Underwater Basket Weaver"), p)
     assert j.gate == "EXCLUDED"
+
+
+# --------------------------------------------------------------------------
+# Legacy adoption
+# The uid formula changed on 2026-08-05. A pre-change row's uid is exactly the
+# new group_key, so an existing posting must be recognised rather than
+# re-inserted, or every first_seen date resets and applied/rejected status
+# detaches from the job it belongs to.
+# --------------------------------------------------------------------------
+
+def test_legacy_row_is_adopted_not_duplicated(db):
+    from engine import store
+    j = J(external_id="111", location="Denver, CO")
+    # simulate a v1 row: keyed by group_key, with history
+    db.execute("INSERT INTO jobs (uid, group_key, company, title, url, source, gate, "
+               "score, status, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (j.group_key, j.group_key, j.company, j.title, "https://old/1",
+                "greenhouse", "QUALIFIED", 70, "applied", "2026-07-01", "2026-07-30"))
+    db.commit()
+    new, again = store.upsert(db, [j])
+    assert len(new) == 0 and len(again) == 1, "the legacy row was duplicated"
+    rows = list(db.execute("SELECT uid, status, first_seen FROM jobs"))
+    assert len(rows) == 1
+    assert rows[0]["uid"] == j.uid, "row was not re-keyed to the new uid"
+    assert rows[0]["status"] == "applied", "applied status was lost"
+    assert rows[0]["first_seen"] == "2026-07-01", "first_seen was reset"
+
+
+def test_only_one_sibling_adopts_the_legacy_row(db):
+    """The second requisition in a group must insert fresh, not steal history."""
+    from engine import store
+    a = J(external_id="111", location="Denver, CO")
+    b = J(external_id="222", location="Austin, TX")
+    db.execute("INSERT INTO jobs (uid, group_key, company, title, url, source, gate, "
+               "score, status, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (a.group_key, a.group_key, a.company, a.title, "https://old/1",
+                "greenhouse", "QUALIFIED", 70, "applied", "2026-07-01", "2026-07-30"))
+    db.commit()
+    store.upsert(db, [a, b])
+    rows = {r["uid"]: r for r in db.execute("SELECT uid, status FROM jobs")}
+    assert len(rows) == 2
+    assert rows[a.uid]["status"] == "applied"
+    assert rows[b.uid]["status"] == "new", "sibling wrongly inherited applied"
+
+
+def test_aggregator_rows_need_no_adoption(db):
+    from engine import store
+    j = J(source="remotive", external_id="agg-1")
+    assert j.uid == j.group_key
+    db.execute("INSERT INTO jobs (uid, group_key, company, title, url, source, gate, "
+               "score, status, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (j.group_key, j.group_key, j.company, j.title, "u", "remotive",
+                "QUALIFIED", 70, "reviewed", "2026-07-01", "2026-07-30"))
+    db.commit()
+    new, again = store.upsert(db, [j])
+    assert len(new) == 0 and len(again) == 1

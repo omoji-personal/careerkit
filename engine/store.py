@@ -71,6 +71,12 @@ def _migrate(con: sqlite3.Connection) -> None:
         cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    # A pre-2026-08-05 row's uid was sha256(company|normalized_title), which is
+    # exactly what group_key is now. Backfilling it lets upsert recognise an
+    # existing posting under the new uid scheme instead of treating all of them
+    # as brand new, which would erase every first_seen date and detach any
+    # applied/rejected status the user had recorded.
+    con.execute("UPDATE jobs SET group_key = uid WHERE group_key IS NULL")
     con.commit()
 
 
@@ -87,11 +93,31 @@ def connect() -> sqlite3.Connection:
 def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
     """Insert or refresh. Returns (new_jobs, seen_again)."""
     today = date.today().isoformat()
-    new, again = [], []
+    new, again, adopted = [], [], []
     with closing(con.cursor()) as cur:
         for j in jobs:
             cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
             row = cur.fetchone()
+            if row is None and j.uid != j.group_key:
+                # No row under the new uid. Look for a legacy row in the same
+                # group - one still keyed the old way (uid == group_key) - and
+                # adopt it, so its first_seen, status and notes carry forward.
+                # Only the first requisition of a group can adopt; genuinely
+                # distinct siblings insert fresh, which is the point of the
+                # new key.
+                cur.execute("SELECT uid FROM jobs WHERE group_key=? AND uid=group_key "
+                            "LIMIT 1", (j.group_key,))
+                legacy = cur.fetchone()
+                if legacy:
+                    try:
+                        cur.execute("UPDATE jobs SET uid=? WHERE uid=?", (j.uid, legacy["uid"]))
+                        cur.execute("UPDATE OR REPLACE sightings SET uid=? WHERE uid=?",
+                                    (j.uid, legacy["uid"]))
+                        adopted.append(j.uid)
+                        cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
+                        row = cur.fetchone()
+                    except sqlite3.IntegrityError:
+                        row = None
             if row:
                 # url/title/location/description are REFRESHED, not frozen at
                 # first sighting. A board that edits a title or re-issues a
