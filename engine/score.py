@@ -82,10 +82,21 @@ US_EVIDENCE = re.compile(
 #     case-insensitive pattern made a Toronto posting look US-based.
 # Real listings write country and state tokens in caps; English prose does not.
 US_TOKEN = re.compile(
-    r"\b(US|USA|U\.S\.|U\.S\.A\.)\b|"
-    r",\s?(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|"
+    r"\b(USA|U\.S\.|U\.S\.A\.)\b|"
+    r"\((?:US|USA)\)|\bUS[- ]remote\b|\bremote[ -]+US\b|"
+    r",\s?(AL|AK|AZ|CA|CT|FL|GA|HI|IA|KS|KY|LA|ME|MD|MI|MN|"
     r"MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|"
     r"WV|WI|WY|DC)\b")
+# Deliberately ABSENT from US_TOKEN: AR, CO, DE, ID, IL, IN, MA. Each is a US
+# state abbreviation AND an ISO country code, and real boards write "Munich, DE"
+# and "Bangalore, IN" in exactly the same caps as "Denver, CO". Treating those
+# as US evidence suppressed the NON_US rail and presented German and Indian
+# postings as US offices. They are resolved instead by AMBIGUOUS_CC below, which
+# only applies AFTER the NON_US pass has failed to find a foreign city or
+# country - by which point ", CO" really is Colorado.
+# A bare "US" is likewise excluded: it appears in prose ("join US"), and an
+# all-caps title would otherwise manufacture US evidence for a London role.
+# The parenthesised and hyphenated forms above cover the real location idioms.
 # Trailing lowercase ISO country codes; CASE-SENSITIVE on purpose ("Remote, in"
 # is India, "Indianapolis, IN" is not).
 NON_US_CC = re.compile(
@@ -135,8 +146,27 @@ def _is_word_char(c: str) -> bool:
     return c.isalnum() or c == "_"
 
 
+class ProfileError(ValueError):
+    """A profile rule could not be compiled and silence would be unsafe."""
+
+
+# Strings no sane rule should match. A pattern that matches all of these is
+# matching everything, which in an exclusion list means the user silently sees
+# zero jobs. Catches "/.+/", "/ /", "/\\b/" and friends that the empty-string
+# probe alone lets through.
+_SENTINELS = ("Chief Financial Officer", "Warehouse Associate II", "zzq wumpus 4718")
+
+
 def _compile_alt(terms: list[str] | None, window: str = "",
-                 where: str = "profile") -> re.Pattern | None:
+                 where: str = "profile", strict: bool = False) -> re.Pattern | None:
+    """Compile a profile rule.
+
+    strict=True is for EXCLUSION lists. Dropping an unusable term there fails
+    OPEN: the rail disappears and everything the user banned starts surfacing.
+    A typo'd regex in `exclusions.titles` used to crash loudly; silently
+    dropping it moved the failure from actionable to invisible, so exclusions
+    now raise instead.
+    """
     """Alternation of literal terms or raw /regex/ entries.
 
     Boundaries are applied PER TERM and only on edges that are word characters.
@@ -167,14 +197,23 @@ def _compile_alt(terms: list[str] | None, window: str = "",
             if probe.match(""):
                 dropped.append(f"{t} [matches the empty string - would match every posting]")
                 continue
+            if all(probe.search(x) for x in _SENTINELS):
+                dropped.append(f"{t} [matches everything - would hide every posting]")
+                continue
             parts.append(f"(?:{body})")
         else:
             lead = r"\b" if _is_word_char(t[0]) else ""
             trail = r"\b" if _is_word_char(t[-1]) else ""
             parts.append(lead + re.escape(t) + trail)
     if dropped:
-        print(f"  ! {where}: ignored {len(dropped)} unusable term(s): "
-              + "; ".join(dropped[:4]) + ("..." if len(dropped) > 4 else ""))
+        detail = "; ".join(dropped[:4]) + ("..." if len(dropped) > 4 else "")
+        if strict:
+            raise ProfileError(
+                f"{where}: {len(dropped)} unusable term(s) in an EXCLUSION list: {detail}\n"
+                f"Exclusions must not be silently dropped - the rule would stop applying "
+                f"and everything you banned would start appearing. Fix them in "
+                f"profile/profile.yaml and re-run.")
+        print(f"  ! {where}: ignored {len(dropped)} unusable term(s): " + detail)
     if not parts:
         return None
     return re.compile("(" + "|".join(parts) + ")" + window, re.I)
@@ -231,9 +270,10 @@ class Profile:
             if pat:
                 p.dream_lanes.append((int(lane.get("weight", 40)), pat, lane.get("key", "?")))
         p.dream_lanes.sort(key=lambda t: -t[0])
-        p.slot_block = _compile_alt(exc.get("titles"))
-        p.products_block = _compile_alt(exc.get("products"))
-        certs = exc.get("certs_refused") or []
+        p.slot_block = _compile_alt(exc.get("titles"), where="exclusions.titles", strict=True)
+        p.products_block = _compile_alt(exc.get("products"), where="exclusions.products", strict=True)
+        certs = [str(c).strip() for c in (exc.get("certs_refused") or [])
+                 if c is not None and str(c).strip()]
         if certs:
             alt = "|".join(re.escape(c) for c in certs)
             p.certs_refused = re.compile(
@@ -243,7 +283,7 @@ class Profile:
             pat = _compile_alt([b] if isinstance(b, str) else b.get("terms", []))
             if pat:
                 p.body_blocks.append((pat, b if isinstance(b, str) else b.get("label", "blocked")))
-        p.competing = _compile_alt(exc.get("competing_platforms"))
+        p.competing = _compile_alt(exc.get("competing_platforms"), where="exclusions.competing_platforms", strict=True)
         p.domain_terms = _compile_alt(cfg.get("domain_terms"))
         for s in cfg.get("signals") or []:
             pat = _compile_alt(s.get("terms"))
@@ -295,8 +335,11 @@ def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
     body = job.description[:2500]
     company = job.company or ""
 
+    # US_TOKEN is checked against the body too. Moving the state codes out of
+    # US_EVIDENCE removed them from the body check, so a posting whose only US
+    # evidence was ", CA" in its text silently lost it.
     us_here = (bool(US_EVIDENCE.search(blob)) or bool(US_TOKEN.search(blob))
-               or bool(US_EVIDENCE.search(body[:600])))
+               or bool(US_EVIDENCE.search(body[:600])) or bool(US_TOKEN.search(body[:600])))
 
     if NON_US.search(f"{blob} {company}") and not us_here:
         return "fail", f"non-US: {loc[:60] or company[:40]}"

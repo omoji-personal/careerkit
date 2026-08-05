@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sqlite3
 import sys
 from collections import Counter
 from pathlib import Path
@@ -38,12 +39,21 @@ def _use_venv() -> None:
         ("python.exe" if os.name == "nt" else "python")
     if exe.exists() and Path(sys.prefix).resolve() != venv.resolve():
         os.environ["CAREERKIT_VENV"] = "1"
-        os.execv(str(exe), [str(exe), str(Path(__file__).resolve()), *sys.argv[1:]])
+        try:
+            os.execv(str(exe), [str(exe), str(Path(__file__).resolve()), *sys.argv[1:]])
+        except OSError as e:
+            sys.exit(f"Could not start the virtual environment at {venv}: {e}\n"
+                     "Delete the .venv folder and run ./setup.sh again.")
 
 
 _use_venv()
 
-import yaml  # noqa: E402
+try:
+    import yaml  # noqa: E402
+except ModuleNotFoundError as _e:  # pragma: no cover - environment failure
+    sys.exit(f"Missing dependency: {_e.name}.\n"
+             "Run ./setup.sh (it builds .venv and installs what CareerKit needs).\n"
+             "If you already did, delete the .venv folder and run it again.")
 
 from engine import store  # noqa: E402
 from engine import aggregators  # noqa: E402
@@ -51,7 +61,7 @@ from engine.adapters import run_adapter  # noqa: E402
 from engine.aggregators import run_feed  # noqa: E402
 from engine.discover import discover_many  # noqa: E402
 from engine.report import write_report  # noqa: E402
-from engine.score import Profile, score, score_all  # noqa: E402
+from engine.score import Profile, ProfileError, score, score_all  # noqa: E402
 from engine.search import resolve, workday_parts  # noqa: E402
 from engine.verify import verify_entry  # noqa: E402
 
@@ -80,7 +90,12 @@ def save_employers(data: dict) -> None:
 
 
 def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier=None):
-    all_jobs, ok, errors, healthy = [], 0, {}, set()
+    prev_counts = {}
+    if con is not None:
+        prev_counts = {r["source"]: r["last_count"]
+                       for r in con.execute("SELECT source, last_count FROM source_health")}
+    all_jobs, ok, errors = [], 0, {}
+    healthy_boards, healthy_feeds = set(), set()
     if not feeds_only:
         emps = [e for e in reg.get("employers", []) if e.get("active", True)]
         if tier:
@@ -95,7 +110,17 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
                 errors[label] = err
             else:
                 ok += 1
-                healthy.add(e.get("ats"))
+                # Board identity, not platform identity. And a board whose
+                # count collapsed is treated as UNHEALTHY for retirement
+                # purposes: a truncating board (broken pagination, an API that
+                # starts capping) reports success with a short list, and its
+                # missing rows would otherwise be retired as closed.
+                prev = prev_counts.get(label)
+                collapsed = prev and prev >= 10 and len(jobs) < prev * 0.5
+                if not collapsed:
+                    healthy_boards.add((e.get("ats"), e.get("name") or e.get("slug", "")))
+                else:
+                    print(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
             all_jobs.extend(jobs)
             print(f"  {label:<46} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
     if not employers_only:
@@ -111,10 +136,17 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
                 errors[f["name"]] = err
             else:
                 ok += 1
-                healthy.add(f["name"])
+                # Same collapse guard as employer boards: a feed that loops over
+                # several search terms can have most of them throttled, succeed
+                # on one, and report success with a fraction of its usual rows.
+                prev = prev_counts.get(f"feed:{f['name']}")
+                if not (prev and prev >= 10 and len(jobs) < prev * 0.5):
+                    healthy_feeds.add(f["name"])
+                else:
+                    print(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
             all_jobs.extend(jobs)
             print(f"  feed:{f['name']:<41} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
-    return all_jobs, ok, errors, healthy
+    return all_jobs, ok, errors, healthy_boards, healthy_feeds
 
 
 def cmd_pull(args) -> None:
@@ -125,7 +157,7 @@ def cmd_pull(args) -> None:
     con = store.connect()
     run_id = store.start_run(con)
 
-    all_jobs, ok_sources, errors, healthy = _fetch_all(
+    all_jobs, ok_sources, errors, healthy_boards, healthy_feeds = _fetch_all(
         reg, keys, con, employers_only=args.employers, feeds_only=args.feeds,
         tier=args.tier)
 
@@ -142,9 +174,15 @@ def cmd_pull(args) -> None:
     # Close the loop: a posting that STOPPED qualifying is written back, and a
     # posting that vanished from a healthy board is marked delisted. Without
     # this, both kept surfacing as live qualified roles indefinitely.
+    # Best gate wins. Aggregator sightings of one role all share a uid, so a
+    # copy listed under a foreign location scores EXCLUDED while the clean copy
+    # scores QUALIFIED. Writing the demotion back blindly overwrote the row
+    # upsert had just created and deleted the role on the run it was found.
+    kept_uids = {j.uid for j in keep}
     demoted = {j.uid: (j.score, j.gate, " | ".join(j.reasons))
-               for j in scored if j.gate in ("EXCLUDED", "SLOT-BLOCKED")}
-    n_delisted, n_demoted = store.reconcile(con, {j.uid for j in scored}, demoted, healthy)
+               for j in scored
+               if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.uid not in kept_uids}
+    n_delisted, n_demoted = store.reconcile(con, demoted, healthy_boards, healthy_feeds)
 
     rows = store.query(con, min_score=args.min_score, limit=300)
     health = list(con.execute(
@@ -181,7 +219,7 @@ def cmd_audit(args) -> None:
     aggregators.set_search_terms(profile.search_terms)
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     keys = load_yaml(KEYS, {})
-    all_jobs, _, _, _ = _fetch_all(reg, keys, None, employers_only=args.employers,
+    all_jobs, _, _, _, _ = _fetch_all(reg, keys, None, employers_only=args.employers,
                                 feeds_only=False)
     import re as _re
     flt = _re.compile(args.grep, _re.I) if args.grep else None
@@ -385,6 +423,20 @@ def main() -> None:
     except re.error as e:
         sys.exit(f"A pattern in your profile is not a valid regex: {e}\n"
                  "Check the /raw regex/ entries in profile/profile.yaml.")
+    except ProfileError as e:
+        sys.exit(str(e))
+    except sqlite3.DatabaseError as e:
+        sys.exit(f"The database looks damaged: {e}\n"
+                 f"Move {store.DB_PATH} aside and run a fresh pull to rebuild it. "
+                 "Your profile/ folder is untouched.")
+    except (AttributeError, TypeError) as e:
+        # Almost always a YAML file with the right syntax but the wrong SHAPE:
+        # a list where a mapping belongs, a string where a number belongs.
+        sys.exit(f"A config file has an unexpected shape: {e}\n"
+                 "Check profile/profile.yaml and profile/employers.yaml, or ask "
+                 "Claude: 'my careerkit config looks wrong'.")
+    except PermissionError as e:
+        sys.exit(f"No permission to read or write {e.filename}.")
 
 
 if __name__ == "__main__":

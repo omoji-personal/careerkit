@@ -15,7 +15,7 @@ from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 
-from .models import Job, ATS_SOURCES
+from .models import Job
 
 DB_PATH = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "data" / "jobs.db"
 
@@ -65,8 +65,6 @@ _MIGRATIONS = [
     ("jobs", "delisted_on", "TEXT"),
     ("jobs", "misses", "INTEGER DEFAULT 0"),
     ("source_health", "prev_count", "INTEGER"),
-    ("jobs", "schema_v", "INTEGER DEFAULT 2"),
-    ("jobs", "miss_on", "TEXT"),
 ]
 
 
@@ -74,32 +72,13 @@ def _migrate(con: sqlite3.Connection) -> None:
     for table, col, decl in _MIGRATIONS:
         cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
-            try:
-                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-            except sqlite3.OperationalError as e:
-                # Two first runs can both pass the PRAGMA check and both ALTER.
-                # The loser is not an error; the column exists either way.
-                if "duplicate column" not in str(e).lower():
-                    raise
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
     # A pre-2026-08-05 row's uid was sha256(company|normalized_title), which is
     # exactly what group_key is now. Backfilling it lets upsert recognise an
     # existing posting under the new uid scheme instead of treating all of them
     # as brand new, which would erase every first_seen date and detach any
     # applied/rejected status the user had recorded.
-    # A row that predates the key change is exactly one whose group_key was
-    # never set. Stamp those, and only those, as adoption-eligible.
-    con.execute("UPDATE jobs SET group_key = uid, schema_v = 1 WHERE group_key IS NULL")
-    # Repair for databases migrated by the first 2026-08-05 build, which
-    # backfilled group_key for every row before schema_v existed. Legacy rows
-    # that had not yet been re-sighted were left marked as already-migrated and
-    # could never adopt, so the next sighting of the same requisition would
-    # insert a fresh row and strand the user's applied status on the old one.
-    # A row whose uid still equals its group_key, from an employer ATS, is
-    # exactly that case. Idempotent: adoption sets schema_v=2 and changes uid.
-    if "source" in {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}:
-        marks = ",".join("?" * len(ATS_SOURCES))
-        con.execute(f"UPDATE jobs SET schema_v = 1 WHERE uid = group_key AND schema_v = 2 "
-                    f"AND source IN ({marks})", tuple(sorted(ATS_SOURCES)))
+    con.execute("UPDATE jobs SET group_key = uid WHERE group_key IS NULL")
     con.commit()
 
 
@@ -117,42 +96,23 @@ def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Jo
     """Insert or refresh. Returns (new_jobs, seen_again)."""
     today = date.today().isoformat()
     new, again, adopted = [], [], []
-    # A legacy row can be adopted by exactly one requisition, and the batch
-    # order decides which. Put the req whose URL matches the stored row first,
-    # so the user's "applied" status follows the job they actually applied to
-    # rather than whichever one the board happened to list first.
-    legacy_urls = {r["group_key"]: r["url"] for r in
-                   con.execute("SELECT group_key, url FROM jobs WHERE schema_v=1")}
-    if legacy_urls:
-        jobs = sorted(jobs, key=lambda j: 0 if legacy_urls.get(j.group_key) == j.url else 1)
     with closing(con.cursor()) as cur:
         for j in jobs:
             cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
             row = cur.fetchone()
             if row is None and j.uid != j.group_key:
-                # No row under the new uid. Look for a LEGACY row in this group
-                # - one written before the key change, marked schema_v=1 by the
-                # migration - and adopt it, so its first_seen, status and notes
-                # carry forward.
-                #
-                # Two constraints, both from the 2026-08-05 red team:
-                #   - Only schema_v=1 rows are eligible. Matching on
-                #     "uid == group_key" also matched MODERN aggregator rows,
-                #     whose uid is legitimately the bare group_key, so an ATS
-                #     requisition could hijack a live aggregator row and leave a
-                #     permanent duplicate behind.
-                #   - When several requisitions share a group, prefer the one
-                #     whose URL matches the stored row. Otherwise whichever the
-                #     board happened to list first inherits the user's "applied"
-                #     status, attaching it to a job they never applied to while
-                #     the one they did apply to reappears as NEW.
-                cur.execute("SELECT uid, url FROM jobs WHERE group_key=? AND schema_v=1 "
+                # No row under the new uid. Look for a legacy row in the same
+                # group - one still keyed the old way (uid == group_key) - and
+                # adopt it, so its first_seen, status and notes carry forward.
+                # Only the first requisition of a group can adopt; genuinely
+                # distinct siblings insert fresh, which is the point of the
+                # new key.
+                cur.execute("SELECT uid FROM jobs WHERE group_key=? AND uid=group_key "
                             "LIMIT 1", (j.group_key,))
                 legacy = cur.fetchone()
                 if legacy:
                     try:
-                        cur.execute("UPDATE jobs SET uid=?, schema_v=2 WHERE uid=?",
-                                    (j.uid, legacy["uid"]))
+                        cur.execute("UPDATE jobs SET uid=? WHERE uid=?", (j.uid, legacy["uid"]))
                         cur.execute("UPDATE OR REPLACE sightings SET uid=? WHERE uid=?",
                                     (j.uid, legacy["uid"]))
                         adopted.append(j.uid)
@@ -171,10 +131,10 @@ def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Jo
                     "gate=?, reasons=?, comp_min=COALESCE(?,comp_min), "
                     "comp_max=COALESCE(?,comp_max), url=?, title=?, location=?, "
                     "description=COALESCE(NULLIF(?,''),description), "
-                    "source=?, group_key=?, delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
+                    "group_key=?, delisted_on=NULL, misses=0 WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
-                     j.description[:20000], j.source, j.group_key, j.uid),
+                     j.description[:20000], j.group_key, j.uid),
                 )
                 again.append(j)
             else:
@@ -215,13 +175,8 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
        the report presented it as live. This is the defect that put a dead
        requisition in front of the user in July 2026.
 
-    A row is only delisted when THE BOARD IT CAME FROM reported successfully
-    this run. Health must be tracked per board, not per ATS platform: dozens of
-    employers share the "greenhouse" platform, so marking the platform healthy
-    because one company answered would retire the jobs of every company that
-    404'd, and `pull --tier A` would retire everything from the tiers it did
-    not poll. Feeds have no per-employer identity, so they match on source
-    alone; employer boards match on source AND company.
+    A row is only delisted when its source actually reported successfully this
+    run. A broken board must never be read as "every job there closed".
     """
     today = date.today().isoformat()
     dem = 0
@@ -230,36 +185,21 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
             cur.execute("UPDATE jobs SET score=?, gate=?, reasons=?, last_seen=?, "
                         "delisted_on=NULL WHERE uid=?", (score, gate, reasons, today, uid))
             dem += cur.rowcount
-        if not healthy_boards and not healthy_feeds:
+        if not healthy_sources:
             con.commit()
             return 0, dem
-        # Board identity is (source, company); a feed has no per-employer
-        # identity so it matches on source alone. Concatenating with a NUL
-        # separator keeps the pair comparison to one IN clause.
-        board_keys = [f"{s}\x00{c}" for s, c in healthy_boards]
-        clauses, params = [], []
-        if board_keys:
-            clauses.append("(source || x'00' || company) IN (%s)"
-                           % ",".join("?" * len(board_keys)))
-            params += board_keys
-        if healthy_feeds:
-            clauses.append("source IN (%s)" % ",".join("?" * len(healthy_feeds)))
-            params += sorted(healthy_feeds)
+        marks = ",".join("?" * len(healthy_sources))
         # Count the miss first; only retire on the SECOND consecutive one.
         # Board counts are stable run to run (15,879 / 15,932 / 15,935 across
         # three real runs), so a single absence is decent evidence - but not
         # good enough. A partial or transient response would retire live jobs,
         # and hiding a live job is the exact failure this tool exists to
         # prevent, whereas showing a dead one for one more run is cheap.
-        # At most ONE miss per calendar day. "Two consecutive misses" is meant
-        # to mean two days of absence; without this, running pull twice in one
-        # afternoon retires everything that happened to be absent from both.
         cur.execute(
-            "UPDATE jobs SET misses = misses + 1, miss_on = ? WHERE delisted_on IS NULL "
-            "AND last_seen < ? AND COALESCE(miss_on,'') <> ? "
-            "AND status NOT IN ('applied','rejected','ignored') "
-            "AND (" + " OR ".join(clauses) + ")",
-            (today, today, today, *params),
+            f"UPDATE jobs SET misses = misses + 1 WHERE delisted_on IS NULL "
+            f"AND last_seen < ? AND source IN ({marks}) "
+            f"AND status NOT IN ('applied','rejected','ignored')",
+            (today, *healthy_sources),
         )
         cur.execute(
             "UPDATE jobs SET delisted_on=? WHERE delisted_on IS NULL AND misses >= 2",

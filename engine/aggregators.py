@@ -15,8 +15,16 @@ from __future__ import annotations
 TERMS: tuple = ("program manager",)  # placeholder; set_search_terms() overrides
 
 def set_search_terms(terms):
+    """Feeds search for these. An empty list used to silently keep the
+    placeholder below, so a user with no search_terms in their profile
+    unknowingly searched for someone else's job title."""
     global TERMS
-    TERMS = tuple(terms) or TERMS
+    clean = tuple(t for t in (terms or []) if t and str(t).strip())
+    if not clean:
+        print("  ! profile has no search_terms: aggregator feeds are searching for "
+              f"{TERMS[0]!r}. Add search_terms to profile/profile.yaml.")
+        return
+    TERMS = clean
 
 import json
 import re

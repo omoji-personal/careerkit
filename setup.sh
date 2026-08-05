@@ -30,6 +30,13 @@ command -v git >/dev/null || {
 }
 echo "  git $(git --version | awk '{print $3}')"
 
+# Gating on "does the folder exist" can never repair a BROKEN venv - the
+# common case after `brew upgrade python`, which leaves .venv/bin/python a
+# dangling symlink. Test that it actually runs, and rebuild if it does not.
+if [ -d .venv ] && ! .venv/bin/python -c "import sys" >/dev/null 2>&1; then
+  echo "  .venv is broken (interpreter will not run); rebuilding ..."
+  rm -rf .venv
+fi
 if [ ! -d .venv ]; then
   echo "  creating .venv ..."
   python3 -m venv .venv || {

@@ -99,6 +99,12 @@ def fetch(
     if use_cache and cp.exists() and (time.time() - cp.stat().st_mtime) < CACHE_TTL:
         try:
             blob = json.loads(cp.read_text())
+            # Record the status on this path too. Only 200s are ever cached, so
+            # a cache hit IS a success - but returning without setting it left
+            # the thread-local holding a previous board's value (or None after
+            # reset_status), and run_adapter then blamed a perfectly healthy
+            # cached board for someone else's failure.
+            _local.last_status = blob["status"]
             return blob["status"], blob["text"]
         except Exception:
             pass

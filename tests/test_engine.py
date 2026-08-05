@@ -152,7 +152,7 @@ def test_role_that_stops_qualifying_is_written_back(db):
     from engine import store
     j = J(external_id="9")
     store.upsert(db, [j])
-    store.reconcile(db, {j.uid}, {j.uid: (0, "EXCLUDED", "comp below floor")}, {"greenhouse"})
+    store.reconcile(db, {j.uid: (0, "EXCLUDED", "comp below floor")}, {("greenhouse", "Acme")}, set())
     assert db.execute("SELECT gate FROM jobs").fetchone()["gate"] == "EXCLUDED"
     assert not store.query(db)
 
@@ -164,10 +164,12 @@ def test_delisted_posting_stops_surfacing(db):
     assert store.query(db)
     db.execute("UPDATE jobs SET last_seen='2000-01-01'")
     db.commit()
-    delisted, _ = store.reconcile(db, set(), {}, {"greenhouse"})
+    delisted, _ = store.reconcile(db, {}, {("greenhouse", "Acme")}, set())
     assert delisted == 0, "retired on a single miss; a transient would hide live jobs"
     assert store.query(db), "still shown after one miss, correctly"
-    delisted, _ = store.reconcile(db, set(), {}, {"greenhouse"})
+    db.execute("UPDATE jobs SET miss_on='2000-01-02'")      # next day
+    db.commit()
+    delisted, _ = store.reconcile(db, {}, {("greenhouse", "Acme")}, set())
     assert delisted == 1, "should retire on the second consecutive miss"
     assert not store.query(db)
 
@@ -179,7 +181,7 @@ def test_broken_board_does_not_delist_its_jobs(db):
     store.upsert(db, [j])
     db.execute("UPDATE jobs SET last_seen='2000-01-01'")
     db.commit()
-    delisted, _ = store.reconcile(db, set(), {}, set())   # nothing reported OK
+    delisted, _ = store.reconcile(db, {}, set(), set())   # nothing reported OK
     assert delisted == 0
     assert store.query(db)
 
@@ -190,8 +192,10 @@ def test_reseeing_a_delisted_posting_revives_it(db):
     store.upsert(db, [j])
     db.execute("UPDATE jobs SET last_seen='2000-01-01'")
     db.commit()
-    store.reconcile(db, set(), {}, {"greenhouse"})
-    store.reconcile(db, set(), {}, {"greenhouse"})         # two misses -> retired
+    store.reconcile(db, {}, {("greenhouse", "Acme")}, set())
+    db.execute("UPDATE jobs SET miss_on='2000-01-02'")               # next day
+    db.commit()
+    store.reconcile(db, {}, {("greenhouse", "Acme")}, set())         # two misses -> retired
     assert not store.query(db)
     store.upsert(db, [j])                                  # board listed it again
     assert store.query(db)
@@ -329,7 +333,7 @@ def test_legacy_row_is_adopted_not_duplicated(db):
     j = J(external_id="111", location="Denver, CO")
     # simulate a v1 row: keyed by group_key, with history
     db.execute("INSERT INTO jobs (uid, group_key, company, title, url, source, gate, "
-               "score, status, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               "score, status, first_seen, last_seen, schema_v) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
                (j.group_key, j.group_key, j.company, j.title, "https://old/1",
                 "greenhouse", "QUALIFIED", 70, "applied", "2026-07-01", "2026-07-30"))
     db.commit()
@@ -348,7 +352,7 @@ def test_only_one_sibling_adopts_the_legacy_row(db):
     a = J(external_id="111", location="Denver, CO")
     b = J(external_id="222", location="Austin, TX")
     db.execute("INSERT INTO jobs (uid, group_key, company, title, url, source, gate, "
-               "score, status, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               "score, status, first_seen, last_seen, schema_v) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
                (a.group_key, a.group_key, a.company, a.title, "https://old/1",
                 "greenhouse", "QUALIFIED", 70, "applied", "2026-07-01", "2026-07-30"))
     db.commit()
@@ -364,7 +368,7 @@ def test_aggregator_rows_need_no_adoption(db):
     j = J(source="remotive", external_id="agg-1")
     assert j.uid == j.group_key
     db.execute("INSERT INTO jobs (uid, group_key, company, title, url, source, gate, "
-               "score, status, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               "score, status, first_seen, last_seen, schema_v) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
                (j.group_key, j.group_key, j.company, j.title, "u", "remotive",
                 "QUALIFIED", 70, "reviewed", "2026-07-01", "2026-07-30"))
     db.commit()
@@ -458,3 +462,167 @@ def test_always_empty_board_is_not_flagged(db):
     store.record_health(db, "greenhouse:Quiet", 0, None)
     store.record_health(db, "greenhouse:Quiet", 0, None)
     assert not store.dropped_to_zero(db)
+
+
+# --------------------------------------------------------------------------
+# TAA round 2, all three lenses converged on this one: health was tracked per
+# ATS PLATFORM while jobs belong to individual BOARDS.
+# --------------------------------------------------------------------------
+
+def test_one_board_failing_does_not_retire_a_sibling_boards_jobs(db):
+    """greenhouse:CompanyA succeeds, greenhouse:CompanyB 404s. CompanyB's jobs
+    must survive: its board never reported successfully."""
+    from engine import store
+    a = J(company="CompanyA", external_id="a1")
+    b = J(company="CompanyB", external_id="b1")
+    store.upsert(db, [a, b])
+    db.execute("UPDATE jobs SET last_seen='2000-01-01'")
+    db.commit()
+    store.upsert(db, [a])                                   # only A re-sighted
+    healthy = {("greenhouse", "CompanyA")}                  # B errored
+    for d in range(3):
+        db.execute("UPDATE jobs SET miss_on=NULL")
+        db.commit()
+        store.reconcile(db, {}, healthy, set())
+    rows = {r["company"]: r for r in db.execute("SELECT company, delisted_on FROM jobs")}
+    assert rows["CompanyB"]["delisted_on"] is None, "retired a job from a board that never answered"
+    assert rows["CompanyA"]["delisted_on"] is None
+
+
+def test_a_tier_filtered_run_does_not_retire_unpolled_employers(db):
+    from engine import store
+    polled = J(company="TierA", external_id="1")
+    skipped = J(company="TierC", external_id="2")
+    store.upsert(db, [polled, skipped])
+    db.execute("UPDATE jobs SET last_seen='2000-01-01'")
+    db.commit()
+    store.upsert(db, [polled])
+    for d in range(3):
+        db.execute("UPDATE jobs SET miss_on=NULL")
+        db.commit()
+        store.reconcile(db, {}, {("greenhouse", "TierA")}, set())
+    got = {r["company"]: r["delisted_on"] for r in db.execute("SELECT company, delisted_on FROM jobs")}
+    assert got["TierC"] is None, "--tier run retired employers it never polled"
+
+
+def test_a_modern_aggregator_row_cannot_be_hijacked(db):
+    """An aggregator uid IS the bare group_key, which the old adoption probe
+    also matched. An ATS req could steal that live row and leave a permanent
+    duplicate behind."""
+    from engine import store
+    agg = J(source="remotive", external_id="agg1")
+    store.upsert(db, [agg])
+    ats = J(source="greenhouse", external_id="777")
+    assert ats.group_key == agg.group_key and ats.uid != agg.uid
+    store.upsert(db, [ats])
+    rows = list(db.execute("SELECT uid, source FROM jobs ORDER BY source"))
+    assert len(rows) == 2, "the ATS req hijacked the aggregator row"
+    assert {r["source"] for r in rows} == {"remotive", "greenhouse"}
+
+
+def test_adoption_prefers_the_requisition_the_user_applied_to(db):
+    """Two reqs share a group and a legacy row is marked applied. The URL is
+    the only evidence of WHICH one the user applied to; without it whichever
+    the board listed first inherits the status."""
+    from engine import store
+    applied_to = J(url="https://b/sf", external_id="sf", location="San Francisco")
+    other = J(url="https://b/nyc", external_id="nyc", location="New York")
+    db.execute("INSERT INTO jobs (uid, group_key, company, title, url, source, gate, "
+               "score, status, first_seen, last_seen, schema_v) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
+               (applied_to.group_key, applied_to.group_key, applied_to.company,
+                applied_to.title, "https://b/sf", "greenhouse", "QUALIFIED", 70,
+                "applied", "2026-07-01", "2026-07-30"))
+    db.commit()
+    store.upsert(db, [other, applied_to])          # NYC listed first on purpose
+    got = {r["uid"]: r["status"] for r in db.execute("SELECT uid, status FROM jobs")}
+    assert got[applied_to.uid] == "applied", "applied landed on the wrong requisition"
+    assert got[other.uid] == "new"
+
+
+def test_cache_hit_records_its_status(tmp_path, monkeypatch):
+    """Only 200s are cached, so a cache hit IS a success. Returning without
+    recording it left run_adapter blaming a healthy board for another's error."""
+    import json as _json
+    from engine import http
+    monkeypatch.setattr(http, "CACHE_DIR", tmp_path)
+    key = "GET|https://example.test/x|"
+    http._cache_path(key).write_text(_json.dumps({"status": 200, "text": "{}"}))
+    http._local.last_status = 403                              # previous failure
+    http._pruned = True
+    st, _ = http.fetch("https://example.test/x")
+    assert st == 200 and http.last_status() == 200
+
+
+@pytest.mark.parametrize("loc", ["Munich, DE", "Bangalore, IN", "Tel Aviv, IL"])
+def test_foreign_iso_codes_are_not_read_as_us_states(loc):
+    """AR/CO/DE/ID/IL/IN/MA are US state codes AND ISO country codes, and real
+    boards write both in caps. Treating them as US evidence suppressed the
+    non-US rail and presented foreign postings as US offices."""
+    from engine.score import Profile, location_verdict
+    p = Profile()
+    p.relocation = True
+    v, why = location_verdict(J(location=loc), p)
+    assert v == "fail", f"{loc} surfaced as {v}: {why}"
+
+
+def test_us_state_codes_still_work():
+    from engine.score import Profile, location_verdict
+    p = Profile()
+    for loc in ("Denver, CO", "Chicago, IL", "Boston, MA", "Indianapolis, IN"):
+        v, why = location_verdict(J(location=loc), p)
+        assert "non-US" not in why, f"{loc}: {why}"
+
+
+def test_a_broken_exclusion_regex_fails_loudly(tmp_path):
+    """Dropping an unusable exclusion term fails OPEN: the rail vanishes and
+    everything the user banned starts surfacing."""
+    from engine.score import Profile, ProfileError
+    bad = tmp_path / "p.yaml"
+    bad.write_text('lanes:\n  - {key: a, weight: 40, titles: ["manager"]}\n'
+                   'exclusions:\n  titles: ["/(contract|interim/"]\n')
+    with pytest.raises(ProfileError):
+        Profile.load(bad)
+
+
+def test_a_regex_matching_everything_is_rejected():
+    from engine.score import _compile_alt
+    for pattern in ("/.+/", "/ /", "/\\\\b/"):
+        p = _compile_alt([pattern], where="t")
+        assert not (p and p.search("Chief Financial Officer")), pattern
+
+
+def test_a_foreign_copy_of_a_role_does_not_delete_the_qualified_one(db):
+    """Aggregator sightings of one role share a uid. A copy listed under a
+    foreign location scores EXCLUDED while the clean copy scores QUALIFIED;
+    writing the demotion back blindly deleted the role on the run it was found.
+    Best gate must win."""
+    from engine import store
+    good = J(source="remotive", location="Remote, US")
+    bad = J(source="remoteok", location="Toronto, Canada")
+    assert good.uid == bad.uid, "precondition: aggregator copies share a uid"
+    bad.gate, bad.score, bad.reasons = "EXCLUDED", 52, ["non-US: Toronto, Canada"]
+
+    keep = [good]
+    store.upsert(db, keep)
+    kept = {j.uid for j in keep}
+    demoted = {j.uid: (j.score, j.gate, " | ".join(j.reasons))
+               for j in [good, bad]
+               if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.uid not in kept}
+    store.reconcile(db, demoted, {("greenhouse", "Acme")}, {"remotive", "remoteok"})
+    assert store.query(db), "a live US-remote role was deleted by its foreign twin"
+
+
+def test_two_runs_in_one_day_count_as_one_miss(db):
+    """'Two consecutive misses' means two DAYS of absence. Running pull twice
+    in an afternoon must not retire everything absent from both."""
+    from engine import store
+    j = J(external_id="1")
+    store.upsert(db, [j])
+    db.execute("UPDATE jobs SET last_seen='2000-01-01'")
+    db.commit()
+    healthy = {("greenhouse", "Acme")}
+    for _ in range(4):                                   # four runs, same day
+        store.reconcile(db, {}, healthy, set())
+    assert db.execute("SELECT misses FROM jobs").fetchone()["misses"] == 1
+    assert store.query(db), "same-day re-runs retired a live posting"
