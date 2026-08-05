@@ -1341,3 +1341,41 @@ def test_report_renders_the_discovered_section(tmp_path, monkeypatch):
         filename="t.md")
     body = path.read_text()
     assert "Newly discovered employers" in body and "Acme" in body
+
+
+def test_discover_platform_count_is_not_a_hardcoded_number():
+    """The CLI advertised "12 ATS platforms" as a literal. Adding a probe left
+    the claim stale, and a user reading it believed coverage they did not have."""
+    from engine import discover
+    src = (ROOT / "careerkit.py").read_text()
+    assert "12 ATS platforms" not in src, "platform count is hardcoded again"
+    assert discover.PROBEABLE == len(discover.PROBE_ORDER) + 1
+
+
+def test_every_probe_order_entry_has_a_probe_and_an_adapter():
+    """A platform in the order list with no probe is skipped silently; one with
+    no adapter can be discovered and registered but never polled."""
+    from engine import adapters, discover
+    assert set(discover.PROBE_ORDER) == set(discover.PROBES), \
+        "PROBE_ORDER and PROBES disagree"
+    orphans = sorted(set(discover.PROBE_ORDER) - set(adapters.REGISTRY))
+    assert not orphans, f"discoverable but unpollable: {orphans}"
+
+
+def test_unprobeable_platforms_are_declared_and_real():
+    """These four have adapters but cannot be found from a company name. If one
+    quietly gains a probe, the message telling users to paste a URL is wrong."""
+    from engine import adapters, discover
+    assert set(discover.UNPROBEABLE) <= set(adapters.REGISTRY)
+    assert not (set(discover.UNPROBEABLE) & set(discover.PROBE_ORDER))
+    covered = set(discover.PROBE_ORDER) | set(discover.UNPROBEABLE) | {"workday"}
+    # other tests register throwaway adapters into the same global registry
+    real = {a for a in adapters.REGISTRY if not a.startswith("_t_")}
+    assert covered == real, f"unaccounted platforms: {sorted(real ^ covered)}"
+
+
+def test_database_uses_wal_so_an_interrupted_pull_does_not_need_recovery(db):
+    """A pull writes for minutes and the file holds months of first_seen dates
+    that no job board can re-derive."""
+    mode = db.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal", f"journal_mode is {mode}"

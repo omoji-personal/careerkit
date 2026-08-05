@@ -160,6 +160,17 @@ def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
+    # A pull writes for minutes. Under the default rollback journal an
+    # interruption mid-run (closed laptop, killed terminal) can leave the
+    # database needing recovery, and the file holds months of first_seen dates
+    # and application status that no job board can re-derive. WAL also lets
+    # `status` read while a pull is writing. Best-effort: a filesystem that
+    # cannot do WAL (some network mounts) keeps the default rather than failing.
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.DatabaseError:
+        pass
     con.executescript(SCHEMA)
     _migrate(con)
     con.executescript(INDEXES)

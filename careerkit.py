@@ -4,7 +4,7 @@
     ./careerkit.py pull                poll every registered employer + feed, score, report
     ./careerkit.py pull --employers    employer ATS boards only
     ./careerkit.py pull --feeds        aggregator feeds only
-    ./careerkit.py discover NAME [...] probe a company across 12 ATS platforms, register hits
+    ./careerkit.py discover NAME [...] probe a company across every guessable ATS, register hits
     ./careerkit.py discover --file f   one company name per line
     ./careerkit.py verify              confirm each board belongs to the right company
     ./careerkit.py ingest-urls FILE    resolve pasted job URLs -> employers, register
@@ -63,6 +63,7 @@ from engine import aggregators  # noqa: E402
 from engine import adapters as _adapters
 from engine.adapters import run_adapter  # noqa: E402
 from engine.aggregators import run_feed  # noqa: E402
+from engine import discover as _discover
 from engine.discover import discover_many  # noqa: E402
 from engine.report import write_report  # noqa: E402
 from engine.score import Profile, ProfileError, score, score_all  # noqa: E402
@@ -298,7 +299,8 @@ def cmd_discover(args) -> None:
         names += [l.strip() for l in Path(args.file).read_text().splitlines()
                   if l.strip() and not l.startswith("#")]
     todo = [n for n in names if n.lower() not in known_names]
-    print(f"Probing {len(todo)} companies across 12 ATS platforms...", flush=True)
+    print(f"Probing {len(todo)} companies across {_discover.PROBEABLE} ATS platforms...",
+          flush=True)
     found, missed = [], []
 
     def on_result(name, entry):
@@ -323,6 +325,14 @@ def cmd_discover(args) -> None:
         print("Not found (may post only on LinkedIn, or use an unguessable slug):")
         for m in missed:
             print(f"  {m}")
+        # "Not found" reads as "this employer has no public board", which is
+        # wrong for the four platforms addressed by an opaque tenant id. There
+        # is nothing to guess from a company name, but a posting URL contains
+        # the id, so the path forward exists and should be said out loud.
+        print(f"\n  {', '.join(_discover.UNPROBEABLE)} cannot be probed from a name "
+              f"(they use opaque tenant ids).\n"
+              f"  If one of these is the employer's board, paste any posting URL:\n"
+              f"    ./careerkit.py ingest-urls FILE")
 
 
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")

@@ -144,6 +144,17 @@ PROBE_ORDER = [
     "teamtailor", "personio",
 ]
 
+# Probed platforms, plus Workday, which is searched after these miss.
+PROBEABLE = len(PROBE_ORDER) + 1
+
+# Adapters exist for these, but discovery cannot reach them: each addresses a
+# board by an opaque tenant id or GUID with no convention that maps a company
+# NAME onto it, so there is nothing to guess. They enter the registry by pasting
+# a posting URL (`ingest-urls`), which contains the id. Documented rather than
+# silently absent: "discover found nothing" otherwise reads as "this employer
+# has no public board", which for these four is wrong.
+UNPROBEABLE = ("oracle_orc", "eightfold", "phenom", "paylocity")
+
 
 def discover_company(
     name: str, *, hints: Iterable[str] = (), platforms: Iterable[str] | None = None,
