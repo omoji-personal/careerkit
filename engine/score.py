@@ -194,10 +194,17 @@ def _compile_alt(terms: list[str] | None, window: str = "",
             except re.error as e:
                 dropped.append(f"{t} [bad regex: {e}]")
                 continue
-            if probe.match(""):
+            # A negative lookahead is how someone writes an allow-list
+            # ("exclude everything that is NOT X"). Such a pattern matches the
+            # empty string and every sentinel BY DESIGN, so both guards below
+            # would reject a perfectly valid rule. Someone writing "(?!" is
+            # being deliberate; the accidents these guards exist to catch - a
+            # stray "" or a regex ending in "|" - contain no lookahead.
+            deliberate = "(?!" in body or "(?<!" in body
+            if not deliberate and probe.match(""):
                 dropped.append(f"{t} [matches the empty string - would match every posting]")
                 continue
-            if all(probe.search(x) for x in _SENTINELS):
+            if not deliberate and all(probe.search(x) for x in _SENTINELS):
                 dropped.append(f"{t} [matches everything - would hide every posting]")
                 continue
             parts.append(f"(?:{body})")

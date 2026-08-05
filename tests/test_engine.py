@@ -626,3 +626,76 @@ def test_two_runs_in_one_day_count_as_one_miss(db):
         store.reconcile(db, {}, healthy, set())
     assert db.execute("SELECT misses FROM jobs").fetchone()["misses"] == 1
     assert store.query(db), "same-day re-runs retired a live posting"
+
+
+def test_renamed_employer_rows_are_not_stranded(db):
+    """Renaming a company in the registry changes the board identity, so rows
+    written under the old name match no healthy board. Without an orphan rule
+    they accumulate as permanently live jobs - the inverse of the bug the
+    per-board key fixed."""
+    from engine import store
+    old = J(company="Acme Corp", external_id="1")
+    store.upsert(db, [old])
+    db.execute("UPDATE jobs SET last_seen='2000-01-01'")
+    db.commit()
+    healthy = {("greenhouse", "Acme Inc")}          # registry renamed
+    known = {("greenhouse", "Acme Inc")}
+    for day in ("2000-01-02", "2000-01-03"):
+        db.execute("UPDATE jobs SET miss_on=?", (day,))
+        db.commit()
+        store.reconcile(db, {}, healthy, set(), known_boards=known)
+    assert not store.query(db), "rows under the old company name never retired"
+
+
+def test_aggregator_rows_are_not_treated_as_orphans(db):
+    """A feed's company is the employer it names, which is not expected in the
+    registry. The orphan rule must not sweep those up."""
+    from engine import store
+    j = J(company="SomeStartup", source="remotive")
+    store.upsert(db, [j])
+    db.execute("UPDATE jobs SET last_seen='2000-01-01'")
+    db.commit()
+    for day in ("2000-01-02", "2000-01-03"):
+        db.execute("UPDATE jobs SET miss_on=?", (day,))
+        db.commit()
+        store.reconcile(db, {}, set(), set(), known_boards={("greenhouse", "Acme")})
+    assert store.query(db), "an aggregator row was retired as an orphan"
+
+
+def test_repair_does_not_stamp_a_fresh_install_row(db):
+    """The one-time legacy repair ran on every connect. On a fresh install an
+    ATS row with an empty external_id has uid == group_key, and stamping it
+    legacy let a later distinct requisition adopt and hijack its history."""
+    from engine import store
+    fresh = J(external_id="")                     # no req id -> uid == group_key
+    assert fresh.uid == fresh.group_key
+    store.upsert(db, [fresh])
+    store._migrate(db)                            # repair runs again
+    v = db.execute("SELECT schema_v FROM jobs").fetchone()["schema_v"]
+    assert v == 2, "a fresh-install row was marked adoption-eligible"
+
+
+def test_a_negative_lookahead_allow_list_is_accepted():
+    """An allow-list ('exclude everything that is NOT X') legitimately matches
+    the sentinels; only an accidental match-everything should be rejected."""
+    from engine.score import _compile_alt
+    p = _compile_alt(["/^(?!.*Salesforce).*$/"], where="t")
+    assert p is not None
+    assert p.search("Barista")
+    assert not p.search("Salesforce Administrator")
+
+
+def test_namespaced_feed_rows_can_retire(db):
+    """jobspy writes source='jobspy:indeed' while the registry knows the feed
+    as 'jobspy'. Matching on the exact string meant those rows never
+    accumulated a miss and dead postings piled up silently."""
+    from engine import store
+    j = J(source="jobspy:indeed", company="SomeCo")
+    store.upsert(db, [j])
+    db.execute("UPDATE jobs SET last_seen='2000-01-01'")
+    db.commit()
+    for day in ("2000-01-02", "2000-01-03"):
+        db.execute("UPDATE jobs SET miss_on=?", (day,))
+        db.commit()
+        store.reconcile(db, {}, set(), {"jobspy"})
+    assert not store.query(db), "a namespaced feed row could never be retired"

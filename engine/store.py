@@ -96,10 +96,21 @@ def _migrate(con: sqlite3.Connection) -> None:
     # insert a fresh row and strand the user's applied status on the old one.
     # A row whose uid still equals its group_key, from an employer ATS, is
     # exactly that case. Idempotent: adoption sets schema_v=2 and changes uid.
-    if "source" in {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}:
+    con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+    already = con.execute("SELECT 1 FROM meta WHERE key='legacy_repair'").fetchone()
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
+    if not already and "source" in cols:
+        # Runs EXACTLY ONCE per database. It ran on every connect before, and a
+        # date bound cannot separate the two cases, because a legacy row written
+        # by the old build and a fresh row written by the new one share today's
+        # date. Left unbounded it stamps a fresh-install ATS row that merely has
+        # an empty external_id, and a later distinct requisition then adopts and
+        # hijacks its history.
         marks = ",".join("?" * len(ATS_SOURCES))
         con.execute(f"UPDATE jobs SET schema_v = 1 WHERE uid = group_key AND schema_v = 2 "
                     f"AND source IN ({marks})", tuple(sorted(ATS_SOURCES)))
+    con.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('legacy_repair', ?)",
+                (date.today().isoformat(),))
     con.commit()
 
 
@@ -116,7 +127,7 @@ def connect() -> sqlite3.Connection:
 def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Job]]:
     """Insert or refresh. Returns (new_jobs, seen_again)."""
     today = date.today().isoformat()
-    new, again, adopted = [], [], []
+    new, again = [], []
     # A legacy row can be adopted by exactly one requisition, and the batch
     # order decides which. Put the req whose URL matches the stored row first,
     # so the user's "applied" status follows the job they actually applied to
@@ -155,7 +166,6 @@ def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Jo
                                     (j.uid, legacy["uid"]))
                         cur.execute("UPDATE OR REPLACE sightings SET uid=? WHERE uid=?",
                                     (j.uid, legacy["uid"]))
-                        adopted.append(j.uid)
                         cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
                         row = cur.fetchone()
                     except sqlite3.IntegrityError:
@@ -202,7 +212,8 @@ VALID_STATUS = ("new", "reviewed", "applied", "rejected", "ignored")
 
 def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
               healthy_boards: set[tuple[str, str]],
-              healthy_feeds: set[str]) -> tuple[int, int]:
+              healthy_feeds: set[str],
+              known_boards: set[tuple[str, str]] | None = None) -> tuple[int, int]:
     """Close the loop after a run. Returns (delisted, demoted).
 
     Two holes this fills, both of which surfaced dead or wrong rows as live:
@@ -243,8 +254,30 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
                            % ",".join("?" * len(board_keys)))
             params += board_keys
         if healthy_feeds:
-            clauses.append("source IN (%s)" % ",".join("?" * len(healthy_feeds)))
+            # A feed may namespace its rows ("jobspy:indeed") while the registry
+            # knows it as "jobspy", so compare the part before the colon.
+            # Without this those rows never accumulate a miss and dead postings
+            # pile up silently.
+            clauses.append(
+                "(CASE WHEN instr(source, ':') > 0 "
+                "THEN substr(source, 1, instr(source, ':') - 1) ELSE source END) IN (%s)"
+                % ",".join("?" * len(healthy_feeds)))
             params += sorted(healthy_feeds)
+        # Orphaned employer rows. Renaming a company in the registry changes the
+        # board identity, so the rows written under the OLD name match no
+        # healthy board and would never be retired - they would accumulate as
+        # permanently live jobs, the exact inverse of the bug this key fixed.
+        # A row from an employer ATS whose board is in no registry entry at all
+        # can never be re-sighted, so it is eligible. Aggregator rows are
+        # excluded: their company is the employer named by the feed and is not
+        # expected in the registry.
+        if known_boards is not None:
+            known = [f"{a}\x00{b}" for a, b in known_boards]
+            ats = sorted(ATS_SOURCES)
+            orphan = ("(source IN (%s) AND (source || x'00' || company) NOT IN (%s))"
+                      % (",".join("?" * len(ats)), ",".join("?" * len(known)) or "''"))
+            clauses.append(orphan)
+            params += ats + known
         # Count the miss first; only retire on the SECOND consecutive one.
         # Board counts are stable run to run (15,879 / 15,932 / 15,935 across
         # three real runs), so a single absence is decent evidence - but not
@@ -262,7 +295,8 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
             (today, today, today, *params),
         )
         cur.execute(
-            "UPDATE jobs SET delisted_on=? WHERE delisted_on IS NULL AND misses >= 2",
+            "UPDATE jobs SET delisted_on=? WHERE delisted_on IS NULL AND misses >= 2 "
+            "AND status NOT IN ('applied','rejected','ignored')",
             (today,),
         )
         delisted = cur.rowcount

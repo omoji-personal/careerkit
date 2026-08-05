@@ -10,3 +10,8 @@ __pycache__/
 .DS_Store
 *.local.*
 .pytest_cache/
+
+# iCloud sync duplicates ("store 2.py"). These have been committed by
+# accident before and one held stale code that would NameError if copied back.
+*[0-9].py
+* [0-9].*

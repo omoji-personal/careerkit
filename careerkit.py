@@ -182,7 +182,10 @@ def cmd_pull(args) -> None:
     demoted = {j.uid: (j.score, j.gate, " | ".join(j.reasons))
                for j in scored
                if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.uid not in kept_uids}
-    n_delisted, n_demoted = store.reconcile(con, demoted, healthy_boards, healthy_feeds)
+    n_delisted, n_demoted = store.reconcile(
+        con, demoted, healthy_boards, healthy_feeds,
+        known_boards={(e.get("ats"), e.get("name") or e.get("slug", ""))
+                      for e in reg.get("employers", [])})
 
     rows = store.query(con, min_score=args.min_score, limit=300)
     health = list(con.execute(
