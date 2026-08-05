@@ -859,3 +859,38 @@ def test_workday_discovery_is_reachable():
     import inspect
     from engine import discover
     assert "discover_workday(" in inspect.getsource(discover.discover_company)
+
+
+def test_company_name_variants_collapse_to_one_role():
+    """"Acme", "Acme Inc." and "ACME, Inc" are one employer. Keying on the raw
+    string showed the same role two or three times, stopped sightings from
+    aggregating, and left siblings visible after one was marked applied."""
+    keys = {J(company=c).group_key for c in
+            ("Acme", "Acme Inc.", "ACME, Inc", "Acme Technologies", "The Acme Company")}
+    assert len(keys) == 1, "same employer produced several group_keys"
+    assert J(company="Acme").group_key != J(company="Acmen").group_key
+
+
+@pytest.mark.parametrize("asked,declared,want", [
+    ("Par", "Parachute Health", "bad"),
+    ("Acme", "Acme Plumbing", "review"),
+    ("Community", "Rome Community Partners", "review"),
+    ("Stripe", "Stripe", "ok"),
+    ("NeuraFlash", "NeuraFlash LLC", "ok"),
+    ("Included Health", "Included Health, Inc.", "ok"),
+])
+def test_verify_does_not_wave_through_impostor_boards(asked, declared, want):
+    """Bare substring containment let a short name claim any longer one that
+    contained it. "Par" matching "Parachute Health" is very likely how a dead
+    ashby:Par board entered the registry and 404'd for sixteen runs."""
+    from engine.verify import compare
+    assert compare(asked, declared)[0] == want
+
+
+def test_a_board_pinned_at_its_page_ceiling_is_flagged():
+    """A truncated board returns a STABLE count, so the drop-to-zero guard never
+    fires and the coverage loss is permanent and silent."""
+    from engine.adapters import at_page_ceiling
+    assert at_page_ceiling("workable", 100)
+    assert not at_page_ceiling("workable", 43)
+    assert not at_page_ceiling("greenhouse", 550)

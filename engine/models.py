@@ -67,7 +67,7 @@ class Job:
 
     @property
     def _basis(self) -> str:
-        return f"{self.company.lower().strip()}|{_norm_title(self.title)}"
+        return f"{_norm_company(self.company)}|{_norm_title(self.title)}"
 
     @property
     def group_key(self) -> str:
@@ -111,6 +111,25 @@ class Job:
         d["reasons"] = " | ".join(self.reasons)
         d["uid"] = self.uid
         return d
+
+
+# Corporate suffixes and decoration that differ between an employer's own ATS
+# and the aggregators reporting the same employer. Without this "Acme",
+# "Acme Inc." and "ACME, Inc" were three different group_keys, so one role
+# appeared three times, sightings could not aggregate, and marking one applied
+# left the others on screen.
+_CO_SUFFIX = {
+    "inc", "llc", "ltd", "limited", "corp", "corporation", "co", "company",
+    "gmbh", "plc", "sa", "nv", "bv", "ag", "holding", "holdings", "group",
+    "technologies", "technology", "labs", "the",
+}
+
+
+def _norm_company(c: str) -> str:
+    c = (c or "").lower()
+    c = re.sub(r"[^a-z0-9 ]", " ", c)
+    words = [w for w in c.split() if w and w not in _CO_SUFFIX]
+    return " ".join(words) or c.strip()
 
 
 def _norm_title(t: str) -> str:

@@ -124,7 +124,10 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
                 else:
                     print(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
             all_jobs.extend(jobs)
-            print(f"  {label:<46} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
+            capped = _adapters.at_page_ceiling(e.get("ats"), len(jobs))
+            print(f"  {label:<46} {len(jobs):>4}"
+                  + (f"  [{err}]" if err else "")
+                  + ("  !! at page ceiling, likely truncated" if capped else ""))
     if not employers_only:
         feeds = [f for f in reg.get("feeds", []) if f.get("active", True)]
         print(f"\nPolling {len(feeds)} aggregator feeds...")

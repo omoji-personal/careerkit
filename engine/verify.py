@@ -142,11 +142,23 @@ def compare(asked: str, declared: str | None) -> tuple[str, str]:
         return "review", (f"declared only '{declared[:50]}' - could be a different "
                           f"'{a[0]}' company, confirm once")
 
-    if fa in fd or fd in fa:
+    # Substring containment alone waved impostors through: "Par" is inside
+    # "Parachute Health", "Acme" inside "Acme Plumbing", "Community" inside
+    # "Rome Community Partners". Require the containment to start at a token
+    # boundary AND the shorter name to be substantial, so a three-letter slug
+    # cannot claim an unrelated company.
+    # Bare containment waved impostors through: "Par" sits inside "Parachute
+    # Health", "Acme" inside "Acme Plumbing", "Community" inside "Rome Community
+    # Partners". Require the shorter name to be most of the longer one, so a
+    # short slug cannot claim an unrelated company that merely contains it.
+    shorter, longer = (fa, fd) if len(fa) <= len(fd) else (fd, fa)
+    if shorter and shorter in longer and len(shorter) / max(1, len(longer)) >= 0.6:
         return "ok", f"declared '{declared[:60]}'"
 
     ratio = SequenceMatcher(None, fa, fd).ratio()
-    overlap = len(set(a) & set(d)) / max(1, len(set(a)))
+    # Jaccard, not intersection-over-asked: the latter gave "Acme" vs "Acme
+    # Plumbing" a perfect 1.0 because every token of the asked name appeared.
+    overlap = len(set(a) & set(d)) / max(1, len(set(a) | set(d)))
     if ratio >= 0.85 or overlap >= 0.75:
         return "ok", f"declared '{declared[:60]}'"
     return "review", f"declared '{declared[:60]}' - ambiguous, confirm once"

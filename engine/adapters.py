@@ -673,6 +673,20 @@ def _looks_relevant(title: str) -> bool:
     return bool(_RELEVANT_HINT.search(title or ""))
 
 
+# Hard ceilings each adapter can reach. A board sitting exactly on one is very
+# likely truncated rather than exactly that size, and because the number is
+# stable the drop-to-zero guard never notices.
+PAGE_CEILING = {
+    "oracle_orc": 2000, "eightfold": 1000, "phenom": 1000,
+    "icims": 30 * 50, "smartrecruiters": 5000, "workable": 100,
+}
+
+
+def at_page_ceiling(ats: str, n: int) -> bool:
+    c = PAGE_CEILING.get(ats)
+    return bool(c and n >= c)
+
+
 def run_adapter(cfg: dict) -> tuple[list[Job], str | None]:
     """Dispatch one registry entry. Returns (jobs, error_or_None)."""
     ats = cfg.get("ats")
