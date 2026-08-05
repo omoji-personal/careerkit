@@ -383,17 +383,36 @@ class Profile:
         p.dream_lanes.sort(key=lambda t: -t[0])
         p.slot_block = _compile_alt(exc.get("titles"), where="exclusions.titles", strict=True)
         p.products_block = _compile_alt(exc.get("products"), where="exclusions.products", strict=True)
-        certs = [str(c).strip() for c in (exc.get("certs_refused") or [])
+        # Blank entries in an EXCLUSION list were filtered out silently. An
+        # exclusion that quietly compiles to nothing stops applying, and
+        # everything it banned starts surfacing, which is the one failure the
+        # docs promise cannot happen. Raise instead.
+        certs_raw = exc.get("certs_refused") or []
+        certs = [str(c).strip() for c in certs_raw
                  if c is not None and str(c).strip()]
+        if certs_raw and len(certs) != len(certs_raw):
+            raise ProfileError(
+                "exclusions.certs_refused: blank or null entries in an EXCLUSION "
+                "list. Remove them in profile/profile.yaml and re-run.")
         if certs:
             alt = "|".join(re.escape(c) for c in certs)
             p.certs_refused = re.compile(
                 r"\b(" + alt + r")\b.{0,40}\b(required|must have|require|certification required)\b|"
                 r"\b(required|must have)\b.{0,40}\b(" + alt + r")\b", re.I)
+        # body_patterns is a hard kill rail (a match sets EXCLUDED), so it gets
+        # the same strict treatment as the other exclusion lists. It did not,
+        # which made the documented "an exclusion never fails open" guarantee
+        # false for the one exclusion type the example profile demonstrates.
         for b in exc.get("body_patterns") or []:
-            pat = _compile_alt([b] if isinstance(b, str) else b.get("terms", []))
-            if pat:
-                p.body_blocks.append((pat, b if isinstance(b, str) else b.get("label", "blocked")))
+            terms = [b] if isinstance(b, str) else (b.get("terms") or [])
+            pat = _compile_alt(terms, where="exclusions.body_patterns", strict=True)
+            if not pat:
+                raise ProfileError(
+                    f"exclusions.body_patterns: entry {b!r} has no usable terms. "
+                    "An exclusion that compiles to nothing stops applying, and "
+                    "everything it banned starts appearing. Fix it in "
+                    "profile/profile.yaml and re-run.")
+            p.body_blocks.append((pat, b if isinstance(b, str) else b.get("label", "blocked")))
         p.competing = _compile_alt(exc.get("competing_platforms"), where="exclusions.competing_platforms", strict=True)
         p.domain_terms = _compile_alt(cfg.get("domain_terms"))
         for s in cfg.get("signals") or []:

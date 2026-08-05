@@ -37,12 +37,15 @@ folder.** This file is the short version, and the map.
 Three, and they explain most of the code.
 
 **Your rules are the only rules.** Every gate reads your profile. There is no
-hidden preference, no default job family, no home city baked into the engine. A
-test walks the source tree and fails the build if a personal term appears in it.
+hidden preference, no default job family, no home metro baked into the engine. A
+test parses every module in `engine/` and fails the build if one of a list of
+person-specific terms appears outside a docstring. A tripwire, not a proof, but
+the engine cannot quietly acquire an opinion about what you want.
 
-**Never fail open, never fail silent.** A rule that cannot be compiled raises
-rather than being skipped, because a skipped exclusion means everything you
-banned starts surfacing. A board that returns HTTP 200 with an unparseable body
+**Never fail open, never fail silent.** In an exclusion list, a rule that cannot
+be compiled stops the run rather than being skipped, because a skipped exclusion
+means everything you banned starts surfacing. Elsewhere the engine names what it
+ignored and carries on. A board that returns HTTP 200 with an unparseable body
 is recorded as broken, not as empty, because "no openings" and "we are blocking
 you" look identical from the outside and only one of them is true.
 
@@ -52,11 +55,11 @@ and anything that vanished from a healthy board gets written back as closed.
 
 ## The rule behind the rules
 
-Every test in the suite locks down a defect that was really in the code. Not
-hypothetical coverage: specific failures that had shipped and would otherwise
-come back.
+The suite is written against defects that were really in the code rather than
+for coverage. Not hypothetical: specific failures that had shipped and would
+otherwise come back.
 
-That count is the honest measure of this tool. A job-search engine that is
+That discipline is the honest measure of this tool. A job-search engine that is
 subtly wrong does not crash. It hands you a clean, confident, plausible report
 with the wrong jobs in it, and you never find out. Most of the engineering here
 is aimed at that failure mode rather than at the happy path.

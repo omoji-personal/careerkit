@@ -50,7 +50,12 @@ def _use_venv() -> None:
                      "Delete the .venv folder and run ./setup.sh again.")
 
 
-_use_venv()
+# Only when run AS A PROGRAM. At import time this re-exec'd the interpreter with
+# the importing script's argv, so `import careerkit` from any other script died
+# with "the following arguments are required: cmd". Tests never caught it because
+# pytest already runs inside .venv, where the re-exec is a no-op.
+if __name__ == "__main__":
+    _use_venv()
 
 try:
     import yaml  # noqa: E402

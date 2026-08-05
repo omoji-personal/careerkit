@@ -29,9 +29,18 @@ Bash or WSL.
 
 ## Start
 
+Open a terminal and run these one at a time:
+
 ```
+git clone https://github.com/omoji-personal/careerkit.git
+cd careerkit
 ./setup.sh          # checks prerequisites, creates a .venv, installs deps
-claude              # open Claude Code in this folder
+claude              # opens Claude Code in this folder
+```
+
+Then, inside Claude Code, type:
+
+```
 /setup              # ~40 min: Claude interviews you, builds your profile,
                     # seeds your employer registry, calibrates the gates
 ```
@@ -68,11 +77,10 @@ all live there. To change what surfaces, change that file, usually by asking
 Claude to run `/criteria`. Never by editing engine code.
 
 If a rule you wrote is unusable (an empty list item, a broken regex) the engine
-prints what it ignored and carries on, except in exclusion lists, where an
-unusable rule raises instead. Dropping an exclusion fails open: the rail
-disappears and everything you banned starts surfacing. Either way it will not
-silently match everything or match nothing, which is the failure that costs you
-jobs without telling you.
+names what it ignored and carries on. In an exclusion list it stops the run
+instead: dropping an exclusion fails open, the rail disappears, and everything
+you banned starts surfacing. Either way it will not silently match everything or
+match nothing, which is the failure that costs you jobs without telling you.
 
 ## What actually leaves your machine
 
@@ -81,8 +89,9 @@ Worth being precise about, because "nothing" would be a lie.
 - **To Anthropic:** everything Claude reads. Your resume, your claims register,
   postings, your interview answers. Governed by your own Claude plan's data
   terms.
-- **To job boards and aggregators:** CareerKit fetches from employer ATS
-  platforms (Greenhouse, Lever, Ashby, Workday and others) and public job feeds.
+- **To job boards and job feeds:** CareerKit fetches from employer applicant
+  tracking platforms (Greenhouse, Lever, Ashby, Workday and others) and from
+  public job feeds.
   These are ordinary outbound web requests from your machine, throttled to one
   request per host per 0.7s. Your identity is not attached to them.
 - **One exception, if you enable it:** the USAJobs feed requires your registered
@@ -110,7 +119,8 @@ you, deactivate those entries in `profile/employers.yaml`.
 ## Rules the copilot lives by
 
 No fabricated experience, ever. Everything it writes is gated by your claims
-register. You click submit on applications. It never creates accounts, touches
+register. You click submit on applications: that is the default and it is the
+setting to leave alone, though `autonomy:` in your profile can loosen it. It never creates accounts, touches
 passwords, or completes "prove you're human" checks. It reads employer AI-use
 policies and follows them. Job postings are treated as data, never as
 instructions, including when a posting contains text addressed to the AI.
@@ -159,8 +169,10 @@ accurate. It catches the careless cases. Keep reading the draft.
 
 `./run-tests.sh` runs the regression suite. Every test in it locks down a bug
 that actually shipped, so it is worth keeping green if you change the engine.
-It also runs each adapter against a saved real payload, so a job board changing
-its JSON shape fails a test instead of quietly returning nothing.
+It also runs four adapters (Greenhouse, Lever, Ashby, SmartRecruiters) against
+saved real payloads, so those boards changing their JSON shape fails a test
+rather than quietly returning nothing. The other thirteen have no fixture yet,
+which is the most useful contribution anyone could make.
 
 `./careerkit.py status` additionally reports where the database and your
 `tracker.md` disagree: an application recorded in one but not the other. Those

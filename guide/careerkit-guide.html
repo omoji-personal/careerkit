@@ -20,7 +20,9 @@
   --mono:Menlo,Consolas,"DejaVu Sans Mono",monospace;
   --body:Charter,"Palatino Linotype",Palatino,Georgia,serif;
   --measure:5.35in;
-  --rail:1.05in;
+  --rail:0.5in;   /* how far a fine rule bleeds into the margin. Must stay
+                      SMALLER than the page margin below, or the bars that make
+                      it a gate are clipped off the sheet and the motif vanishes. */
 }
 *{ box-sizing:border-box; }
 html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; background:var(--paper); }
@@ -130,7 +132,7 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
       <div><b>ATS platforms polled</b><span>17</span></div>
       <div><b>Public job feeds</b><span>14</span></div>
       <div><b>Auto-discoverable</b><span>13 platforms</span></div>
-      <div><b>One run</b><span class="sig">19,550 → 161</span></div>
+      <div><b>One run</b><span>19,550 read, <em class="sig">161</em> passed</span></div>
       <div><b>Regression tests</b><span>157</span></div>
       <div><b>Continuous integration</b><span>3.10 / 3.12 / 3.13</span></div>
       <div><b>Engine</b><span>Python, SQLite</span></div>
@@ -167,15 +169,17 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
 
   <h3>The ratio is the product</h3>
   <p>In a single run against 273 employer boards and 14 feeds, CareerKit pulled 19,550
-  postings. 275 were in your job family at all. <em class="sig">161</em> cleared every
-  screenable rail. The other 19,389 were screened out with a recorded reason, and you can
-  read those reasons whenever you want to argue with them.</p>
+  postings. 275 were in the right job family at all, and of those
+  <em class="sig">161</em> cleared every screenable rail. Everything else was screened
+  out against a named rule, and <code>audit</code> shows you those decisions whenever
+  you want to argue with them.</p>
 
   <div class="note">
     <span class="h">Why this matters</span>
-    A filter you cannot inspect is a filter you cannot trust. Every screening decision
-    keeps its reason, and <code>audit</code> exists specifically so you can review what
-    was killed and overrule it.
+    A filter you cannot inspect is a filter you cannot trust. Screened-out postings are
+    not kept in the database, so <code>audit</code> re-polls the boards and re-scores
+    them to show you what was killed and why. That is the command that lets you overrule
+    your own gates.
   </div>
 
   <h3>What it is not</h3>
@@ -190,8 +194,11 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
   <h2>Setup, and why the interview is not optional</h2>
   <hr class="gate fine">
 
-  <p>You need Claude Code (Pro plan minimum), Python 3.10 or newer, and git. macOS and
-  Linux work as they are; on Windows, run the shell scripts from Git Bash or WSL.</p>
+  <p>You need Claude Code (Pro plan minimum), Python 3.10 or newer, and git. Install
+  Claude Code with <code>npm install -g @anthropic-ai/claude-code</code>, which needs
+  Node 18 or newer. Chrome and the Claude-in-Chrome extension are optional, and only
+  needed if you want it filling application forms for you. macOS and Linux work as they
+  are; on Windows, run the shell scripts from Git Bash or WSL.</p>
 
 <pre>git clone https://github.com/omoji-personal/careerkit.git
 cd careerkit
@@ -246,9 +253,10 @@ claude              # open Claude Code in this folder
   what surfaces, change that file, usually by asking Claude to run <code>/criteria</code>.
   Never by editing engine code.</p>
 
-  <p>This is enforced, not merely intended: a test walks the source tree and fails the
-  build if a personal term, a home city or an employer name appears in the engine. The
-  engine cannot develop a private opinion about what you want.</p>
+  <p>This is enforced, not merely intended: a test parses every module in
+  <code>engine/</code> and fails the build if one of a list of person-specific terms
+  appears outside a docstring. It is a tripwire rather than a proof, but it means the
+  engine cannot quietly acquire an opinion about what you want.</p>
 
   <div class="note">
     <span class="h">If a rule is unusable</span>
@@ -379,9 +387,11 @@ claude              # open Claude Code in this folder
 
   <div class="note">
     <span class="h">The test suite is the point</span>
-    There are 157 tests and each one pins down a defect that was really in the code. When
-    a batch of fixes went in, the fixes themselves were attacked, and every serious defect
-    in the second round had been introduced by a fix from the first.
+    The suite is written against defects that were really in the code rather than for
+    coverage, and it runs 162 cases across 122 test functions (several are parametrised
+    over the inputs that actually broke). When a batch of fixes went in, the fixes
+    themselves were attacked, and every serious defect in the second round had been
+    introduced by a fix from the first.
   </div>
 </section>
 

@@ -398,7 +398,7 @@ def workday(cfg: dict) -> list[Job]:
             rt = str(info.get("remoteType") or "")
             job.remote_flag = bool(re.search(r"remote", rt, re.I)) if rt else None
             # The list view collapses multi-site reqs to "5 Locations"; the real
-            # cities (including Atlanta) are only in the detail payload.
+            # specific cities are only in the detail payload.
             locs = [info.get("location")] + list(info.get("additionalLocations") or [])
             locs = [x for x in locs if x]
             if locs:
@@ -639,7 +639,7 @@ def personio(cfg: dict) -> list[Job]:
 # purpose: until somebody says what they are looking for, every posting is worth
 # a detail request.
 #
-# This was a hardcoded regex of the original author's job search
+# This was a hardcoded regex of one person's job search
 # (salesforce|crm|solution architect|...) until 2026-08-05. Five adapters gate
 # their detail fetch on it, so for anyone whose work was not Salesforce it
 # returned False for every title, no description was ever fetched, and their

@@ -23,6 +23,19 @@
       .wm tspan.k { fill:#14654A; }
       .sub    { font-family:Menlo,Consolas,"DejaVu Sans Mono",monospace; font-size:8px;
                 letter-spacing:3.1px; fill:#5C6B63; }
+      /* The mark is drawn in near-black on a transparent ground, which disappears
+         on a dark canvas such as GitHub's dark theme, where it is the first thing
+         in the README. Invert the ink and lift the signal so it holds contrast;
+         the signal green stays the signal, only brighter. */
+      @media (prefers-color-scheme: dark) {
+        .bar, .barlt { stroke:#E7ECEA; }
+        .wm          { fill:#E7ECEA; }
+        .wm tspan.k  { fill:#3FA97F; }
+        .pass        { fill:#3FA97F; }
+        .noise       { fill:#7C8A83; }
+        .track       { stroke:#3A4440; }
+        .sub         { fill:#94A29B; }
+      }
     </style>
   </defs>
 

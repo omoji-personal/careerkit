@@ -30,6 +30,19 @@ command -v git >/dev/null || {
 }
 echo "  git $(git --version | awk '{print $3}')"
 
+# Claude Code is the interface this whole tool is built around, and setup called
+# itself a prerequisite check while never looking for it. A user could complete
+# setup, be told to run `claude`, and hit "command not found" with nothing in the
+# output to explain it. A warning rather than a failure: the CLI still works.
+if command -v claude >/dev/null; then
+  echo "  claude $(claude --version 2>/dev/null | head -1 | awk '{print $1}')"
+else
+  echo "  ! claude not found. CareerKit is driven from Claude Code."
+  echo "    Install it:  npm install -g @anthropic-ai/claude-code   (needs Node 18+)"
+  echo "    The ./careerkit.py commands work without it; the /search style"
+  echo "    workflows do not."
+fi
+
 # Python puts the venv binaries in Scripts/ on Windows and bin/ everywhere else.
 # The README tells Windows users to run this from Git Bash, where the shell is
 # POSIX but the Python is native, so hardcoding bin/ broke setup for exactly the

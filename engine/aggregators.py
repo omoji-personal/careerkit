@@ -171,8 +171,8 @@ def jobicy(_cfg: dict) -> list[Job]:
 def themuse(cfg: dict) -> list[Job]:
     """Free, no key. No full-text search, so filter by category + location."""
     out = []
-    # Categories and locations came from the original author's own search until
-    # 2026-08-05, including his home city hardcoded as "Atlanta, GA". The Muse
+    # Categories and locations were hardcoded to one person's search until
+    # 2026-08-05, including a specific home metro. The Muse
     # has no full-text search, so a category list is unavoidable; it is now
     # configurable per user via profile/employers.yaml, and the location follows
     # the profile rather than a stranger's hometown.

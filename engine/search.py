@@ -31,7 +31,7 @@ from .http import fetch
 def set_core_terms(terms):
     """Discovery queries, from the user's profile.
 
-    CORE_TERMS below was a hardcoded list of the original author's Salesforce
+    CORE_TERMS below was a hardcoded list of one person's Salesforce
     searches until 2026-08-05, so `careerkit.py search` found nothing for anyone
     whose field was different. The list survives only as a fallback for a
     profile that supplies none."""
@@ -43,7 +43,7 @@ def set_core_terms(terms):
 
 
 # Discovery queries. EMPTY by default and filled from the user's profile by
-# set_core_terms(). Held ~30 of the original author's Salesforce/CRM/nonprofit
+# set_core_terms(). Held ~30 hardcoded Salesforce/CRM/nonprofit
 # searches until 2026-08-06, in a repo whose README promises nothing personal
 # lives here; anyone in another field also got zero discovery hits from them.
 CORE_TERMS: list[str] = []
@@ -71,7 +71,7 @@ ATS_DOMAINS = [
     "dayforcehcm.com",
 ]
 
-# Geography for discovery queries. Held the original author's "atlanta"/"georgia"
+# Geography for discovery queries. Held one person's home metro and state
 # until 2026-08-06; set_geo_terms() now takes them from the profile's metros.
 GEO_TERMS = ["remote", '"united states"']
 

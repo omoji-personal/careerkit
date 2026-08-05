@@ -770,7 +770,7 @@ def test_discovery_queries_follow_the_profile():
 
 def test_no_hardcoded_city_or_employer_in_the_engine():
     """The repo is public and general-purpose. No string LITERAL in engine/ may
-    carry the original author's city or job family.
+    carry a specific person's city or job family.
 
     Walks the AST so docstrings are exempt: the fix for this defect is
     documented in prose that necessarily names the terms it removed, and a naive
@@ -1650,3 +1650,53 @@ def test_a_preexisting_row_resighted_after_stamping_began_is_not_new():
     # is true forever for these, so they were announced as new in every report.
     assert not is_new(_sight(first_seen_run=None, last_seen_run=None,
                              first_seen="2026-07-30", last_seen="2026-07-30"))
+
+
+# --------------------------------------------------------------------------
+# every exclusion list fails CLOSED (found by audit: the docs promised this and
+# two of the five exclusion types did not do it)
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("exclusions", [
+    {"body_patterns": ["/unclosed(/"]},           # uncompilable regex
+    {"body_patterns": [{"label": "oops"}]},       # entry with no terms at all
+    {"body_patterns": [{"terms": ["", "/.+/"]}]},  # compiles to match-everything
+    {"certs_refused": ["", "   "]},               # blanks silently filtered away
+])
+def test_an_unusable_exclusion_stops_the_run(exclusions, tmp_path):
+    """An exclusion that quietly compiles to nothing STOPS APPLYING, so everything
+    the user banned starts surfacing. body_patterns and certs_refused were being
+    dropped with a warning while the README and the guide both promised that
+    exclusions raise instead."""
+    import yaml as _yaml
+    from engine.score import Profile, ProfileError
+    cfg = {"lanes": [{"key": "a", "titles": ["Product Manager"]}],
+           "exclusions": exclusions}
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump(cfg))
+    with pytest.raises(ProfileError):
+        Profile.load(p)
+
+
+def test_a_usable_body_pattern_still_loads(tmp_path):
+    import yaml as _yaml
+    from engine.score import Profile
+    cfg = {"lanes": [{"key": "a", "titles": ["Product Manager"]}],
+           "exclusions": {"body_patterns": [{"terms": ["door to door"], "label": "field sales"}],
+                          "certs_refused": ["PMP"]}}
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump(cfg))
+    prof = Profile.load(p)
+    assert prof.body_blocks and prof.certs_refused
+
+
+def test_importing_the_cli_does_not_re_exec_the_interpreter():
+    """`_use_venv()` ran at import time and re-exec'd with the IMPORTING script's
+    argv, so `import careerkit` from any other script died with "the following
+    arguments are required: cmd". Invisible to pytest, which already runs inside
+    .venv where the re-exec is a no-op."""
+    import re as _re
+    src = (ROOT / "careerkit.py").read_text()
+    m = _re.search(r'^(\S.*)?\n?if __name__ == "__main__":\n    _use_venv\(\)', src, _re.M)
+    assert m, "_use_venv() must be guarded by __name__ == '__main__'"
+    assert not _re.search(r"^_use_venv\(\)$", src, _re.M), "unguarded call is back"
