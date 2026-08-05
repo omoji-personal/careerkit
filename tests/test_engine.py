@@ -399,3 +399,21 @@ def test_context_prefix_still_enriches_a_real_title():
     j.lane = "sf-direct"
     out = score(j, p)
     assert out.gate in ("QUALIFIED", "VERIFY"), out.reasons
+
+
+# --------------------------------------------------------------------------
+# HTTP cache eviction
+# Nothing ever removed expired entries. One real run left 734 MB / 4,913 files.
+# --------------------------------------------------------------------------
+
+def test_expired_cache_entries_are_pruned(tmp_path, monkeypatch):
+    import time
+    from engine import http
+    monkeypatch.setattr(http, "CACHE_DIR", tmp_path)
+    fresh, stale = tmp_path / "fresh.json", tmp_path / "stale.json"
+    fresh.write_text("{}"); stale.write_text("{}")
+    old = time.time() - (http.CACHE_TTL + 60)
+    os.utime(stale, (old, old))
+    removed = http.prune_cache()
+    assert removed == 1
+    assert fresh.exists() and not stale.exists()

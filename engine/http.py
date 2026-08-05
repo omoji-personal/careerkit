@@ -53,6 +53,30 @@ def _cache_path(key: str) -> Path:
     return CACHE_DIR / f"{hashlib.sha256(key.encode()).hexdigest()[:32]}.json"
 
 
+_pruned = False
+
+
+def prune_cache(max_age: int = CACHE_TTL) -> int:
+    """Drop cache entries past their TTL. Returns files removed.
+
+    Nothing ever deleted expired entries, so the cache only grew: one real run
+    left 734 MB across 4,913 files. Since runs are normally further apart than
+    the 6h TTL, an expired entry can never be reused anyway - it is pure disk
+    cost. Runs once per process, lazily, on the first fetch."""
+    if not CACHE_DIR.exists():
+        return 0
+    cutoff = time.time() - max_age
+    n = 0
+    for p in CACHE_DIR.glob("*.json"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                n += 1
+        except OSError:
+            pass
+    return n
+
+
 def fetch(
     url: str,
     *,
@@ -64,7 +88,11 @@ def fetch(
     tries: int = 2,
 ) -> tuple[int, str]:
     """Return (status_code, text). Never raises on network error; returns (0, "")."""
+    global _pruned
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    if not _pruned:
+        _pruned = True
+        prune_cache()
     key = f"{method}|{url}|{json.dumps(json_body, sort_keys=True) if json_body else ''}"
     cp = _cache_path(key)
 
