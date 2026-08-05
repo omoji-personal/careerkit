@@ -170,12 +170,24 @@ def discover_company(
             results = []
             for f in as_completed(futures):
                 plat, s, n = f.result()
-                if n:
+                # `if n:` dropped any employer with zero openings on the day
+                # discovery ran, permanently, even though the board was real and
+                # correctly identified. Keep it; n == 0 just sorts last.
+                if n is not None:
                     results.append((PROBE_ORDER.index(plat) if plat in PROBE_ORDER else 99,
+                                    -1 if n else 0,
                                     plat, s, n))
         if results:
-            _, plat, s, n = sorted(results)[0]   # prefer the most reliable platform
+            _, _, plat, s, n = sorted(results)[0]   # reliable platform, roles first
             return {"name": name, "ats": plat, "slug": s, "open_roles": n}
+    # Workday is the biggest enterprise ATS and had no probe here at all:
+    # discover_workday was fully implemented and never called. It walks tenant x
+    # datacenter x site so it is slow, which is why it runs only after the fast
+    # probes miss rather than alongside them.
+    wd = discover_workday(name)
+    if wd:
+        wd.setdefault("name", name)
+        return wd
     return None
 
 

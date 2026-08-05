@@ -123,7 +123,25 @@ _URL_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("rippling", re.compile(r"ats\.rippling\.com/([a-z0-9_-]+)", re.I)),
     ("teamtailor", re.compile(r"https?://([a-z0-9_-]+)\.teamtailor\.com", re.I)),
     ("icims", re.compile(r"https?://careers-([a-z0-9_-]+)\.icims\.com", re.I)),
+    # Added 2026-08-06. Without these five, ingest-urls dropped exactly the
+    # enterprise boards they host, silently, while the user believed the
+    # employer had been registered.
+    ("personio", re.compile(r"https?://([a-z0-9_-]+)\.jobs\.personio\.(?:com|de)", re.I)),
+    ("phenom", re.compile(r"https?://([a-z0-9_-]+)\.phenompeople\.com", re.I)),
+    ("paylocity", re.compile(r"recruiting\.paylocity\.com/[Rr]ecruiting/[Jj]obs/[A-Za-z]+/([A-Za-z0-9-]+)", re.I)),
+    ("eightfold", re.compile(r"jobs\.eightfold\.ai/(?:careers/?)?(?:job/\d+)?[^?]*\?[^#]*domain=([a-z0-9_.-]+)", re.I)),
+    ("oracle_orc", re.compile(r"https?://([a-z0-9_-]+)\.fa\.[a-z0-9]+\.oraclecloud\.com", re.I)),
 ]
+
+# Platforms whose registry entry needs more than a slug. resolve() returns the
+# slug it could see; these tell the caller what is still missing rather than
+# letting a half-formed entry into the registry.
+EXTRA_CONFIG = {
+    "oracle_orc": ("host", "site"),
+    "phenom": ("host",),
+    "eightfold": ("domain",),
+    "paylocity": ("guid",),
+}
 _WORKDAY_RE = re.compile(r"https?://([a-z0-9_-]+)\.(wd\d+)\.myworkdayjobs\.com/(?:[a-z-]+/)?([A-Za-z0-9_-]+)", re.I)
 
 

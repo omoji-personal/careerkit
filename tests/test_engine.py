@@ -802,3 +802,60 @@ def test_no_hardcoded_city_or_employer_in_the_engine():
                 assert term not in low, (
                     f"{f.name}:{node.lineno} hardcodes a personal term "
                     f"({term!r}): {node.value[:70]!r}")
+
+
+# --------------------------------------------------------------------------
+# External review 2026-08-06: coverage and safety of the URL ingest path.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("want,url", [
+    ("personio",   "https://acme.jobs.personio.com/job/123"),
+    ("phenom",     "https://acme.phenompeople.com/job/456"),
+    ("paylocity",  "https://recruiting.paylocity.com/Recruiting/Jobs/Details/123456"),
+    ("eightfold",  "https://jobs.eightfold.ai/careers/job/12345?domain=acme.com"),
+    ("oracle_orc", "https://eabc.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/9"),
+    ("greenhouse", "https://boards.greenhouse.io/stripe/jobs/1"),
+    ("workday",    "https://acme.wd1.myworkdayjobs.com/en-US/External"),
+])
+def test_resolve_covers_every_supported_platform(want, url):
+    """Five platforms had no pattern, so ingest-urls dropped exactly the
+    enterprise boards they host while the user believed it had registered them."""
+    from engine.search import resolve
+    assert resolve(url).ats == want
+
+
+@pytest.mark.parametrize("bad", [
+    "$(whoami)", "`id`", "file:///etc/passwd", "javascript:alert(1)",
+    "https://x.com/\nSet-Cookie: a=b", "", "   ",
+])
+def test_ingest_refuses_unusable_urls(bad):
+    """URLs come from boards, recruiter mail and paste. Refuse with a reason
+    rather than letting a malformed string become a registry entry."""
+    import careerkit
+    url, why = careerkit._safe_url(bad)
+    assert url == "" and why
+
+
+def test_ingest_accepts_real_urls_with_awkward_characters():
+    import careerkit
+    for good in ("https://jobs.eightfold.ai/careers/job/1?domain=a.com&x=R%26D",
+                 "https://boards.greenhouse.io/acme/jobs/1?gh_src=a+b"):
+        url, why = careerkit._safe_url(good)
+        assert url == good, why
+
+
+def test_discovery_keeps_a_board_with_no_openings_today():
+    """`if n:` discarded a correctly-identified board that happened to have zero
+    postings the day discovery ran, permanently."""
+    import inspect
+    from engine import discover
+    src = inspect.getsource(discover.discover_company)
+    assert "if n is not None:" in src, "zero-opening boards are being discarded again"
+
+
+def test_workday_discovery_is_reachable():
+    """discover_workday was fully implemented and never called, so the largest
+    enterprise ATS was invisible to discovery."""
+    import inspect
+    from engine import discover
+    assert "discover_workday(" in inspect.getsource(discover.discover_company)

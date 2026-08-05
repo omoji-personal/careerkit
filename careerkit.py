@@ -290,30 +290,99 @@ def cmd_discover(args) -> None:
             print(f"  {m}")
 
 
+_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _safe_url(u: str) -> tuple[str, str]:
+    """Return (url, "") if usable, else ("", reason).
+
+    URLs arrive from job boards, recruiter emails and whatever the user pasted,
+    so they are untrusted input. This never shells out, but validating here
+    means a malformed or hostile string is refused with a reason instead of
+    flowing onward as a half-parsed registry entry."""
+    u = (u or "").strip()
+    if not u:
+        return "", "empty"
+    if _CTRL.search(u):
+        return "", "contains control characters"
+    if u.startswith("-"):
+        return "", "starts with '-' (would read as a flag)"
+    from urllib.parse import urlparse
+    try:
+        parts = urlparse(u)
+    except Exception as e:
+        return "", f"unparseable ({type(e).__name__})"
+    if parts.scheme not in ("https", "http"):
+        return "", f"scheme {parts.scheme or 'missing'!r}, expected https"
+    if not parts.netloc:
+        return "", "no host"
+    return u, ""
+
+
+def cmd_ingest_url(args) -> None:
+    """Register ONE url passed as an argument. No temp file, no shell string."""
+    url, why = _safe_url(args.url)
+    if not url:
+        sys.exit(f"Refused: {why}\n  {args.url[:120]!r}")
+    _ingest([url])
+
+
 def cmd_ingest_urls(args) -> None:
+    path = Path(args.file)
+    if not path.exists():
+        sys.exit(f"File not found: {path}")
+    _ingest([l.strip() for l in path.read_text().splitlines() if l.strip()])
+
+
+def _ingest(raw_urls: list[str]) -> None:
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     known = {(e.get("slug") or e.get("tenant"), e.get("ats")) for e in reg["employers"]}
-    urls = [l.strip() for l in Path(args.file).read_text().splitlines()
-            if l.strip().startswith("http")]
-    added = 0
-    for u in urls:
+    added, skipped = 0, []
+    for raw in raw_urls:
+        u, why = _safe_url(raw)
+        if not u:
+            skipped.append((raw, why))
+            continue
         h = resolve(u)
-        if not h.ats or not h.slug or (h.slug, h.ats) in known:
+        if not h.ats or not h.slug:
+            # Was a silent `continue`, so the documented LinkedIn/Indeed coverage
+            # path dropped exactly the platforms resolve() cannot parse and the
+            # user believed the employer had been registered.
+            skipped.append((u, "no adapter recognises this URL shape"))
+            continue
+        if (h.slug, h.ats) in known:
+            skipped.append((u, f"already registered ({h.ats}:{h.slug})"))
             continue
         entry = {"name": h.company_guess or h.slug, "ats": h.ats, "slug": h.slug,
                  "lane": "url-ingested", "tier": "C", "active": True}
         if h.ats == "workday":
             parts = workday_parts(u)
             if not parts:
+                skipped.append((u, "workday URL missing tenant/datacenter/site"))
                 continue
             entry.update(parts)
             entry.pop("slug", None)
+        else:
+            # Some platforms need config a job URL does not carry. Writing a
+            # partial entry produces a KeyError at poll time, so say what is
+            # missing and let the user add it rather than registering a board
+            # that cannot be polled.
+            need = _search.EXTRA_CONFIG.get(h.ats, ())
+            missing = [k for k in need if k not in entry]
+            if missing:
+                skipped.append((u, f"{h.ats} board found (slug {h.slug}) but needs "
+                                   f"{', '.join(missing)} added by hand in "
+                                   f"profile/employers.yaml"))
+                continue
         known.add((h.slug, h.ats))
         reg["employers"].append(entry)
         added += 1
         print(f"  + {entry['name']:<34} {h.ats}:{h.slug}")
     save_employers(reg)
-    print(f"\n{added} new employers from {len(urls)} URLs. Registry: {len(reg['employers'])}.")
+    for u, why in skipped:
+        print(f"  - skipped: {why}\n      {u[:110]}")
+    print(f"\n{added} new employer(s) from {len(raw_urls)} URL(s); "
+          f"{len(skipped)} skipped. Registry: {len(reg['employers'])}.")
 
 
 def cmd_verify(args) -> None:
@@ -405,6 +474,9 @@ def main() -> None:
 
     sp = sub.add_parser("ingest-urls"); sp.set_defaults(fn=cmd_ingest_urls)
     sp.add_argument("file")
+
+    sp = sub.add_parser("ingest-url"); sp.set_defaults(fn=cmd_ingest_url)
+    sp.add_argument("url", help="one job URL; pass after -- if it starts with a dash")
 
     sp = sub.add_parser("verify"); sp.set_defaults(fn=cmd_verify)
     sp.add_argument("--all", action="store_true")
