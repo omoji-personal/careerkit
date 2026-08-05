@@ -55,6 +55,7 @@ except ModuleNotFoundError as _e:  # pragma: no cover - environment failure
              "Run ./setup.sh (it builds .venv and installs what CareerKit needs).\n"
              "If you already did, delete the .venv folder and run it again.")
 
+from engine import http as _http
 from engine import store  # noqa: E402
 from engine import aggregators  # noqa: E402
 from engine import adapters as _adapters
@@ -101,7 +102,7 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
     if not feeds_only:
         emps = [e for e in reg.get("employers", []) if e.get("active", True)]
         if tier:
-            emps = [e for e in emps if e.get("tier") in tier]
+            emps = [e for e in emps if (e.get("tier") or "C") in tier]   # missing tier defaulted to C rather than vanishing
         print(f"Polling {len(emps)} employer boards...")
         for e in emps:
             jobs, err = run_adapter(e)
@@ -155,6 +156,7 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
 
 
 def cmd_pull(args) -> None:
+    _http.set_cache_enabled(not getattr(args, "no_cache", False))
     profile = load_profile()
     aggregators.set_search_terms(profile.search_terms)
     _adapters.set_relevance_terms(profile.relevance_terms)
@@ -222,6 +224,7 @@ def cmd_pull(args) -> None:
 
 
 def cmd_audit(args) -> None:
+    _http.set_cache_enabled(not getattr(args, "no_cache", False))
     """The calibration loop: re-fetch live boards, re-score, and show what got
     KILLED and why - so silent false negatives get caught, not discovered
     months later. Use --grep to focus (e.g. --grep 'product manager')."""
@@ -459,12 +462,16 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("pull"); sp.set_defaults(fn=cmd_pull)
+    sp.add_argument("--no-cache", action="store_true",
+                    help="bypass the 6h HTTP cache and really re-fetch")
     sp.add_argument("--employers", action="store_true")
     sp.add_argument("--feeds", action="store_true")
     sp.add_argument("--tier", nargs="*")
     sp.add_argument("--min-score", type=int, default=0)
 
     sp = sub.add_parser("audit"); sp.set_defaults(fn=cmd_audit)
+    sp.add_argument("--no-cache", action="store_true",
+                    help="bypass the 6h HTTP cache and really re-fetch")
     sp.add_argument("--grep", help="only show kills whose title matches this regex")
     sp.add_argument("--samples", type=int, default=6)
     sp.add_argument("--employers", action="store_true", help="skip feeds (faster)")

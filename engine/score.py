@@ -25,7 +25,7 @@ from pathlib import Path
 
 import yaml
 
-from .models import Job
+from .models import Job, _norm_company
 
 # --------------------------------------------------------------------------
 # Universal patterns (person-independent, keep in sync with lessons learned)
@@ -419,7 +419,8 @@ def score(job: Job, p: Profile) -> Job:
     # URL was surfaced as VERIFY.
     if ctx and title.strip() and ctx.lower() not in title.lower():
         title = f"{ctx} {title}"
-    exempt = job.company.lower() in p.dream_companies or getattr(job, "rails_exempt", False)
+    exempt = (job.company.lower() in p.dream_companies
+              or _norm_company(job.company) in {_norm_company(c) for c in p.dream_companies}) or getattr(job, "rails_exempt", False)
     job.rails_exempt = exempt
 
     # --- title fit -------------------------------------------------------
@@ -430,7 +431,7 @@ def score(job: Job, p: Profile) -> Job:
             base, lane_key = weight, key
             break
     if not base:
-        for weight, pat, key in p.lanes[:12]:
+        for weight, pat, key in p.lanes:   # was [:12]; lanes 13+ silently lost the body fallback
             if pat.search(text[:1500]):
                 base, lane_key = max(10, weight - 22), key
                 reasons.append("fit only in body, not title")
@@ -509,6 +510,8 @@ def score(job: Job, p: Profile) -> Job:
             job.reasons = [f"requires refused cert: '{m.group(0)[:60]}'"]
             return job
 
+    # Deliberately NOT exempt-gated, unlike every other rail: a dream employer
+    # cannot waive a clearance requirement, so enthusiasm should not bypass it.
     if p.block_clearance:
         m = CLEARANCE.search(text)
         if m:

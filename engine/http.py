@@ -63,6 +63,17 @@ def _cache_path(key: str) -> Path:
 
 
 _pruned = False
+_cache_enabled = True
+
+
+def set_cache_enabled(on: bool) -> None:
+    """Process-wide cache switch.
+
+    `audit` documents itself as re-fetching live boards but, inside the 6h TTL,
+    re-scored the same cached payloads. Threading use_cache through 17 adapter
+    signatures would be worse than a process flag."""
+    global _cache_enabled
+    _cache_enabled = bool(on)
 
 
 def prune_cache(max_age: int = CACHE_TTL) -> int:
@@ -105,6 +116,7 @@ def fetch(
     key = f"{method}|{url}|{json.dumps(json_body, sort_keys=True) if json_body else ''}"
     cp = _cache_path(key)
 
+    use_cache = use_cache and _cache_enabled
     if use_cache and cp.exists() and (time.time() - cp.stat().st_mtime) < CACHE_TTL:
         try:
             blob = json.loads(cp.read_text())
@@ -130,7 +142,8 @@ def fetch(
                 break
         except Exception:
             status, text = 0, ""
-        time.sleep(1.2 * (attempt + 1))
+        if attempt + 1 < tries:      # never sleep after the last attempt
+            time.sleep(1.2 * (attempt + 1))
 
     if use_cache and status == 200:
         try:

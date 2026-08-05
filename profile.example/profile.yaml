@@ -53,6 +53,10 @@ exclusions:
   competing_platforms: []  # ecosystems to slot-block by title
   body_patterns: []        # e.g. [{terms: ["/\\d\\+? years.{0,20}sql required/"], label: sql-primary}]
   clearance: true          # kill clearance-gated roles
+  # NOTE: the quota rail also matches "prospecting" and "pipeline generation",
+  # which are ordinary marketing and product vocabulary as well as sales-quota
+  # vocabulary. If you are in one of those fields it may kill in-family roles;
+  # run /audit to see what it caught, and set this false if it is wrong for you.
   quota: true              # kill quota-carrying roles
 
 # The role must mention at least one of these somewhere, or it is not in

@@ -12,7 +12,7 @@ Two backends:
     rather than junk.
   * the query matrix is also dumped to out/search-queries.txt so a higher
     quality search tool can be run over it and the results fed back via
-    `sourcer.py ingest-urls`.
+    `careerkit.py ingest-urls`.
 """
 from __future__ import annotations
 

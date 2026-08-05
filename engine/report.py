@@ -12,7 +12,6 @@ from pathlib import Path
 
 import os
 import datetime as _dt
-import datetime as _dt
 OUT_DIR = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "out"
 
 

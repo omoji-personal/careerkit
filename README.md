@@ -48,6 +48,11 @@ LinkedIn work), `/outreach` (referrals, thank-yous, nudges, draft-only by
 default), `/criteria` (change your search rules), `/audit` (review what the
 gates killed; run it monthly, it keeps the filter honest).
 
+**Location scoring is US-centric by design.** The rails reason about US states,
+US remote idioms and your target metros; a role outside the US is screened out
+unless your profile says otherwise. If you are job-hunting outside the US, that
+is the part to change first.
+
 ## Where your rules live
 
 `profile/profile.yaml` is the only place scoring rules exist. Lanes (the job
@@ -77,7 +82,7 @@ Worth being precise about, because "nothing" would be a lie.
   whoever hosts it.
 - **No telemetry.** Nothing is reported back to the author or anyone else.
 
-Delete `profile/` and `data/` and nothing personal remains locally.
+Delete `profile/`, `data/` and `out/` and nothing personal remains locally. (`out/` holds your generated reports, which name the roles you were matched to.)
 
 **On scraping:** two feeds (`linkedin_guest`, `jobspy`) read public search pages
 rather than official APIs. They are off by default and can be rate-limited or
@@ -111,6 +116,8 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py audit         # show what the gates killed, and why
 ./careerkit.py report        # regenerate the latest report
 ./careerkit.py mark UID applied
+./careerkit.py ingest-url -- "https://boards.greenhouse.io/acme/jobs/1"
+./careerkit.py pull --no-cache      # really re-fetch, ignoring the 6h cache
 ```
 
 `./run-tests.sh` runs the regression suite. Every test in it locks down a bug
