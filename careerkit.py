@@ -9,13 +9,15 @@
     ./careerkit.py verify              confirm each board belongs to the right company
     ./careerkit.py ingest-urls FILE    resolve pasted job URLs -> employers, register
     ./careerkit.py audit [--grep RX]   re-fetch + re-score, show every kill and why
-    ./careerkit.py report | status | mark UID STATUS
+    ./careerkit.py report [--format json|csv]   rebuild the report, or export rows
+    ./careerkit.py doctor              one check: profile, sources, freshness, drift
+    ./careerkit.py status | mark UID STATUS
 """
 from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime
+from datetime import date, datetime
 import re
 import sqlite3
 import sys
@@ -66,6 +68,7 @@ from engine.discover import discover_many  # noqa: E402
 from engine import pull as _pull
 from engine.report import write_report  # noqa: E402
 from engine.score import Profile, ProfileError, score  # noqa: E402
+from engine import score as _score_mod
 from engine import search as _search
 from engine.search import resolve, workday_parts  # noqa: E402
 from engine.verify import verify_entry  # noqa: E402
@@ -356,9 +359,143 @@ def cmd_report(args) -> None:
         "SELECT * FROM source_health ORDER BY consecutive_failures DESC"))
     last = con.execute("SELECT detail FROM runs WHERE finished IS NOT NULL "
                        "ORDER BY run_id DESC LIMIT 1").fetchone()
-    import json
     detail = json.loads(last["detail"]) if last and last["detail"] else {}
+
+    fmt = getattr(args, "format", "md")
+    if fmt in ("json", "csv"):
+        # The Markdown report is for reading. This is for everything else:
+        # a spreadsheet, a diff between two runs, or your own analysis. The
+        # database is the only place this data existed and SQL is not a
+        # reasonable thing to ask a non-programmer for.
+        out = OUT_DIR_FOR_EXPORT()
+        out.mkdir(parents=True, exist_ok=True)
+        cols = ["uid", "company", "title", "location", "score", "gate", "status",
+                "source", "comp_min", "comp_max", "first_seen", "last_seen", "url"]
+        path = out / f"export-{date.today().isoformat()}.{fmt}"
+        if fmt == "json":
+            path.write_text(json.dumps([{c: r[c] for c in cols} for r in rows], indent=1))
+        else:
+            import csv
+            with path.open("w", newline="") as fh:
+                w = csv.writer(fh)
+                w.writerow(cols)
+                for r in rows:
+                    w.writerow([r[c] for c in cols])
+        print(f"Exported {len(rows)} rows: {path}")
+        return
+
     print("Report:", write_report(con, rows, health=health, run_detail=detail))
+
+
+def OUT_DIR_FOR_EXPORT() -> Path:
+    from engine.report import OUT_DIR
+    return OUT_DIR
+
+
+def cmd_claims_lint(args) -> None:
+    """Mechanical second pass over a draft: numbers and names the register does
+    not back. A cheap backstop for the truth rule, NOT a substitute for it."""
+    from engine.claims import lint, format_report
+    draft_p = Path(args.draft)
+    reg_p = Path(args.register) if args.register else PROFILE.parent / "claims.md"
+    if not draft_p.exists():
+        sys.exit(f"No such draft: {draft_p}")
+    if not reg_p.exists():
+        sys.exit(f"No claims register at {reg_p}. It is written by /setup, and "
+                 f"linting a draft against nothing would flag every fact in it.")
+    findings = lint(draft_p.read_text(), reg_p.read_text(),
+                    extra_allowed=Path(args.allow).read_text() if args.allow else "")
+    print(format_report(findings, draft_p.name))
+    sys.exit(1 if findings else 0)
+
+
+def cmd_history(args) -> None:
+    """What has actually happened, in order.
+
+    The jobs row holds only the CURRENT status, so applying and then being
+    rejected left no trace of the first event and no way to ask how long
+    anything took."""
+    con = store.connect()
+    rows = store.history(con, uid=getattr(args, "uid", None))
+    if not rows:
+        print("No events recorded yet. They accumulate as you mark postings.")
+        return
+    for e in rows:
+        who = f"{e['company']} - {e['title']}" if e["company"] else e["uid"]
+        print(f"{e['at'][:16]}  {e['kind']:<18} {who[:56]}"
+              + (f"  ({e['detail'][:40]})" if e["detail"] else ""))
+
+
+def cmd_doctor(args) -> None:
+    """One place that answers "is this thing working?".
+
+    The signals existed but were scattered across status, the report footer and
+    the tail of a pull, so a broken feed or a stale database was only noticed by
+    someone already looking for it."""
+    con = store.connect()
+    reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
+    problems, notes = [], []
+
+    if not PROFILE.exists():
+        problems.append("no profile/profile.yaml - run /setup in Claude Code")
+    else:
+        try:
+            for w in _score_mod.validate_profile(
+                    yaml.safe_load(PROFILE.read_text()) or {}):
+                notes.append(f"profile: {w}")
+        except ProfileError as e:
+            problems.append(f"profile: {e}")
+
+    n_emp = len([e for e in reg.get("employers", []) if e.get("active", True)])
+    if not n_emp:
+        problems.append("no active employers registered - run discover or ingest-urls")
+
+    broken = _pull.broken_sources(con, reg)
+    for b in broken:
+        problems.append(f"source failing x{b['consecutive_failures']}: {b['source']} "
+                        f"({(b['last_error'] or '')[:40]})")
+    for d in store.dropped_to_zero(con):
+        problems.append(f"{d['source']} returned 0 but had {d['prev_count']} last run")
+
+    last = con.execute("SELECT started, finished FROM runs "
+                       "ORDER BY run_id DESC LIMIT 1").fetchone()
+    if last is None:
+        notes.append("no completed run yet - try: ./careerkit.py pull")
+    else:
+        age = (datetime.now() - datetime.fromisoformat(last["started"])).days
+        if age >= 7:
+            problems.append(f"last run was {age} days ago - postings may be stale")
+        if not last["finished"]:
+            problems.append("the last run did not finish (interrupted?)")
+
+    drift = tracker_drift(con)
+    for url, sect, uid in drift["missing_from_db"]:
+        problems.append(f"tracked as {sect} but still open in the database: "
+                        f"{url[:60]} (mark {uid} applied)")
+    for r in drift["missing_from_tracker"]:
+        notes.append(f"applied with no tracker entry: {r['company']} - {r['title']}")
+
+    scrapers = [f["name"] for f in reg.get("feeds", [])
+                if f.get("active", True)
+                and aggregators.policy(f["name"])["kind"] == "scraping"]
+    if scrapers:
+        notes.append(f"enabled scrapers (read public HTML, can be blocked): "
+                     f"{', '.join(scrapers)}")
+
+    ok = con.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"]
+    print(f"CareerKit check: {ok} postings, {n_emp} active employers, "
+          f"{len(reg.get('feeds', []))} feeds")
+    if problems:
+        print(f"\n{len(problems)} problem(s):")
+        for p in problems:
+            print(f"  x  {p}")
+    else:
+        print("\n  no problems found")
+    if notes:
+        print(f"\n{len(notes)} note(s):")
+        for n in notes:
+            print(f"  -  {n}")
+    sys.exit(1 if problems else 0)
 
 
 def cmd_status(args) -> None:
@@ -382,22 +519,24 @@ def cmd_status(args) -> None:
     if drift["missing_from_db"]:
         print(f"\n{len(drift['missing_from_db'])} role(s) tracked as applied in "
               f"tracker.md but not in the database - these will resurface as new:")
-        for url, sect in drift["missing_from_db"][:15]:
-            print(f"  [{sect}] {url}")
-        print("  fix: ./careerkit.py mark <uid> applied")
+        for url, sect, uid in drift["missing_from_db"][:15]:
+            print(f"  [{sect}] {url}\n        ./careerkit.py mark {uid} applied")
+    if drift.get("untracked_history"):
+        print(f"\n  ({drift['untracked_history']} tracker application(s) have no database "
+              f"row at all: applied before the database existed, or the posting has "
+              f"since closed. Nothing to act on.)")
     if drift["missing_from_tracker"]:
         print(f"\n{len(drift['missing_from_tracker'])} application(s) in the database "
               f"with no tracker.md entry (no date, contact, or resume version recorded):")
         for r in drift["missing_from_tracker"][:15]:
             print(f"  {r['company']} - {r['title']}  ({r['status']})")
 
-    broken = list(con.execute(
-        "SELECT * FROM source_health WHERE consecutive_failures >= 2 "
-        "ORDER BY consecutive_failures DESC"))
+    broken = _pull.broken_sources(con, reg)
     if broken:
         print(f"\n{len(broken)} sources failing repeatedly (silent coverage loss):")
         for b in broken[:20]:
             print(f"  {b['source']:<46} x{b['consecutive_failures']}  {(b['last_error'] or '')[:50]}")
+        print("  (deactivate one in employers.yaml to stop polling and silence it)")
 
 
 DISCOVERED_QUEUE = ROOT / "data" / "discovered-pending.json"
@@ -450,6 +589,29 @@ def tracker_drift(con) -> dict:
 
     Matching is by URL, which is the only identifier both sides carry."""
     import re as _re
+
+    def norm(u: str) -> tuple[str, str]:
+        """(host, path) with scheme, www, query and trailing slash removed.
+
+        Exact string matching was useless in practice: the same opening is
+        written as a bare host in one place and a full https URL with tracking
+        query in the other, so every row looked like drift."""
+        u = _re.sub(r"^https?://", "", (u or "").strip().rstrip(".,;)"))
+        u = _re.sub(r"^www\.", "", u).split("?")[0].split("#")[0].rstrip("/")
+        host, _, path = u.partition("/")
+        return host.lower(), path.lower()
+
+    def same(a: tuple[str, str], b: tuple[str, str]) -> bool:
+        """Same host, and one path is a prefix of the other. A tracker entry
+        naming only the careers site still matches the full requisition URL."""
+        if a[0] != b[0]:
+            return False
+        return a[1].startswith(b[1]) or b[1].startswith(a[1])
+
+    # A line the user has already marked dead or rejected is not an open
+    # application, so it must not demand a matching 'applied' row.
+    CLOSED = _re.compile(r"\b(dead|rejected|closed|withdrawn|declined)\b", _re.I)
+
     text = TRACKER.read_text() if TRACKER.exists() else ""
     section, in_tracker = "", {}
     for line in text.splitlines():
@@ -460,20 +622,49 @@ def tracker_drift(con) -> dict:
         if h:
             section = h.group(1).strip()
             continue
-        for url in _re.findall(r"https?://[^\s)\]>,]+", line):
-            in_tracker.setdefault(url.rstrip(".,"), section)
+        # Bare hosts count too: the tracker often names a careers site rather
+        # than pasting a 200-character requisition URL.
+        # A scheme or a path is required. A bare host is too weak a signal:
+        # "Apollo.io" is a company name in prose and matched as a hostname.
+        for url in _re.findall(
+                r"https?://[^\s)\]>,]+|\b[a-z0-9.-]+\.(?:com|org|net|io|co|gov|us|ai)/[^\s)\]>,]*",
+                line, _re.I):
+            key = norm(url)
+            if key[0] and key[1] and key not in in_tracker:
+                in_tracker[key] = (section, bool(CLOSED.search(line)), url)
 
-    db_applied, missing_from_tracker, missing_from_db = {}, [], []
+    db_applied, missing_from_tracker = [], []
     for r in con.execute("SELECT uid, url, company, title, status FROM jobs "
                          "WHERE status IN ('applied','rejected')"):
-        db_applied[r["url"]] = r
-        if r["url"] not in in_tracker:
+        key = norm(r["url"])
+        db_applied.append(key)
+        if not any(same(key, t) for t in in_tracker):
             missing_from_tracker.append(r)
-    for url, sect in in_tracker.items():
-        if sect in ("APPLIED", "INTERVIEWING") and url not in db_applied:
-            missing_from_db.append((url, sect))
+
+    # The actionable case is narrow: a row EXISTS for a role the tracker calls
+    # applied, and that row is still open. Those resurface in the next report as
+    # fresh finds the user already acted on.
+    #
+    # A tracker entry with NO row at all is not that. It predates the database,
+    # or the posting has since closed, and nothing can resurface from a row that
+    # does not exist. Reporting those as drift produced six permanent warnings
+    # that no action could ever clear, which is how a check trains you to ignore
+    # it. They are counted, not listed.
+    missing_from_db, untracked_history = [], 0
+    for key, (sect, closed, raw) in in_tracker.items():
+        if sect not in ("APPLIED", "INTERVIEWING") or closed:
+            continue
+        if any(same(key, d) for d in db_applied):
+            continue
+        row = next((r for r in con.execute("SELECT uid, url, status FROM jobs")
+                    if same(key, norm(r["url"]))), None)
+        if row is None:
+            untracked_history += 1
+        else:
+            missing_from_db.append((raw, sect, row["uid"]))
     return {"missing_from_tracker": missing_from_tracker,
             "missing_from_db": missing_from_db,
+            "untracked_history": untracked_history,
             "tracker_exists": TRACKER.exists()}
 
 
@@ -554,12 +745,24 @@ def main() -> None:
 
     sp = sub.add_parser("report"); sp.set_defaults(fn=cmd_report)
     sp.add_argument("--min-score", type=int, default=0)
+    sp.add_argument("--format", choices=["md", "json", "csv"], default="md",
+                    help="md rebuilds the readable report; json/csv export the rows")
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
 
     sp = sub.add_parser("db", help="database integrity and backup")
     sp.set_defaults(fn=cmd_db)
     sp.add_argument("action", choices=["check", "backup"])
+
+    sp = sub.add_parser("doctor"); sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("claims-lint"); sp.set_defaults(fn=cmd_claims_lint)
+    sp.add_argument("draft", help="the resume, cover letter or answer to check")
+    sp.add_argument("--register", help="default: profile/claims.md")
+    sp.add_argument("--allow", help="extra authoritative text, e.g. the posting")
+
+    sp = sub.add_parser("history"); sp.set_defaults(fn=cmd_history)
+    sp.add_argument("uid", nargs="?", help="one posting, or omit for everything")
 
     sp = sub.add_parser("mark"); sp.set_defaults(fn=cmd_mark)
     # choices, not a free string: argparse rejects a typo before the database

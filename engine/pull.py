@@ -156,3 +156,23 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
             "kept": len(keep), "new": len(new), "qualified": qualified,
             "delisted": n_delisted, "demoted": n_demoted,
             "excluded": excluded, "errors": fetched["errors"], "rows": rows}
+
+
+def broken_sources(con, reg: dict, threshold: int = 2) -> list:
+    """Sources failing repeatedly, EXCLUDING ones the user already retired.
+
+    A deactivated board keeps its failure history in source_health forever, so
+    boards that were dealt with weeks ago kept appearing under "failing
+    repeatedly". A warning list containing things you have already handled is a
+    warning list you learn to skip, which is how a real outage goes unnoticed.
+
+    Lives here rather than in a CLI for the same reason the pull loop does:
+    both front ends print this and one of them had already drifted."""
+    retired = {f"{e.get('ats')}:{e.get('name')}"
+               for e in reg.get("employers", []) if not e.get("active", True)}
+    retired |= {f"feed:{f.get('name')}"
+                for f in reg.get("feeds", []) if not f.get("active", True)}
+    return [b for b in con.execute(
+        "SELECT * FROM source_health WHERE consecutive_failures >= ? "
+        "ORDER BY consecutive_failures DESC", (threshold,))
+        if b["source"] not in retired]

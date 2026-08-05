@@ -164,6 +164,16 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
           "with rising consecutive failures has broken and is silently costing coverage._",
           ""]
 
+    # Which of the feeds that ran are scrapers rather than APIs. Worth stating in
+    # the artifact the user keeps, not only in the README they read once.
+    from .aggregators import policy as _policy
+    scraped = sorted({h["source"][5:] for h in health if str(h["source"]).startswith("feed:")
+                      and _policy(h["source"][5:])["kind"] == "scraping"
+                      and (h["last_count"] or 0) > 0})
+    if scraped:
+        L += [f"_Results above include {', '.join(scraped)}, which read public "
+              "search pages rather than an official API._", ""]
+
     if run_detail.get("discovered"):
         L += ["---", "", "## Newly discovered employers", "",
               "_Found by search, resolved to a pollable board, and added to the "

@@ -84,9 +84,12 @@ Worth being precise about, because "nothing" would be a lie.
 
 Delete `profile/`, `data/` and `out/` and nothing personal remains locally. (`out/` holds your generated reports, which name the roles you were matched to.)
 
-**On scraping:** two feeds (`linkedin_guest`, `jobspy`) read public search pages
-rather than official APIs. They are off by default and can be rate-limited or
-blocked. Enable them knowingly.
+**On scraping:** every feed declares what it actually is, in
+`engine/aggregators.py` under `SOURCE_POLICY`: an official public API, one that
+needs your own API key, or a scraper. Two (`linkedin_guest`, `jobspy`) read
+public search pages rather than official APIs. They are off by default, can be
+rate-limited or blocked, and their terms of use are yours to read. Any run whose
+results include a scraper says so in the report.
 
 ## Rules the copilot lives by
 
@@ -106,19 +109,37 @@ whether you are comfortable before pointing this at a real job search.
 `../careerkit-instances/<name>`, with its own profile, database, and reports.
 Instances never see each other's data. Use one per person.
 
+It clones from this repo's `origin` on GitHub, so `cd` into an instance and
+`git pull` really does bring engine fixes. (Pass `--local` to clone from your
+working copy instead, including unreleased changes; updates then only work on
+the machine that made it.)
+
 ## Running the engine directly
 
 Claude does this for you, but it is a normal CLI:
 
 ```
 ./careerkit.py pull          # poll every board + feed, score, write a report
+./careerkit.py doctor        # one check: profile, sources, freshness, drift
 ./careerkit.py status        # what is in the database, which sources are broken
 ./careerkit.py audit         # show what the gates killed, and why
 ./careerkit.py report        # regenerate the latest report
+./careerkit.py report --format csv    # export the rows for a spreadsheet
+./careerkit.py history       # every status change, in order
+./careerkit.py claims-lint out/cover.md     # numbers and names not in your register
 ./careerkit.py mark UID applied
 ./careerkit.py ingest-url -- "https://boards.greenhouse.io/acme/jobs/1"
 ./careerkit.py pull --no-cache      # really re-fetch, ignoring the 6h cache
 ```
+
+`doctor` is the one to run if something feels off. It checks your profile parses,
+that sources are answering, that the last run finished and is recent, and that
+your database and `tracker.md` agree about what you have applied to.
+
+`claims-lint` is a mechanical backstop for the truth rule: it flags numbers and
+proper names in a draft that do not appear in `profile/claims.md`. It reads
+tokens, not meaning, so a clean result is not a certification that a document is
+accurate. It catches the careless cases. Keep reading the draft.
 
 `./run-tests.sh` runs the regression suite. Every test in it locks down a bug
 that actually shipped, so it is worth keeping green if you change the engine.

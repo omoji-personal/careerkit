@@ -514,3 +514,49 @@ def jobspy_feed(cfg: dict) -> list[Job]:
                 source=f"jobspy:{g('site')}", raw={},
             ))
     return out
+
+
+# --------------------------------------------------------------------------
+# Source policy (CK-020)
+# --------------------------------------------------------------------------
+# What each feed actually is, so a user can decide before enabling it rather
+# than discovering it from a rate-limit or a blocked request. Three kinds:
+#
+#   official   a documented public API, no key needed
+#   keyed      a documented API that requires the user's own registration
+#   scraping   reads public HTML search pages; no API contract, can be
+#              rate-limited or blocked, and the terms of use are the operator's
+#              to read. These are OFF by default in the shipped registry.
+#
+# `identifies_user` flags the one case where a request carries something
+# personal: USAJobs requires the registered email in a request header.
+SOURCE_POLICY = {
+    "remotive":       {"kind": "official", "note": "public JSON API"},
+    "remoteok":       {"kind": "official", "note": "public JSON API"},
+    "arbeitnow":      {"kind": "official", "note": "public job-board API"},
+    "himalayas":      {"kind": "official", "note": "public JSON API"},
+    "weworkremotely": {"kind": "official", "note": "public RSS"},
+    "jobicy":         {"kind": "official", "note": "public JSON API"},
+    "themuse":        {"kind": "official", "note": "public API, key optional"},
+    "workingnomads":  {"kind": "official", "note": "public JSON API"},
+    "adzuna":         {"kind": "keyed", "note": "needs app id + key"},
+    "usajobs":        {"kind": "keyed", "note": "needs API key AND sends your "
+                                                "registered email in a header",
+                       "identifies_user": True},
+    "findwork":       {"kind": "keyed", "note": "needs API token"},
+    "careerjet":      {"kind": "keyed", "note": "needs affiliate id"},
+    "linkedin_guest": {"kind": "scraping",
+                       "note": "reads the public guest search pages; no API "
+                               "contract, can be blocked. Off by default."},
+    "jobspy":         {"kind": "scraping",
+                       "note": "third-party scraper for Indeed / ZipRecruiter / "
+                               "Glassdoor / Google. Off by default."},
+}
+
+
+def policy(name: str) -> dict:
+    return SOURCE_POLICY.get(name, {"kind": "unknown", "note": ""})
+
+
+def scraping_feeds() -> list[str]:
+    return sorted(n for n, p in SOURCE_POLICY.items() if p["kind"] == "scraping")

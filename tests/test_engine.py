@@ -1137,7 +1137,9 @@ def test_tracker_drift_detects_both_directions(db, tmp_path, monkeypatch):
 
     d = ck.tracker_drift(db)
     assert [r["company"] for r in d["missing_from_tracker"]] == ["Gamma"]
-    assert [u for u, _ in d["missing_from_db"]] == ["https://boards.greenhouse.io/acme/1"]
+    # a row EXISTS for this one and is still open, so it WILL resurface
+    assert [u for u, _s, _uid in d["missing_from_db"]] == ["https://boards.greenhouse.io/acme/1"]
+    assert d["missing_from_db"][0][2] == j1.uid, "must name the uid to fix it with"
 
 
 def test_tracker_drift_is_quiet_when_the_two_agree(db, tmp_path, monkeypatch):
@@ -1461,3 +1463,144 @@ def test_no_cli_reimplements_the_pull_loop():
     src = (ROOT / "careerkit.py").read_text()
     assert "_pull.run_pull" in src or "run_pull(" in src
     assert "def _fetch_all" not in src, "the pull loop has been re-inlined into the CLI"
+
+
+def test_drift_matches_the_same_job_written_two_different_ways(db, tmp_path, monkeypatch):
+    """The tracker names a careers site; the database holds the full requisition
+    URL with a tracking query. Exact string matching called every row drift,
+    which is the same as reporting nothing."""
+    import importlib
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    t = tmp_path / "tracker.md"
+    t.write_text("## APPLIED (do not resurface)\n"
+                 "- 2026-08-05 McKesson - mckesson.wd3.myworkdayjobs.com/External_Careers\n")
+    monkeypatch.setattr(ck, "TRACKER", t)
+    j = J(company="McKesson", title="SF Consultant",
+          url="https://mckesson.wd3.myworkdayjobs.com/External_Careers/job/Columbus/x?src=LI")
+    store.upsert(db, [j])
+    store.set_status(db, j.uid, "applied")
+    d = ck.tracker_drift(db)
+    assert not d["missing_from_tracker"], "same job, two URL forms, must reconcile"
+    assert not d["missing_from_db"]
+
+
+def test_a_role_marked_dead_does_not_demand_an_applied_row(db, tmp_path, monkeypatch):
+    """A line the user already closed is not an open application."""
+    import importlib
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    t = tmp_path / "tracker.md"
+    t.write_text("## APPLIED (do not resurface)\n"
+                 "- Jax - DEAD (owner call) - https://jax.example.com/JobBoard/job/a2s/detail\n"
+                 "- Live One - https://live.example.com/jobs/1\n")
+    monkeypatch.setattr(ck, "TRACKER", t)
+    # both need a live row, else they are history with nothing to act on
+    store.upsert(db, [J(company="Jax", url="https://jax.example.com/JobBoard/job/a2s/detail"),
+                      J(company="Live", url="https://live.example.com/jobs/1")])
+    open_urls = [u for u, _s, _uid in ck.tracker_drift(db)["missing_from_db"]]
+    assert not any("jax" in u for u in open_urls), "a dead role must not be chased"
+    assert any("live.example.com" in u for u in open_urls)
+
+
+def test_a_tracker_entry_with_no_database_row_is_counted_not_listed(db, tmp_path, monkeypatch):
+    """Applications predating the database, or whose posting has closed, cannot
+    resurface: there is no row. Listing them produced permanent warnings that no
+    action could clear, which teaches you to skip the whole check."""
+    import importlib
+    ck = importlib.import_module("careerkit")
+    t = tmp_path / "tracker.md"
+    t.write_text("## APPLIED (do not resurface)\n"
+                 "- 2026-07-04 Old One - https://gone.example.com/jobs/9\n")
+    monkeypatch.setattr(ck, "TRACKER", t)
+    d = ck.tracker_drift(db)
+    assert d["missing_from_db"] == []
+    assert d["untracked_history"] == 1
+
+
+def test_a_company_name_that_looks_like_a_domain_is_not_treated_as_a_url(db, tmp_path, monkeypatch):
+    """"Apollo.io" in prose is a company, not a link. Counting it as one
+    invented a tracker entry that no database row could ever match."""
+    import importlib
+    ck = importlib.import_module("careerkit")
+    t = tmp_path / "tracker.md"
+    t.write_text("## APPLIED (do not resurface)\n"
+                 "- 2026-08-05 Apollo.io - Senior BSA - submitted\n")
+    monkeypatch.setattr(ck, "TRACKER", t)
+    assert ck.tracker_drift(db)["missing_from_db"] == []
+
+
+# --------------------------------------------------------------------------
+# P2 batch: events, claims lint, source policy, instance model
+# --------------------------------------------------------------------------
+
+def test_status_changes_leave_a_trail(db):
+    """The row holds only the CURRENT status, so applying and then being
+    rejected erased the fact that you ever applied, and with it any question
+    about how long anything took."""
+    from engine import store
+    j = J(company="Acme", title="PM", url="https://b/1")
+    store.upsert(db, [j])
+    store.set_status(db, j.uid, "applied", "submitted via greenhouse")
+    store.set_status(db, j.uid, "rejected", "no thanks")
+    kinds = [e["kind"] for e in store.history(db, j.uid)]
+    assert "status:applied" in kinds and "status:rejected" in kinds
+    assert store.history(db, j.uid)[0]["company"] == "Acme"
+
+
+def test_a_repeated_status_does_not_spam_the_history(db):
+    from engine import store
+    j = J(url="https://b/2")
+    store.upsert(db, [j])
+    store.set_status(db, j.uid, "applied")
+    store.set_status(db, j.uid, "applied")
+    assert len([e for e in store.history(db, j.uid) if e["kind"] == "status:applied"]) == 1
+
+
+def test_a_failed_mark_records_nothing(db):
+    from engine import store
+    with pytest.raises(KeyError):
+        store.set_status(db, "nosuchuid", "applied")
+    assert store.history(db) == []
+
+
+def test_claims_lint_flags_a_fabricated_number_and_credential():
+    from engine.claims import lint
+    reg = "- Salesforce Consultant at TechBridge.\n- Reduced handling time by 30%."
+    found = {f["text"] for f in lint(
+        "At TechBridge I grew revenue 65% and hold the Marketing Cloud Consultant cert.", reg)}
+    assert "65%" in found
+    assert "Marketing Cloud Consultant" in found
+    assert not any("TechBridge" == f for f in found), "a backed employer must not be flagged"
+
+
+def test_claims_lint_passes_a_fully_backed_draft():
+    from engine.claims import lint
+    reg = "- Led an NPSP implementation.\n- Reduced case handling time by 30%."
+    assert lint("I led an NPSP implementation and reduced case handling time by 30%.", reg) == []
+
+
+def test_claims_lint_states_it_is_not_a_guarantee():
+    """A lint trusted further than it can see is worse than no lint."""
+    from engine.claims import format_report
+    assert "not a certification" in format_report([], "x.md")
+    assert "true words" in format_report(
+        [{"kind": "number", "text": "5", "line": 1, "context": "c"}], "x.md")
+
+
+def test_every_feed_declares_what_kind_of_source_it_is():
+    """A user should know a feed scrapes public HTML before enabling it, not
+    after being rate-limited."""
+    from engine import aggregators as agg
+    undeclared = sorted(set(agg.FEEDS) - set(agg.SOURCE_POLICY))
+    assert not undeclared, f"feeds with no declared policy: {undeclared}"
+    assert set(agg.scraping_feeds()) == {"linkedin_guest", "jobspy"}
+    assert agg.policy("usajobs").get("identifies_user") is True
+
+
+def test_new_instance_does_not_clone_a_local_path_by_default():
+    """Cloning this directory made `origin` a folder on one machine, so the
+    documented `git pull` update path was silently false for everyone else."""
+    src = (ROOT / "new-instance.sh").read_text()
+    assert "remote get-url origin" in src
+    assert "--local" in src, "an offline escape hatch should still exist"

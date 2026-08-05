@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS runs (
   started TEXT, finished TEXT, pulled INTEGER, new INTEGER, qualified INTEGER,
   detail TEXT
 );
+CREATE TABLE IF NOT EXISTS events (
+  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT, at TEXT, kind TEXT, detail TEXT
+);
 CREATE TABLE IF NOT EXISTS source_health (
   source TEXT PRIMARY KEY, last_ok TEXT, last_count INTEGER,
   last_error TEXT, consecutive_failures INTEGER DEFAULT 0
@@ -56,6 +60,7 @@ INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_jobs_gate ON jobs(gate, score DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_first ON jobs(first_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_group ON jobs(group_key);
+CREATE INDEX IF NOT EXISTS idx_events_uid ON events(uid, at);
 """
 
 # Columns added after v1. CREATE TABLE IF NOT EXISTS does nothing to a table
@@ -505,12 +510,22 @@ def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "") 
     list and the user believed it was filed."""
     if status not in VALID_STATUS:
         raise ValueError(f"unknown status {status!r}. Use one of: {', '.join(VALID_STATUS)}")
+    prev = con.execute("SELECT status FROM jobs WHERE uid=?", (uid,)).fetchone()
     cur = con.execute(
         "UPDATE jobs SET status=?, notes=COALESCE(NULLIF(?,''),notes) WHERE uid=?",
         (status, notes, uid))
-    con.commit()
     if cur.rowcount == 0:
+        con.rollback()
         raise KeyError(f"no posting with uid {uid!r} (check the id in the report)")
+    # The row holds only the CURRENT status, so every previous state was
+    # overwritten: the date you applied, when it was rejected, and how long the
+    # gap was could not be recovered afterwards. The job search is a process and
+    # the interesting questions are all about its history.
+    if prev is None or prev["status"] != status:
+        con.execute("INSERT INTO events (uid, at, kind, detail) VALUES (?,?,?,?)",
+                    (uid, datetime.now().isoformat(timespec="seconds"),
+                     f"status:{status}", notes or ""))
+    con.commit()
 
 
 def stats(con: sqlite3.Connection) -> dict:
@@ -520,3 +535,20 @@ def stats(con: sqlite3.Connection) -> dict:
     total = con.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"]
     runs = con.execute("SELECT COUNT(*) n FROM runs WHERE finished IS NOT NULL").fetchone()["n"]
     return {"total": total, "by_gate": g, "by_source": s, "runs": runs}
+
+
+def log_event(con: sqlite3.Connection, uid: str, kind: str, detail: str = "") -> None:
+    """Record something that happened to one posting (a reply, a screen, an
+    interview). Free-form on purpose: the workflows that call it know more about
+    the shape of a job search than this table should."""
+    con.execute("INSERT INTO events (uid, at, kind, detail) VALUES (?,?,?,?)",
+                (uid, datetime.now().isoformat(timespec="seconds"), kind, detail))
+    con.commit()
+
+
+def history(con: sqlite3.Connection, uid: str | None = None, limit: int = 200) -> list:
+    q = ("SELECT e.*, j.company, j.title FROM events e "
+         "LEFT JOIN jobs j ON j.uid = e.uid ")
+    if uid:
+        return list(con.execute(q + "WHERE e.uid=? ORDER BY e.at DESC LIMIT ?", (uid, limit)))
+    return list(con.execute(q + "ORDER BY e.at DESC LIMIT ?", (limit,)))
