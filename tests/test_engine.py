@@ -417,3 +417,44 @@ def test_expired_cache_entries_are_pruned(tmp_path, monkeypatch):
     removed = http.prune_cache()
     assert removed == 1
     assert fresh.exists() and not stale.exists()
+
+
+# --------------------------------------------------------------------------
+# Red-team findings, 2026-08-05 round 2. Both are regressions introduced BY
+# the fixes: reporting an empty result as healthy removed the false alarms and
+# in doing so made two genuine failures silent.
+# --------------------------------------------------------------------------
+
+def test_source_that_never_fetched_does_not_inherit_the_previous_status():
+    """run_adapter reads last_status() after the adapter returns. A board that
+    early-returns without any HTTP call used to inherit the previous board's
+    200 and be reported healthy when it never ran."""
+    from engine import http, adapters
+    http._local.last_status = 200                    # previous board succeeded
+
+    @adapters.adapter("_t_nofetch")
+    def _nofetch(cfg):
+        return []                                    # config guard, no request
+
+    jobs, err = adapters.run_adapter({"ats": "_t_nofetch", "name": "X"})
+    assert err is not None, "silently reported healthy after making no request"
+
+
+def test_drop_to_zero_is_flagged(db):
+    """A board changing its JSON shape returns 200, maps nothing, and looks
+    exactly like 'no openings today'. Comparing to the previous count is what
+    tells them apart."""
+    from engine import store
+    store.record_health(db, "greenhouse:Big", 470, None)
+    assert not store.dropped_to_zero(db)
+    store.record_health(db, "greenhouse:Big", 0, None)      # schema changed
+    flagged = store.dropped_to_zero(db)
+    assert len(flagged) == 1 and flagged[0]["prev_count"] == 470
+
+
+def test_always_empty_board_is_not_flagged(db):
+    """Must not re-introduce the false alarms the empty-is-healthy fix removed."""
+    from engine import store
+    store.record_health(db, "greenhouse:Quiet", 0, None)
+    store.record_health(db, "greenhouse:Quiet", 0, None)
+    assert not store.dropped_to_zero(db)

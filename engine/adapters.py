@@ -641,6 +641,7 @@ def run_adapter(cfg: dict) -> tuple[list[Job], str | None]:
     fn = REGISTRY.get(ats)
     if not fn:
         return [], f"no adapter for ats={ats!r}"
+    http.reset_status()          # never inherit the previous board's status
     try:
         jobs = fn(cfg)
     except Exception as e:  # a single bad board must never kill the run

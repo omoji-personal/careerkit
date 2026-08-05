@@ -64,6 +64,7 @@ _MIGRATIONS = [
     ("jobs", "group_key", "TEXT"),
     ("jobs", "delisted_on", "TEXT"),
     ("jobs", "misses", "INTEGER DEFAULT 0"),
+    ("source_health", "prev_count", "INTEGER"),
 ]
 
 
@@ -208,9 +209,25 @@ def reconcile(con: sqlite3.Connection, seen_uids: set[str], demoted: dict[str, t
     return delisted, dem
 
 
+def dropped_to_zero(con: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Sources that returned nothing this run but had postings last run.
+
+    Reporting an empty result as healthy stopped the false alarms, but it also
+    made a real failure mode silent: when a board changes its JSON shape the
+    fetch still returns 200, the adapter maps nothing, and "0 jobs, no error"
+    is indistinguishable from "no openings today". Comparing against the
+    previous count catches exactly that, and never fires for a board that is
+    simply always empty."""
+    return list(con.execute(
+        "SELECT source, prev_count, last_ok FROM source_health "
+        "WHERE last_count = 0 AND COALESCE(prev_count,0) > 0 AND last_error IS NULL "
+        "ORDER BY prev_count DESC"))
+
+
 def record_health(con: sqlite3.Connection, source: str, count: int, error: str | None) -> None:
     now = datetime.now().isoformat(timespec="seconds")
     with closing(con.cursor()) as cur:
+        cur.execute("UPDATE source_health SET prev_count = last_count WHERE source = ?", (source,))
         if error:
             cur.execute(
                 "INSERT INTO source_health (source,last_ok,last_count,last_error,consecutive_failures) "

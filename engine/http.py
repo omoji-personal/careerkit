@@ -126,6 +126,16 @@ def fetch(
     return status, text
 
 
+def reset_status() -> None:
+    """Clear the recorded status before a source runs.
+
+    Without this a source that returns nothing WITHOUT making a request - a
+    config guard, a missing tenant id, an early return - inherits whatever the
+    previously polled board left behind. A healthy 200 from the last employer
+    then reports the next one as "fine, nothing open" when it never ran at all."""
+    _local.last_status = None
+
+
 def last_status() -> int | None:
     """Status of the most recent fetch on this thread.
 

@@ -164,6 +164,12 @@ def cmd_pull(args) -> None:
     print(f"  qualified   {sum(1 for r in rows if r['gate'] == 'QUALIFIED')}")
     if n_delisted or n_demoted:
         print(f"  closed out  {n_delisted} delisted, {n_demoted} no longer qualify")
+    dropped = store.dropped_to_zero(con)
+    if dropped:
+        print(f"\n  !! {len(dropped)} source(s) returned 0 but had postings last run "
+              f"(possible schema change, not an outage):")
+        for d in dropped[:10]:
+            print(f"     {d['source']:<44} was {d['prev_count']}")
     print(f"\nReport: {path}")
 
 
@@ -304,6 +310,12 @@ def cmd_status(args) -> None:
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     print(f"\nRegistry: {len(reg.get('employers', []))} employers, "
           f"{len(reg.get('feeds', []))} feeds")
+    dropped = store.dropped_to_zero(con)
+    if dropped:
+        print(f"\n{len(dropped)} source(s) returned 0 but had postings last run "
+              f"(possible schema change):")
+        for d in dropped[:20]:
+            print(f"  {d['source']:<46} was {d['prev_count']}")
     broken = list(con.execute(
         "SELECT * FROM source_health WHERE consecutive_failures >= 2 "
         "ORDER BY consecutive_failures DESC"))

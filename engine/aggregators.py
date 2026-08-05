@@ -345,6 +345,7 @@ def run_feed(name: str, cfg: dict) -> tuple[list[Job], str | None]:
     if required and not all(cfg.get(k) for k in required):
         missing = ", ".join(k for k in required if not cfg.get(k))
         return [], f"dormant: add {missing} to profile/keys.yaml"
+    http.reset_status()          # never inherit the previous feed's status
     try:
         jobs = fn(cfg)
     except Exception as e:
