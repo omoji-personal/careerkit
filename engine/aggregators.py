@@ -119,10 +119,14 @@ def himalayas(_cfg: dict) -> list[Job]:
 
 
 @feed("weworkremotely")
-def weworkremotely(_cfg: dict) -> list[Job]:
+def weworkremotely(cfg: dict) -> list[Job]:
     out = []
-    for cat in ("remote-customer-support-jobs", "remote-management-and-finance-jobs",
-                "remote-product-jobs", "remote-programming-jobs"):
+    # Was four categories chosen for the original author. Configurable now, with
+    # a broader default so a user in an unrelated field is not silently narrowed.
+    for cat in (cfg.get("categories") or (
+            "remote-customer-support-jobs", "remote-management-and-finance-jobs",
+            "remote-product-jobs", "remote-programming-jobs", "remote-marketing-jobs",
+            "remote-sales-jobs", "remote-design-jobs")):
         st, tx = fetch(f"https://weworkremotely.com/categories/{cat}.rss")
         if st != 200:
             continue
@@ -159,12 +163,19 @@ def jobicy(_cfg: dict) -> list[Job]:
 
 
 @feed("themuse")
-def themuse(_cfg: dict) -> list[Job]:
+def themuse(cfg: dict) -> list[Job]:
     """Free, no key. No full-text search, so filter by category + location."""
     out = []
-    cats = ["Project & Product Management", "IT", "Data and Analytics",
-            "Business & Strategy", "Customer Service"]
-    locs = ["Flexible / Remote", "Atlanta, GA"]
+    # Categories and locations came from the original author's own search until
+    # 2026-08-05, including his home city hardcoded as "Atlanta, GA". The Muse
+    # has no full-text search, so a category list is unavoidable; it is now
+    # configurable per user via profile/employers.yaml, and the location follows
+    # the profile rather than a stranger's hometown.
+    cats = cfg.get("categories") or [
+        "Project & Product Management", "IT", "Data and Analytics",
+        "Business & Strategy", "Customer Service", "Marketing", "Sales",
+        "Human Resources", "Accounting and Finance", "Operations"]
+    locs = ["Flexible / Remote"] + [l for l in (cfg.get("locations") or []) if l]
     for cat in cats:
         for loc in locs:
             for page in (0, 1):

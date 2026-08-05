@@ -28,6 +28,20 @@ from .http import fetch
 # business applications, constituent systems, advancement systems, etc.
 # --------------------------------------------------------------------------
 
+def set_core_terms(terms):
+    """Discovery queries, from the user's profile.
+
+    CORE_TERMS below was a hardcoded list of the original author's Salesforce
+    searches until 2026-08-05, so `careerkit.py search` found nothing for anyone
+    whose field was different. The list survives only as a fallback for a
+    profile that supplies none."""
+    global CORE_TERMS
+    clean = [f'"{t}"' if not str(t).startswith('"') else str(t)
+             for t in (terms or []) if t and str(t).strip()]
+    if clean:
+        CORE_TERMS = clean
+
+
 CORE_TERMS = [
     '"salesforce"',
     '"salesforce" "solution architect"',

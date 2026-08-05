@@ -57,11 +57,13 @@ except ModuleNotFoundError as _e:  # pragma: no cover - environment failure
 
 from engine import store  # noqa: E402
 from engine import aggregators  # noqa: E402
+from engine import adapters as _adapters
 from engine.adapters import run_adapter  # noqa: E402
 from engine.aggregators import run_feed  # noqa: E402
 from engine.discover import discover_many  # noqa: E402
 from engine.report import write_report  # noqa: E402
 from engine.score import Profile, ProfileError, score, score_all  # noqa: E402
+from engine import search as _search
 from engine.search import resolve, workday_parts  # noqa: E402
 from engine.verify import verify_entry  # noqa: E402
 
@@ -152,6 +154,8 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
 def cmd_pull(args) -> None:
     profile = load_profile()
     aggregators.set_search_terms(profile.search_terms)
+    _adapters.set_relevance_terms(profile.relevance_terms)
+    _search.set_core_terms(profile.search_terms)
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     keys = load_yaml(KEYS, {})
     con = store.connect()
@@ -220,6 +224,8 @@ def cmd_audit(args) -> None:
     months later. Use --grep to focus (e.g. --grep 'product manager')."""
     profile = load_profile()
     aggregators.set_search_terms(profile.search_terms)
+    _adapters.set_relevance_terms(profile.relevance_terms)
+    _search.set_core_terms(profile.search_terms)
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     keys = load_yaml(KEYS, {})
     all_jobs, _, _, _, _ = _fetch_all(reg, keys, None, employers_only=args.employers,

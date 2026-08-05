@@ -246,6 +246,7 @@ class Profile:
     dream_companies: set = field(default_factory=set)
     signals: list[tuple[re.Pattern, int, str]] = field(default_factory=list)
     search_terms: list[str] = field(default_factory=list)
+    relevance_terms: list[str] = field(default_factory=list)
     lane_title_context: dict = field(default_factory=dict)
 
     @classmethod
@@ -267,6 +268,12 @@ class Profile:
         )
         metros = loc.get("metros") or []
         p.metro_re = _compile_alt(metros) if metros else None
+        # Raw lane titles, kept for the adapters' detail pre-filter. Compiled
+        # patterns cannot be reused there: the pre-filter needs the terms
+        # themselves so it can say what THIS user is looking for.
+        for _l in (cfg.get("lanes") or []) + (cfg.get("dream_lanes") or []):
+            p.relevance_terms += [str(t) for t in (_l.get("titles") or []) if t]
+        p.relevance_terms += [str(t) for t in (cfg.get("search_terms") or []) if t]
         for lane in cfg.get("lanes") or []:
             pat = _compile_alt(lane.get("titles"))
             if pat:

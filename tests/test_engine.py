@@ -699,3 +699,82 @@ def test_namespaced_feed_rows_can_retire(db):
         db.commit()
         store.reconcile(db, {}, set(), {"jobspy"})
     assert not store.query(db), "a namespaced feed row could never be retired"
+
+
+# --------------------------------------------------------------------------
+# The engine must not be hardcoded to one person's job search.
+#
+# Until 2026-08-05 adapters._RELEVANT_HINT was a fixed regex of the original
+# author's Salesforce search. Five adapters gate their detail fetch on it, so
+# for anyone in a different field it returned False for every title, no
+# description was ever fetched, and postings were scored on the title alone.
+# Every title in this repo's own example profile failed it. Three audit rounds
+# missed it because they reviewed diffs and nobody read adapters.py.
+# --------------------------------------------------------------------------
+
+EXAMPLE_TITLES = [
+    "Marketing Operations Manager", "Revenue Operations Lead",
+    "Lifecycle Marketing Manager", "Marketing Automation Manager",
+    "Campaign Operations Specialist", "Email Marketing Manager",
+]
+
+
+def test_relevance_filter_fails_open_when_unset():
+    """No profile terms means every posting deserves a detail request. A wrong
+    True costs one HTTP call; a wrong False costs a job the user never sees."""
+    from engine import adapters
+    adapters.set_relevance_terms([])
+    assert adapters._looks_relevant("Anything At All")
+    assert adapters._looks_relevant("")
+
+
+def test_the_example_profile_survives_its_own_engine():
+    """The shipped example person is a marketing-ops lead, chosen to prove the
+    tool is not Salesforce-specific. Their titles must pass the pre-filter."""
+    import yaml
+    from engine import adapters
+    from engine.score import Profile
+    cfg = yaml.safe_load((ROOT / "profile.example" / "profile.yaml").read_text())
+    p = Profile.load(ROOT / "profile.example" / "profile.yaml")
+    assert p.relevance_terms, "profile produced no relevance terms"
+    adapters.set_relevance_terms(p.relevance_terms)
+    missed = [t for t in EXAMPLE_TITLES if not adapters._looks_relevant(t)]
+    assert not missed, f"engine would fetch no description for: {missed}"
+
+
+def test_relevance_terms_do_not_leak_another_users_search():
+    """A marketing-ops profile must not make Salesforce titles relevant, and
+    vice versa. This is what makes the filter the USER's rather than shipped."""
+    from engine import adapters
+    adapters.set_relevance_terms(["marketing operations", "lifecycle marketing"])
+    assert adapters._looks_relevant("Marketing Operations Manager")
+    assert not adapters._looks_relevant("Salesforce Solution Architect")
+
+
+def test_bad_relevance_terms_never_match_everything_or_nothing():
+    from engine import adapters
+    adapters.set_relevance_terms(["", None, "/unclosed(/"])
+    assert adapters._looks_relevant("Barista"), "unusable terms should fail open"
+    adapters.set_relevance_terms(["/manager/", "analyst"])
+    assert adapters._looks_relevant("Senior Analyst")
+    assert not adapters._looks_relevant("Barista")
+
+
+def test_discovery_queries_follow_the_profile():
+    from engine import search
+    before = list(search.CORE_TERMS)
+    search.set_core_terms(["marketing operations", "revenue operations"])
+    assert any("marketing operations" in t for t in search.CORE_TERMS)
+    assert not any("salesforce" in t.lower() for t in search.CORE_TERMS)
+    search.set_core_terms([])                      # empty keeps the fallback
+    assert search.CORE_TERMS
+    search.CORE_TERMS = before
+
+
+def test_no_hardcoded_city_or_employer_in_the_engine():
+    """The repo is public. Nothing in engine/ should carry the author's city."""
+    import re
+    for f in (ROOT / "engine").glob("*.py"):
+        src = f.read_text()
+        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
+        assert not re.search(r'"[^"]*Atlanta[^"]*"', code), f"{f.name} hardcodes a city"

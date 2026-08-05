@@ -172,7 +172,7 @@ def smartrecruiters(cfg: dict) -> list[Job]:
             ))
         total = data.get("totalFound", 0)
         offset += 100
-        if offset >= total or not content or offset > 500:
+        if offset >= total or not content or offset > 5000:
             break
     # SmartRecruiters list view has no body text; pull detail for in-family titles only.
     for job in out:
@@ -197,7 +197,8 @@ def workable(cfg: dict) -> list[Job]:
     if not jobs:
         status, text = fetch(
             f"https://apply.workable.com/api/v3/accounts/{slug}/jobs",
-            method="POST", json_body={"query": "", "location": [], "department": [], "worktype": []},
+            method="POST", json_body={"query": "", "location": [], "department": [],
+                                      "worktype": [], "limit": 100},
         )
         if status == 200:
             try:
@@ -400,26 +401,32 @@ def workday(cfg: dict) -> list[Job]:
 def oracle_orc(cfg: dict) -> list[Job]:
     """Oracle Recruiting Cloud / the modern Taleo replacement. Public REST."""
     host, site = cfg["host"], cfg["site"]
-    url = (
-        f"https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
-        f"?onlyData=true&expand=requisitionList.secondaryLocations"
-        f"&finder=findReqs;siteNumber={site},limit=200,sortBy=POSTING_DATES_DESC"
-    )
-    data = fetch_json(url)
-    if not isinstance(data, dict):
-        return []
     out = []
-    for item in data.get("items", []) or []:
-        for j in item.get("requisitionList", []) or []:
-            out.append(Job(
-                title=j.get("Title", ""),
-                url=f"https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{j.get('Id','')}",
-                location=j.get("PrimaryLocation", "") or "",
-                posted_at=(j.get("PostedDate") or "")[:10],
-                description=strip_html(j.get("ShortDescriptionStr", "") or ""),
-                external_id=str(j.get("Id", "")),
-                source="oracle_orc", raw=j, **_base(cfg),
-            ))
+    # Was a single request capped at limit=200, so employer 201 onward simply did
+    # not exist as far as this tool was concerned, with nothing said about it.
+    for off in range(0, 2000, 200):
+        url = (
+            f"https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+            f"?onlyData=true&expand=requisitionList.secondaryLocations"
+            f"&finder=findReqs;siteNumber={site},limit=200,offset={off},sortBy=POSTING_DATES_DESC"
+        )
+        data = fetch_json(url)
+        if not isinstance(data, dict):
+            break
+        before = len(out)
+        for item in data.get("items", []) or []:
+            for j in item.get("requisitionList", []) or []:
+                out.append(Job(
+                    title=j.get("Title", ""),
+                    url=f"https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{j.get('Id','')}",
+                    location=j.get("PrimaryLocation", "") or "",
+                    posted_at=(j.get("PostedDate") or "")[:10],
+                    description=strip_html(j.get("ShortDescriptionStr", "") or ""),
+                    external_id=str(j.get("Id", "")),
+                    source="oracle_orc", raw=j, **_base(cfg),
+                ))
+        if len(out) - before < 200:      # short page means the last page
+            break
     return out
 
 
@@ -429,7 +436,7 @@ def eightfold(cfg: dict) -> list[Job]:
     domain = cfg["domain"]
     host = cfg.get("host", "https://jobs.eightfold.ai")
     out = []
-    for start in (0, 100, 200):
+    for start in range(0, 1000, 100):   # was capped at 300
         data = fetch_json(
             f"{host}/api/apply/v2/jobs?domain={domain}&start={start}&num=100"
             f"&sort_by=timestamp&triggerGoButton=false"
@@ -459,7 +466,7 @@ def phenom(cfg: dict) -> list[Job]:
     """Phenom People career sites - very common at large US enterprises."""
     host = cfg["host"].rstrip("/")
     out = []
-    for page in range(3):
+    for page in range(20):   # was capped at 150 postings
         data = fetch_json(
             f"{host}/widgets?ddoKey=refineSearch&sortBy=&subsearch=&from={page*50}&size=50"
             f"&jobs=true&counts=true&all_fields=true"
@@ -498,7 +505,7 @@ def icims(cfg: dict) -> list[Job]:
     slug = cfg["slug"]
     base = cfg.get("host") or f"https://careers-{slug}.icims.com"
     out, seen = [], set()
-    for page in range(0, 6):
+    for page in range(0, 30):   # was capped at 6 pages
         status, text = fetch(f"{base}/jobs/search?ss=1&in_iframe=1&pr={page}")
         if status != 200 or not text:
             break
@@ -617,21 +624,52 @@ def personio(cfg: dict) -> list[Job]:
 
 # --------------------------------------------------------------------------
 
-_RELEVANT_HINT = re.compile(
-    r"salesforce|crm|solution architect|solutions architect|success architect|"
-    r"delivery (lead|manager|director)|engagement (manager|lead)|"
-    r"product owner|business analyst|technical account|customer success|"
-    r"platform (owner|manager|lead)|program manager|practice (lead|director)|"
-    r"business applications?|enterprise applications?|constituent|advancement|"
-    r"donor systems|crm (product|program|platform)|applications (manager|director)|"
-    r"principal consultant|senior consultant|managing consultant|"
-    r"nonprofit|npsp|agentforce|business (systems|architect)|crm (manager|architect)",
-    re.I,
-)
+# Set from the user's own profile by set_relevance_terms(). It starts as None on
+# purpose: until somebody says what they are looking for, every posting is worth
+# a detail request.
+#
+# This was a hardcoded regex of the original author's job search
+# (salesforce|crm|solution architect|...) until 2026-08-05. Five adapters gate
+# their detail fetch on it, so for anyone whose work was not Salesforce it
+# returned False for every title, no description was ever fetched, and their
+# postings were scored on the title alone: body exclusions never fired, comp was
+# never parsed, and everything landed in VERIFY with no explanation. Every title
+# in this repo's own example profile failed it. Three audits missed it because
+# they reviewed diffs and nobody read this file.
+_RELEVANT_HINT: re.Pattern | None = None
+
+
+def set_relevance_terms(terms) -> None:
+    """Teach the detail pre-filter what this user is looking for.
+
+    Accepts plain terms and /raw regex/ entries, matching the profile syntax.
+    Anything unusable is skipped rather than allowed to make the pattern match
+    everything or nothing."""
+    global _RELEVANT_HINT
+    parts = []
+    for t in terms or []:
+        t = str(t or "").strip()
+        if not t:
+            continue
+        if t.startswith("/") and t.endswith("/") and len(t) > 2:
+            try:
+                re.compile(t[1:-1])
+            except re.error:
+                continue
+            parts.append(f"(?:{t[1:-1]})")
+        else:
+            parts.append(re.escape(t))
+    _RELEVANT_HINT = re.compile("|".join(parts), re.I) if parts else None
 
 
 def _looks_relevant(title: str) -> bool:
-    """Cheap pre-filter so we only spend detail requests on plausible titles."""
+    """Cheap pre-filter so detail requests are spent on plausible titles.
+
+    FAILS OPEN. With no profile terms set, everything is relevant. The cost of a
+    wrong True is one wasted HTTP request; the cost of a wrong False is a job the
+    user never sees and cannot know they missed."""
+    if _RELEVANT_HINT is None:
+        return True
     return bool(_RELEVANT_HINT.search(title or ""))
 
 
