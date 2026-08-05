@@ -1073,10 +1073,12 @@ def test_the_authors_own_profile_validates_if_present():
 # --------------------------------------------------------------------------
 
 def _sight(**kw):
+    import datetime as _dt
     """A stand-in for one sqlite3.Row sighting of a role."""
     base = {"uid": "u1", "group_key": "g1", "score": 70, "source": "greenhouse",
             "company": "Acme", "title": "PM", "url": "https://x", "location": "Atlanta, GA",
-            "comp_min": None, "description": ""}
+            "comp_min": None, "description": "", "first_seen": _dt.date.today().isoformat(),
+            "last_seen": _dt.date.today().isoformat(), "first_seen_run": None, "last_seen_run": None}
     base.update(kw)
 
     class R(dict):
@@ -1624,3 +1626,27 @@ def test_a_brand_new_database_does_not_announce_a_migration_backup(tmp_path, mon
     con.close()
     store.connect()
     assert list(tmp_path.glob("*pre-migration*")), "real data must still be backed up"
+
+
+def test_a_preexisting_row_resighted_after_stamping_began_is_not_new():
+    """A row written before run stamping, then re-sighted, has last_seen_run but
+    no first_seen_run. Falling back to the date test called 41 such rows NEW on
+    the first real run after the change, so the report's headline disagreed with
+    the pull's own count of what it had inserted."""
+    from engine.report import is_new
+    import datetime as _dt
+    today = _dt.date.today().isoformat()
+    assert not is_new(_sight(first_seen_run=None, last_seen_run=18,
+                             first_seen=today, last_seen=today))
+    # genuinely new this run
+    assert is_new(_sight(first_seen_run=18, last_seen_run=18,
+                         first_seen=today, last_seen=today))
+    # never stamped at all: the date test is still the only signal available
+    assert is_new(_sight(first_seen_run=None, last_seen_run=None,
+                         first_seen=today, last_seen=today))
+    assert not is_new(_sight(first_seen_run=None, last_seen_run=None,
+                            first_seen="2026-08-01", last_seen=today))
+    # sighted exactly once, a week ago, never since. "first_seen == last_seen"
+    # is true forever for these, so they were announced as new in every report.
+    assert not is_new(_sight(first_seen_run=None, last_seen_run=None,
+                             first_seen="2026-07-30", last_seen="2026-07-30"))

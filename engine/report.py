@@ -26,9 +26,22 @@ def is_new(r) -> bool:
     question that was actually being asked. Rows written before the run columns
     existed have no ids, so they fall back to the date test."""
     keys = r.keys() if hasattr(r, "keys") else []
-    if "first_seen_run" in keys and r["first_seen_run"] is not None:
-        return r["first_seen_run"] == r["last_seen_run"]
-    return r["first_seen"] == r["last_seen"]
+    if "first_seen_run" in keys:
+        if r["first_seen_run"] is not None:
+            return r["first_seen_run"] == r["last_seen_run"]
+        if r["last_seen_run"] is not None:
+            # Written before run stamping existed, and re-sighted since. It
+            # cannot be new: this run only UPDATED it. Falling through to the
+            # date test called 41 pre-existing rows new on the first real run
+            # after the change, because they were first seen earlier the same
+            # day, and the report disagreed with the pull's own count.
+            return False
+    # The legacy signal. first_seen == last_seen means "sighted exactly once",
+    # NOT "sighted today": a posting seen once a week ago and never again
+    # satisfied it forever and was announced as new in every later report. The
+    # date bound is what makes it mean what it was always read as meaning.
+    return (r["first_seen"] == r["last_seen"]
+            and str(r["last_seen"] or "")[:10] == date.today().isoformat())
 
 
 def _sighting_rank(r) -> tuple:
