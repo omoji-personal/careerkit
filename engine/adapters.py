@@ -14,6 +14,7 @@ import json
 import re
 from typing import Any, Callable
 
+from . import http
 from .http import fetch, fetch_json
 from .models import Job, strip_html
 
@@ -645,5 +646,11 @@ def run_adapter(cfg: dict) -> tuple[list[Job], str | None]:
     except Exception as e:  # a single bad board must never kill the run
         return [], f"{type(e).__name__}: {e}"
     if not jobs:
-        return [], "0 postings returned"
+        # An empty list means one of two very different things. Report which.
+        st = http.last_status()
+        if st == 200:
+            return [], None                       # board is fine, nothing open
+        if st is None:
+            return [], "no response (network/DNS/timeout)"
+        return [], f"HTTP {st}"
     return jobs, None

@@ -71,16 +71,33 @@ _US_STATES = (
 )
 US_EVIDENCE = re.compile(
     r"\b(united states|u\.?s\.?a\.?|us[- ]based|usa?[- ]remote|remote[ -]+u\.?s|"
-    r"anywhere in the u\.?s|nationwide|" + _US_STATES + r")\b|"
+    r"anywhere in the u\.?s|nationwide|" + _US_STATES + r")\b", re.I)
+# CASE-SENSITIVE on purpose, and deliberately separate from US_EVIDENCE above.
+# Two things depend on the distinction:
+#   - "US" alone never matched, because `u\.?s\.?a\.?` requires the "a". Every
+#     posting labelled "Remote (US)" - one of the commonest forms there is -
+#     therefore had no US evidence and fell to VERIFY instead of QUALIFIED.
+#   - The two-letter state codes must NOT be case-insensitive. Lowercased,
+#     ", ca" is Canada as readily as California, and folding them into the
+#     case-insensitive pattern made a Toronto posting look US-based.
+# Real listings write country and state tokens in caps; English prose does not.
+US_TOKEN = re.compile(
+    r"\b(US|USA|U\.S\.|U\.S\.A\.)\b|"
     r",\s?(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|"
     r"MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|"
-    r"WV|WI|WY|DC)\b", re.I)
+    r"WV|WI|WY|DC)\b")
 # Trailing lowercase ISO country codes; CASE-SENSITIVE on purpose ("Remote, in"
 # is India, "Indianapolis, IN" is not).
 NON_US_CC = re.compile(
     r",\s*(cn|pl|de|in|mx|br|ar|co|cl|pe|uy|ca|gb|uk|ie|fr|es|it|nl|be|pt|gr|"
     r"cz|hu|ro|ua|rs|bg|hr|ee|lv|lt|at|ch|se|no|dk|fi|au|nz|sg|jp|kr|tw|hk|"
     r"my|th|vn|id|ph|pk|bd|ae|sa|qa|il|tr|eg|za|ng|ke|ma)\b(?!\w)")
+# Country codes that are ALSO US state abbreviations. Reaching the country-code
+# check means the NON_US pass above found no foreign city or country name, so
+# for these eight the US state reading is the right one: ", ca" after a city is
+# California far more often than Canada, and a genuinely Canadian posting says
+# Canada, Toronto, or Ontario, all of which NON_US catches first.
+AMBIGUOUS_CC = frozenset({"ca", "co", "de", "in", "id", "il", "ma", "ar"})
 
 VAGUE_REMOTE = re.compile(
     r"\b(anywhere in the world|worldwide|global(ly)?|any location|"
@@ -114,15 +131,53 @@ _RANGE_CTX = re.compile(
 # Profile: the person's rules, compiled once
 # --------------------------------------------------------------------------
 
-def _compile_alt(terms: list[str] | None, window: str = "") -> re.Pattern | None:
-    """Word-bounded alternation of literal terms or raw /regex/ entries."""
+def _is_word_char(c: str) -> bool:
+    return c.isalnum() or c == "_"
+
+
+def _compile_alt(terms: list[str] | None, window: str = "",
+                 where: str = "profile") -> re.Pattern | None:
+    """Alternation of literal terms or raw /regex/ entries.
+
+    Boundaries are applied PER TERM and only on edges that are word characters.
+    A single wrapping \\b(...)\\b is wrong in both directions and both failures
+    are silent: a term whose edge is punctuation (".NET", "C++", "(remote)")
+    can never match, while an empty alternative - from a stray "" in the YAML
+    list, or a raw regex ending in "|" - matches EVERY posting, which in an
+    exclusion list means the user silently sees zero jobs forever.
+    """
     if not terms:
         return None
-    parts = []
-    for t in terms:
-        t = str(t)
-        parts.append(t[1:-1] if (t.startswith("/") and t.endswith("/")) else re.escape(t))
-    return re.compile(r"\b(" + "|".join(parts) + r")\b" + window, re.I)
+    parts, dropped = [], []
+    for raw in terms:
+        if raw is None:
+            dropped.append("(null list item)")
+            continue
+        t = str(raw).strip()
+        if not t:
+            dropped.append("(empty string)")
+            continue
+        if t.startswith("/") and t.endswith("/") and len(t) > 2:
+            body = t[1:-1]
+            try:
+                probe = re.compile(body)
+            except re.error as e:
+                dropped.append(f"{t} [bad regex: {e}]")
+                continue
+            if probe.match(""):
+                dropped.append(f"{t} [matches the empty string - would match every posting]")
+                continue
+            parts.append(f"(?:{body})")
+        else:
+            lead = r"\b" if _is_word_char(t[0]) else ""
+            trail = r"\b" if _is_word_char(t[-1]) else ""
+            parts.append(lead + re.escape(t) + trail)
+    if dropped:
+        print(f"  ! {where}: ignored {len(dropped)} unusable term(s): "
+              + "; ".join(dropped[:4]) + ("..." if len(dropped) > 4 else ""))
+    if not parts:
+        return None
+    return re.compile("(" + "|".join(parts) + ")" + window, re.I)
 
 
 @dataclass
@@ -240,13 +295,16 @@ def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
     body = job.description[:2500]
     company = job.company or ""
 
-    us_here = bool(US_EVIDENCE.search(blob)) or bool(US_EVIDENCE.search(body[:600]))
+    us_here = (bool(US_EVIDENCE.search(blob)) or bool(US_TOKEN.search(blob))
+               or bool(US_EVIDENCE.search(body[:600])))
 
     if NON_US.search(f"{blob} {company}") and not us_here:
         return "fail", f"non-US: {loc[:60] or company[:40]}"
     cc = NON_US_CC.search(loc)
     if cc and not re.search(r",\s*us\b", loc, re.I):
-        return "fail", f"non-US country code '{cc.group(1)}': {loc[:50]}"
+        if cc.group(1) not in AMBIGUOUS_CC:
+            return "fail", f"non-US country code '{cc.group(1)}': {loc[:50]}"
+        us_here = True   # a US state abbreviation, not a country code
 
     if p.metro_re and p.metro_re.search(blob):
         return "pass", f"target metro: {loc[:60]}"

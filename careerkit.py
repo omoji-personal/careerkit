@@ -14,11 +14,34 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+
+def _use_venv() -> None:
+    """Re-exec inside .venv when one exists and we are not already in it.
+
+    setup.sh installs dependencies into .venv (system Python refuses under PEP
+    668). Without this, running ./careerkit.py directly picks the system
+    interpreter and dies on `import yaml`, which reads as "the tool is broken"
+    rather than "wrong interpreter"."""
+    import os
+    if os.environ.get("CAREERKIT_VENV") == "1":
+        return
+    root = Path(__file__).resolve().parent
+    venv = root / ".venv"
+    exe = venv / ("Scripts" if os.name == "nt" else "bin") / \
+        ("python.exe" if os.name == "nt" else "python")
+    if exe.exists() and Path(sys.prefix).resolve() != venv.resolve():
+        os.environ["CAREERKIT_VENV"] = "1"
+        os.execv(str(exe), [str(exe), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
+_use_venv()
 
 import yaml  # noqa: E402
 
@@ -57,7 +80,7 @@ def save_employers(data: dict) -> None:
 
 
 def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier=None):
-    all_jobs, ok, errors = [], 0, {}
+    all_jobs, ok, errors, healthy = [], 0, {}, set()
     if not feeds_only:
         emps = [e for e in reg.get("employers", []) if e.get("active", True)]
         if tier:
@@ -72,6 +95,7 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
                 errors[label] = err
             else:
                 ok += 1
+                healthy.add(e.get("ats"))
             all_jobs.extend(jobs)
             print(f"  {label:<46} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
     if not employers_only:
@@ -87,9 +111,10 @@ def _fetch_all(reg, keys, con=None, employers_only=False, feeds_only=False, tier
                 errors[f["name"]] = err
             else:
                 ok += 1
+                healthy.add(f["name"])
             all_jobs.extend(jobs)
             print(f"  feed:{f['name']:<41} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
-    return all_jobs, ok, errors
+    return all_jobs, ok, errors, healthy
 
 
 def cmd_pull(args) -> None:
@@ -100,7 +125,7 @@ def cmd_pull(args) -> None:
     con = store.connect()
     run_id = store.start_run(con)
 
-    all_jobs, ok_sources, errors = _fetch_all(
+    all_jobs, ok_sources, errors, healthy = _fetch_all(
         reg, keys, con, employers_only=args.employers, feeds_only=args.feeds,
         tier=args.tier)
 
@@ -114,6 +139,13 @@ def cmd_pull(args) -> None:
     keep = [j for j in scored if j.gate in ("QUALIFIED", "VERIFY")]
     new, again = store.upsert(con, keep)
 
+    # Close the loop: a posting that STOPPED qualifying is written back, and a
+    # posting that vanished from a healthy board is marked delisted. Without
+    # this, both kept surfacing as live qualified roles indefinitely.
+    demoted = {j.uid: (j.score, j.gate, " | ".join(j.reasons))
+               for j in scored if j.gate in ("EXCLUDED", "SLOT-BLOCKED")}
+    n_delisted, n_demoted = store.reconcile(con, {j.uid for j in scored}, demoted, healthy)
+
     rows = store.query(con, min_score=args.min_score, limit=300)
     health = list(con.execute(
         "SELECT * FROM source_health ORDER BY consecutive_failures DESC, source"))
@@ -123,11 +155,15 @@ def cmd_pull(args) -> None:
                      sum(1 for r in rows if r["gate"] == "QUALIFIED"), detail)
     path = write_report(con, rows, health=health, run_detail=detail)
 
-    print(f"\n  pulled     {len(all_jobs)}")
-    print(f"  in-family  {len(keep)}   (screened out: "
+    screened = len(all_jobs) - len(keep)
+    print(f"\n  pulled      {len(all_jobs)}")
+    print(f"  in-family   {len(keep)}")
+    print(f"  screened    {screened}   ("
           f"{', '.join(f'{k} {v}' for k, v in excluded.most_common(5))})")
-    print(f"  NEW        {len(new)}")
-    print(f"  qualified  {sum(1 for r in rows if r['gate'] == 'QUALIFIED')}")
+    print(f"  NEW         {len(new)}")
+    print(f"  qualified   {sum(1 for r in rows if r['gate'] == 'QUALIFIED')}")
+    if n_delisted or n_demoted:
+        print(f"  closed out  {n_delisted} delisted, {n_demoted} no longer qualify")
     print(f"\nReport: {path}")
 
 
@@ -139,7 +175,7 @@ def cmd_audit(args) -> None:
     aggregators.set_search_terms(profile.search_terms)
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     keys = load_yaml(KEYS, {})
-    all_jobs, _, _ = _fetch_all(reg, keys, None, employers_only=args.employers,
+    all_jobs, _, _, _ = _fetch_all(reg, keys, None, employers_only=args.employers,
                                 feeds_only=False)
     import re as _re
     flt = _re.compile(args.grep, _re.I) if args.grep else None
@@ -279,7 +315,10 @@ def cmd_status(args) -> None:
 
 def cmd_mark(args) -> None:
     con = store.connect()
-    store.set_status(con, args.uid, args.status, args.notes or "")
+    try:
+        store.set_status(con, args.uid, args.status, args.notes or "")
+    except (ValueError, KeyError) as e:
+        sys.exit(f"{e.args[0]}")
     print(f"{args.uid} -> {args.status}")
 
 
@@ -320,7 +359,20 @@ def main() -> None:
     sp.add_argument("uid"); sp.add_argument("status"); sp.add_argument("--notes")
 
     args = p.parse_args()
-    args.fn(args)
+    try:
+        args.fn(args)
+    except KeyboardInterrupt:
+        sys.exit("\nStopped.")
+    except FileNotFoundError as e:
+        sys.exit(f"File not found: {e.filename}")
+    except yaml.YAMLError as e:
+        # The single most likely failure for a non-technical user: they hand
+        # edited profile.yaml. A raw parser traceback tells them nothing.
+        sys.exit(f"Could not read your YAML.\n{e}\n\n"
+                 "Fix the file it names, or ask Claude: 'my profile.yaml is broken'.")
+    except re.error as e:
+        sys.exit(f"A pattern in your profile is not a valid regex: {e}\n"
+                 "Check the /raw regex/ entries in profile/profile.yaml.")
 
 
 if __name__ == "__main__":

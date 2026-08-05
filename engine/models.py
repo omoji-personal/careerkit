@@ -7,6 +7,16 @@ import re
 from dataclasses import dataclass, field, asdict
 from typing import Any
 
+# Sources that are an employer's OWN applicant tracking system. Their
+# external_id is the employer's requisition id: stable across runs, and it
+# distinguishes two genuinely different openings. Aggregator feeds are excluded
+# on purpose, because each mints its own id for the same underlying role.
+ATS_SOURCES = frozenset({
+    "greenhouse", "lever", "ashby", "smartrecruiters", "workable", "recruitee",
+    "bamboohr", "rippling", "teamtailor", "workday", "oracle_orc", "eightfold",
+    "phenom", "icims", "jobvite", "paylocity", "personio",
+})
+
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"[ \t ]+")
 
@@ -56,13 +66,28 @@ class Job:
     reasons: list[str] = field(default_factory=list)
 
     @property
-    def uid(self) -> str:
-        """Company + normalized title only - deliberately NOT the URL or the
-        board's id. The same role arrives via the employer ATS, two aggregators
-        and a repost, each with its own id; keying on those means seeing it
-        four times and marking it 'applied' only once. Each sighting is still
-        recorded separately in the sightings table, so provenance survives."""
+    def group_key(self) -> str:
+        """Company + normalized title. The same role arrives via the employer
+        ATS, two aggregators and a repost; this is what makes them ONE entry in
+        the report instead of four."""
         basis = f"{self.company.lower().strip()}|{_norm_title(self.title)}"
+        return hashlib.sha256(basis.encode()).hexdigest()[:20]
+
+    @property
+    def uid(self) -> str:
+        """One OPENING. group_key plus the board's own requisition id when the
+        sighting came from the employer's own ATS.
+
+        group_key alone was the key until 2026-08-05. It silently merged
+        genuinely distinct requisitions: a large employer running two "Product
+        Manager" reqs in different cities produced ONE row, the second req's URL
+        and location were discarded, and marking the first 'applied' removed
+        every sibling from the report permanently. Aggregator sightings keep the
+        bare group_key because each aggregator mints its own id, so they still
+        collapse onto one another as before."""
+        basis = self.group_key
+        if self.external_id and self.source in ATS_SOURCES:
+            basis = f"{basis}|{self.external_id}"
         return hashlib.sha256(basis.encode()).hexdigest()[:20]
 
     @property

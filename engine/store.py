@@ -22,6 +22,7 @@ DB_PATH = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().pare
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
   uid            TEXT PRIMARY KEY,
+  group_key      TEXT,
   company        TEXT, title TEXT, url TEXT, location TEXT,
   source         TEXT, lane TEXT, employer_tier TEXT,
   posted_at      TEXT, department TEXT,
@@ -45,16 +46,41 @@ CREATE TABLE IF NOT EXISTS source_health (
   source TEXT PRIMARY KEY, last_ok TEXT, last_count INTEGER,
   last_error TEXT, consecutive_failures INTEGER DEFAULT 0
 );
+"""
+
+# Indexes are applied AFTER migrations, never in SCHEMA. CREATE TABLE IF NOT
+# EXISTS is a no-op on an existing v1 table, so an index naming a column added
+# later ("no such column: group_key") aborts connect() for every existing user.
+INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_jobs_gate ON jobs(gate, score DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_first ON jobs(first_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_jobs_group ON jobs(group_key);
 """
+
+# Columns added after v1. CREATE TABLE IF NOT EXISTS does nothing to a table
+# that already exists, so an existing database would keep the old shape and
+# every query naming a new column would fail. Applied on every connect().
+_MIGRATIONS = [
+    ("jobs", "group_key", "TEXT"),
+    ("jobs", "delisted_on", "TEXT"),
+]
+
+
+def _migrate(con: sqlite3.Connection) -> None:
+    for table, col, decl in _MIGRATIONS:
+        cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    con.commit()
 
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    _migrate(con)
+    con.executescript(INDEXES)
     return con
 
 
@@ -67,23 +93,31 @@ def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Jo
             cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
             row = cur.fetchone()
             if row:
+                # url/title/location/description are REFRESHED, not frozen at
+                # first sighting. A board that edits a title or re-issues a
+                # posting under a new URL used to leave the row pointing at a
+                # dead link forever. delisted_on is cleared: seeing it again
+                # means it is live again.
                 cur.execute(
                     "UPDATE jobs SET last_seen=?, seen_count=seen_count+1, score=?, "
                     "gate=?, reasons=?, comp_min=COALESCE(?,comp_min), "
-                    "comp_max=COALESCE(?,comp_max) WHERE uid=?",
+                    "comp_max=COALESCE(?,comp_max), url=?, title=?, location=?, "
+                    "description=COALESCE(NULLIF(?,''),description), "
+                    "group_key=?, delisted_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
-                     j.comp_min, j.comp_max, j.uid),
+                     j.comp_min, j.comp_max, j.url, j.title, j.location,
+                     j.description[:20000], j.group_key, j.uid),
                 )
                 again.append(j)
             else:
                 cur.execute(
-                    "INSERT INTO jobs (uid,company,title,url,location,source,lane,"
+                    "INSERT INTO jobs (uid,group_key,company,title,url,location,source,lane,"
                     "employer_tier,posted_at,department,comp_min,comp_max,comp_text,"
                     "score,gate,reasons,description,first_seen,last_seen) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (j.uid, j.company, j.title, j.url, j.location, j.source, j.lane,
-                     j.employer_tier, j.posted_at, j.department, j.comp_min, j.comp_max,
-                     j.comp_text, j.score, j.gate, " | ".join(j.reasons),
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (j.uid, j.group_key, j.company, j.title, j.url, j.location, j.source,
+                     j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
+                     j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
                      j.description[:20000], today, today),
                 )
                 new.append(j)
@@ -93,6 +127,48 @@ def upsert(con: sqlite3.Connection, jobs: list[Job]) -> tuple[list[Job], list[Jo
             )
     con.commit()
     return new, again
+
+
+VALID_STATUS = ("new", "reviewed", "applied", "rejected", "ignored")
+
+
+def reconcile(con: sqlite3.Connection, seen_uids: set[str], demoted: dict[str, tuple[int, str, str]],
+              healthy_sources: set[str]) -> tuple[int, int]:
+    """Close the loop after a run. Returns (delisted, demoted).
+
+    Two holes this fills, both of which surfaced dead or wrong rows as live:
+
+    1. cmd_pull only upserts QUALIFIED/VERIFY, so a posting that stops
+       qualifying (the user tightened their profile, or the board edited the
+       body) was never written back and kept surfacing at its old gate forever.
+    2. A posting removed from its board is simply absent from the next pull.
+       Nothing ever marked it closed, so it stayed QUALIFIED indefinitely and
+       the report presented it as live. This is the defect that put a dead
+       requisition in front of the user in July 2026.
+
+    A row is only delisted when its source actually reported successfully this
+    run. A broken board must never be read as "every job there closed".
+    """
+    today = date.today().isoformat()
+    dem = 0
+    with closing(con.cursor()) as cur:
+        for uid, (score, gate, reasons) in demoted.items():
+            cur.execute("UPDATE jobs SET score=?, gate=?, reasons=?, last_seen=?, "
+                        "delisted_on=NULL WHERE uid=?", (score, gate, reasons, today, uid))
+            dem += cur.rowcount
+        if not healthy_sources:
+            con.commit()
+            return 0, dem
+        marks = ",".join("?" * len(healthy_sources))
+        cur.execute(
+            f"UPDATE jobs SET delisted_on=? WHERE delisted_on IS NULL "
+            f"AND last_seen < ? AND source IN ({marks}) "
+            f"AND status NOT IN ('applied','rejected','ignored')",
+            (today, today, *healthy_sources),
+        )
+        delisted = cur.rowcount
+    con.commit()
+    return delisted, dem
 
 
 def record_health(con: sqlite3.Connection, source: str, count: int, error: str | None) -> None:
@@ -138,7 +214,8 @@ def query(con: sqlite3.Connection, *, gates: tuple[str, ...] = ("QUALIFIED", "VE
           min_score: int = 0, new_only: bool = False, since: str | None = None,
           limit: int = 200) -> list[sqlite3.Row]:
     sql = ("SELECT * FROM jobs WHERE gate IN (%s) AND score >= ? AND status NOT IN "
-           "('rejected','ignored','applied')" % ",".join("?" * len(gates)))
+           "('rejected','ignored','applied') AND delisted_on IS NULL"
+           % ",".join("?" * len(gates)))
     params: list = [*gates, min_score]
     if new_only:
         sql += " AND first_seen = last_seen"
@@ -151,9 +228,17 @@ def query(con: sqlite3.Connection, *, gates: tuple[str, ...] = ("QUALIFIED", "VE
 
 
 def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "") -> None:
-    con.execute("UPDATE jobs SET status=?, notes=COALESCE(NULLIF(?,''),notes) WHERE uid=?",
-                (status, notes, uid))
+    """Validated on purpose. Any string used to be accepted, but query() only
+    understands five, so a typo ('apllied') silently left the job in the active
+    list and the user believed it was filed."""
+    if status not in VALID_STATUS:
+        raise ValueError(f"unknown status {status!r}. Use one of: {', '.join(VALID_STATUS)}")
+    cur = con.execute(
+        "UPDATE jobs SET status=?, notes=COALESCE(NULLIF(?,''),notes) WHERE uid=?",
+        (status, notes, uid))
     con.commit()
+    if cur.rowcount == 0:
+        raise KeyError(f"no posting with uid {uid!r} (check the id in the report)")
 
 
 def stats(con: sqlite3.Connection) -> dict:

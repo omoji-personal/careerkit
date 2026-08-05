@@ -10,13 +10,21 @@ import hashlib
 import json
 import os
 import random
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import requests
 
-CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "httpcache"
+_local = threading.local()
+
+# Honours CAREERKIT_HOME like store.DB_PATH and report.OUT_DIR do. Without it a
+# shared-engine instance wrote its cache into the engine repo while its database
+# went to its own home, which breaks the per-person isolation new-instance.sh
+# exists to provide.
+CACHE_DIR = Path(os.environ.get("CAREERKIT_HOME")
+                 or Path(__file__).resolve().parent.parent) / "data" / "httpcache"
 CACHE_TTL = 60 * 60 * 6  # 6 hours
 
 UA = (
@@ -86,7 +94,19 @@ def fetch(
             cp.write_text(json.dumps({"status": status, "text": text}))
         except Exception:
             pass
+    _local.last_status = status
     return status, text
+
+
+def last_status() -> int | None:
+    """Status of the most recent fetch on this thread.
+
+    run_adapter needs to tell "this board really has no openings" from "this
+    board returned 403". Both produce an empty job list, and before this the
+    two were reported with the identical string "0 postings returned", so every
+    genuinely-empty board accumulated failures and the 'sources failing
+    repeatedly' list filled with false alarms until it was worth ignoring."""
+    return getattr(_local, "last_status", None)
 
 
 def fetch_json(url: str, **kw) -> Any:

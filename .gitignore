@@ -1,7 +1,12 @@
+# Everything personal. profile/ is the user's identity, claims, tracker and
+# API keys; data/ is their database and HTTP cache; out/ is their reports.
+# None of it belongs in git, including in a private repo.
 profile/
 data/
 out/
+.venv/
 __pycache__/
 *.pyc
 .DS_Store
 *.local.*
+.pytest_cache/
