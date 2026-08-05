@@ -365,7 +365,7 @@ def workday(cfg: dict) -> list[Job]:
                     url=f"{host}/{site}{path}",
                     location=j.get("locationsText", "") or "",
                     posted_at=j.get("postedOn", "") or "",
-                    external_id=j.get("bulletFields", [""])[0] if j.get("bulletFields") else path,
+                    external_id=(j.get("bulletFields") or [""])[0] or path,
                     source="workday", raw=j, **_base(cfg),
                 ))
             offset += 20

@@ -38,15 +38,24 @@ _session.headers.update({"User-Agent": UA, "Accept": "application/json, text/htm
 # Per-host minimum gap between requests, seconds.
 _HOST_DELAY = 0.7
 _last_hit: dict[str, float] = {}
+# check-then-set on _last_hit was unsynchronised while cmd_verify runs 8 workers
+# and discover_many up to 72, so two requests to the same host could fire inside
+# the delay - breaking the politeness contract the README advertises and risking
+# the rate-limiting the delay exists to avoid.
+_throttle_lock = threading.Lock()
 
 
 def _throttle(url: str) -> None:
     host = url.split("/")[2] if "://" in url else url
-    last = _last_hit.get(host, 0.0)
-    gap = time.time() - last
-    if gap < _HOST_DELAY:
-        time.sleep(_HOST_DELAY - gap + random.uniform(0, 0.15))
-    _last_hit[host] = time.time()
+    with _throttle_lock:
+        last = _last_hit.get(host, 0.0)
+        gap = time.time() - last
+        wait = (_HOST_DELAY - gap + random.uniform(0, 0.15)) if gap < _HOST_DELAY else 0.0
+        # Claim the slot before sleeping, so a second thread queues behind this
+        # request rather than racing it.
+        _last_hit[host] = time.time() + wait
+    if wait > 0:
+        time.sleep(wait)
 
 
 def _cache_path(key: str) -> Path:

@@ -21,13 +21,18 @@ def set_search_terms(terms):
     global TERMS
     clean = tuple(t for t in (terms or []) if t and str(t).strip())
     if not clean:
-        print("  ! profile has no search_terms: aggregator feeds are searching for "
-              f"{TERMS[0]!r}. Add search_terms to profile/profile.yaml.")
+        # Was: keep the placeholder and warn. The warning scrolls past and the
+        # user then searches every keyword feed for a stranger's job title. An
+        # empty tuple makes the term-driven feeds poll nothing and say so.
+        print("  ! profile has no search_terms: keyword feeds will return nothing. "
+              "Add search_terms to profile/profile.yaml.")
+        TERMS = ()
         return
     TERMS = clean
 
 import json
 import re
+from urllib.parse import quote_plus
 from typing import Callable
 
 from . import http
@@ -54,7 +59,7 @@ def _j(**kw) -> Job:
 def remotive(_cfg: dict) -> list[Job]:
     out = []
     for q in TERMS:
-        d = fetch_json(f"https://remotive.com/api/remote-jobs?search={q}&limit=100")
+        d = fetch_json(f"https://remotive.com/api/remote-jobs?search={quote_plus(q)}&limit=100")
         for j in (d or {}).get("jobs", []) or []:
             out.append(_j(
                 company=j.get("company_name", ""), title=j.get("title", ""),
@@ -149,7 +154,7 @@ def weworkremotely(cfg: dict) -> list[Job]:
 def jobicy(_cfg: dict) -> list[Job]:
     out = []
     for q in TERMS:
-        d = fetch_json(f"https://jobicy.com/api/v2/remote-jobs?count=50&tag={q}")
+        d = fetch_json(f"https://jobicy.com/api/v2/remote-jobs?count=50&tag={quote_plus(q)}")
         for j in (d or {}).get("jobs", []) or []:
             out.append(_j(
                 company=j.get("companyName", ""), title=j.get("jobTitle", ""),
@@ -263,7 +268,7 @@ def usajobs(cfg: dict) -> list[Job]:
     out = []
     for kw in TERMS:
         st, tx = fetch(
-            f"https://data.usajobs.gov/api/search?Keyword={kw.replace(' ', '%20')}&ResultsPerPage=100",
+            f"https://data.usajobs.gov/api/search?Keyword={quote_plus(kw)}&ResultsPerPage=100",
             headers={"Host": "data.usajobs.gov", "User-Agent": email, "Authorization-Key": key},
         )
         if st != 200:
@@ -324,7 +329,7 @@ def careerjet(cfg: dict) -> list[Job]:
     for kw in TERMS:
         d = fetch_json(
             f"https://public.api.careerjet.net/search?locale_code=en_US&affid={affid}"
-            f"&keywords={kw.replace(' ', '%20')}&location=USA&pagesize=99&sort=date"
+            f"&keywords={quote_plus(kw)}&location=USA&pagesize=99&sort=date"
         )
         for j in (d or {}).get("jobs", []) or []:
             out.append(_j(

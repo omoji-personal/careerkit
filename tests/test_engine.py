@@ -772,9 +772,33 @@ def test_discovery_queries_follow_the_profile():
 
 
 def test_no_hardcoded_city_or_employer_in_the_engine():
-    """The repo is public. Nothing in engine/ should carry the author's city."""
-    import re
-    for f in (ROOT / "engine").glob("*.py"):
-        src = f.read_text()
-        code = "\n".join(l for l in src.splitlines() if not l.strip().startswith("#"))
-        assert not re.search(r'"[^"]*Atlanta[^"]*"', code), f"{f.name} hardcodes a city"
+    """The repo is public and general-purpose. No string LITERAL in engine/ may
+    carry the original author's city or job family.
+
+    Walks the AST so docstrings are exempt: the fix for this defect is
+    documented in prose that necessarily names the terms it removed, and a naive
+    grep flags its own explanation."""
+    import ast
+    # "georgia" is deliberately NOT here: it is a US state and belongs in the
+    # 50-state enumeration score.py uses for location detection. The city name
+    # is the signal that matters, and nothing generic needs to name a city.
+    PERSONAL = ("atlanta", "salesforce", "npsp", "agentforce", "nonprofit")
+    for f in sorted((ROOT / "engine").glob("*.py")):
+        tree = ast.parse(f.read_text())
+        docs = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+                d = ast.get_docstring(node, clean=False)
+                if d is not None:
+                    docs.add(d)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                continue
+            if node.value in docs:
+                continue
+            low = node.value.lower()
+            for term in PERSONAL:
+                assert term not in low, (
+                    f"{f.name}:{node.lineno} hardcodes a personal term "
+                    f"({term!r}): {node.value[:70]!r}")

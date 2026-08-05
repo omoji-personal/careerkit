@@ -328,7 +328,7 @@ def extract_comp(job: Job) -> tuple[int | None, int | None]:
                 v = raw * 2080
             else:
                 v = raw if b else raw * 1000
-            if 40_000 <= v <= 500_000:
+            if 40_000 <= v <= 1_500_000:   # 500k dropped real exec bands whole
                 vals.append(v)
         if len(vals) >= 2:
             best = [min(vals), max(vals)]

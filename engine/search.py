@@ -42,39 +42,11 @@ def set_core_terms(terms):
         CORE_TERMS = clean
 
 
-CORE_TERMS = [
-    '"salesforce"',
-    '"salesforce" "solution architect"',
-    '"salesforce" "solutions architect"',
-    '"salesforce" "success architect"',
-    '"salesforce" "technical account manager"',
-    '"salesforce" "delivery lead"',
-    '"salesforce" "delivery manager"',
-    '"salesforce" "engagement manager"',
-    '"salesforce" "practice lead"',
-    '"salesforce" "product owner"',
-    '"salesforce" "program manager"',
-    '"salesforce" "platform owner"',
-    '"salesforce" "platform manager"',
-    '"salesforce" "business analyst" senior',
-    '"salesforce" "principal consultant"',
-    '"salesforce" "managing consultant"',
-    '"salesforce" nonprofit',
-    '"salesforce" NPSP',
-    '"nonprofit cloud" salesforce',
-    '"agentforce"',
-    '"CRM product owner"',
-    '"CRM product manager"',
-    '"CRM program manager"',
-    '"CRM manager" salesforce',
-    '"business applications manager" salesforce',
-    '"business applications director" salesforce',
-    '"enterprise applications manager" salesforce',
-    '"business systems" lead salesforce',
-    '"constituent systems"',
-    '"advancement systems"',
-    '"donor systems" salesforce',
-]
+# Discovery queries. EMPTY by default and filled from the user's profile by
+# set_core_terms(). Held ~30 of the original author's Salesforce/CRM/nonprofit
+# searches until 2026-08-06, in a repo whose README promises nothing personal
+# lives here; anyone in another field also got zero discovery hits from them.
+CORE_TERMS: list[str] = []
 
 ATS_DOMAINS = [
     "boards.greenhouse.io",
@@ -99,7 +71,15 @@ ATS_DOMAINS = [
     "dayforcehcm.com",
 ]
 
-GEO_TERMS = ["remote", '"united states"', "atlanta", "georgia"]
+# Geography for discovery queries. Held the original author's "atlanta"/"georgia"
+# until 2026-08-06; set_geo_terms() now takes them from the profile's metros.
+GEO_TERMS = ["remote", '"united states"']
+
+
+def set_geo_terms(metros):
+    global GEO_TERMS
+    clean = [str(m).strip() for m in (metros or []) if m and str(m).strip()]
+    GEO_TERMS = ["remote", '"united states"'] + [f'"{m}"' for m in clean]
 
 
 def build_query_matrix(*, full: bool = False) -> list[str]:
