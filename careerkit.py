@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import datetime
 import re
 import sqlite3
@@ -203,7 +204,12 @@ def cmd_pull(args) -> None:
     health = list(con.execute(
         "SELECT * FROM source_health ORDER BY consecutive_failures DESC, source"))
     detail = {"pulled": len(all_jobs), "sources_ok": ok_sources,
-              "excluded_breakdown": dict(excluded.most_common(12)), "errors": errors}
+              "excluded_breakdown": dict(excluded.most_common(12)), "errors": errors,
+              # Employers `discover` registered since the last pull. The report
+              # has always had a section for these; nothing populated it, so the
+              # section could never render and the user was never told which
+              # employers had newly entered the polling set.
+              "discovered": take_discovered()}
     store.finish_run(con, run_id, len(all_jobs), len(new),
                      sum(1 for r in rows if r["gate"] == "QUALIFIED"), detail)
     path = write_report(con, rows, health=health, run_detail=detail)
@@ -239,10 +245,17 @@ def cmd_pull(args) -> None:
 
 
 def cmd_audit(args) -> None:
-    _http.set_cache_enabled(not getattr(args, "no_cache", False))
-    """The calibration loop: re-fetch live boards, re-score, and show what got
+    """The calibration loop: re-poll every board, re-score, and show what got
     KILLED and why - so silent false negatives get caught, not discovered
-    months later. Use --grep to focus (e.g. --grep 'product manager')."""
+    months later. Use --grep to focus (e.g. --grep 'product manager').
+
+    Boards answered within the last 6 hours come from the HTTP cache, so this
+    audits the scoring rules against the data a pull would see. Pass --no-cache
+    to really re-fetch, which is what you want when auditing whether a posting
+    is still live rather than whether the gates judged it correctly."""
+    # This assignment used to sit ABOVE the string, which made the string an
+    # expression statement rather than a docstring: --help showed nothing.
+    _http.set_cache_enabled(not getattr(args, "no_cache", False))
     profile = load_profile()
     aggregators.set_search_terms(profile.search_terms)
     _adapters.set_relevance_terms(profile.relevance_terms)
@@ -303,6 +316,7 @@ def cmd_discover(args) -> None:
             reg["employers"].append(entry)
             found.append(entry)
     save_employers(reg)
+    queue_discovered(found)
     print(f"\n{len(found)} registered, {len(missed)} not found. "
           f"Registry now holds {len(reg['employers'])} employers.")
     if missed:
@@ -475,6 +489,40 @@ def cmd_status(args) -> None:
             print(f"  {b['source']:<46} x{b['consecutive_failures']}  {(b['last_error'] or '')[:50]}")
 
 
+DISCOVERED_QUEUE = ROOT / "data" / "discovered-pending.json"
+
+
+def queue_discovered(entries: list[dict]) -> None:
+    """Remember employers `discover` just registered, for the next pull report.
+
+    discover and pull are separate commands, so the newly registered employers
+    were announced only on the terminal of whoever ran discover, and never
+    appeared in the report the user actually reads."""
+    if not entries:
+        return
+    try:
+        DISCOVERED_QUEUE.parent.mkdir(parents=True, exist_ok=True)
+        prev = json.loads(DISCOVERED_QUEUE.read_text()) if DISCOVERED_QUEUE.exists() else []
+        seen = {(e.get("ats"), e.get("slug") or e.get("tenant")) for e in prev}
+        prev += [e for e in entries
+                 if (e.get("ats"), e.get("slug") or e.get("tenant")) not in seen]
+        DISCOVERED_QUEUE.write_text(json.dumps(prev[-200:]))
+    except OSError:
+        pass          # a report nicety must never fail a discovery run
+
+
+def take_discovered() -> list[dict]:
+    """Read and clear the queue, so each employer is announced exactly once."""
+    if not DISCOVERED_QUEUE.exists():
+        return []
+    try:
+        entries = json.loads(DISCOVERED_QUEUE.read_text())
+        DISCOVERED_QUEUE.unlink()
+        return entries if isinstance(entries, list) else []
+    except (OSError, ValueError):
+        return []
+
+
 def tracker_drift(con) -> dict:
     """Where the database and profile/tracker.md disagree.
 
@@ -561,7 +609,8 @@ def main() -> None:
                     help="bypass the 6h HTTP cache and really re-fetch")
     sp.add_argument("--employers", action="store_true")
     sp.add_argument("--feeds", action="store_true")
-    sp.add_argument("--tier", nargs="*")
+    sp.add_argument("--tier", nargs="*", choices=["A", "B", "C"],
+                    help="poll only employers in these tiers")
     sp.add_argument("--min-score", type=int, default=0)
 
     sp = sub.add_parser("audit"); sp.set_defaults(fn=cmd_audit)
@@ -575,7 +624,13 @@ def main() -> None:
     sp.add_argument("names", nargs="*")
     sp.add_argument("--file")
     sp.add_argument("--lane", default="discovered")
-    sp.add_argument("--tier")
+    # NOT the same flag as `pull --tier`, which FILTERS which tiers to poll.
+    # This one ASSIGNS a tier to the employers being registered, so it takes a
+    # single value. One name for two operations read as an inconsistency and
+    # invited "fixing" one of them into the other's shape.
+    sp.add_argument("--assign-tier", dest="tier", default="C",
+                    choices=["A", "B", "C"],
+                    help="tier to record for newly registered employers")
 
     sp = sub.add_parser("ingest-urls"); sp.set_defaults(fn=cmd_ingest_urls)
     sp.add_argument("file")

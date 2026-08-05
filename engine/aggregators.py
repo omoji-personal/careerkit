@@ -412,9 +412,10 @@ def linkedin_guest(cfg: dict) -> list[Job]:
     ua = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"}
 
-    card_re = re.compile(
-        r'base-card__full-link"\s+href="([^"]+)"[^>]*>\s*<span[^>]*>([^<]+)</span>',
-        re.S)
+    # No card_re here on purpose. A combined link+title pattern was tried and
+    # abandoned: LinkedIn's guest markup puts the two in separate elements often
+    # enough that a single regex matched a fraction of the cards and silently
+    # dropped the rest. The per-field patterns below are what actually parse.
     title_re = re.compile(r'base-search-card__title">\s*([^<]+)')
     comp_re = re.compile(r'base-search-card__subtitle[^>]*>\s*(?:<a[^>]*>)?\s*([^<]+)')
     loc_re = re.compile(r'job-search-card__location">\s*([^<]+)')

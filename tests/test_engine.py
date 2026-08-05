@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -731,10 +730,8 @@ def test_relevance_filter_fails_open_when_unset():
 def test_the_example_profile_survives_its_own_engine():
     """The shipped example person is a marketing-ops lead, chosen to prove the
     tool is not Salesforce-specific. Their titles must pass the pre-filter."""
-    import yaml
     from engine import adapters
     from engine.score import Profile
-    cfg = yaml.safe_load((ROOT / "profile.example" / "profile.yaml").read_text())
     p = Profile.load(ROOT / "profile.example" / "profile.yaml")
     assert p.relevance_terms, "profile produced no relevance terms"
     adapters.set_relevance_terms(p.relevance_terms)
@@ -1220,7 +1217,6 @@ def test_every_documented_cli_command_exists():
     """README and the skills tell the user (and Claude) to run these. A command
     that was renamed leaves instructions that fail at the moment of use."""
     import re as _re
-    import subprocess
     registered = set(_re.findall(r'sub\.add_parser\("([a-z-]+)"',
                                  (ROOT / "careerkit.py").read_text()))
     docs = [ROOT / "README.md", ROOT / "CLAUDE.md"]
@@ -1313,3 +1309,35 @@ def test_every_search_term_in_a_query_string_is_url_encoded():
                 if not _re.search(r"(quote_plus|quote|urlencode)\(", line):
                     bad.append(f"{f}:{n}: {line.strip()[:90]}")
     assert not bad, "unencoded search terms in a query string:\n" + "\n".join(bad)
+
+
+def test_discovered_employers_reach_the_next_pull_report(tmp_path, monkeypatch):
+    """The report has always had a 'Newly discovered employers' section and
+    nothing ever populated it, so an employer could join the polling set without
+    the user being told anywhere they would look."""
+    import importlib
+    ck = importlib.import_module("careerkit")
+    monkeypatch.setattr(ck, "DISCOVERED_QUEUE", tmp_path / "q.json")
+
+    assert ck.take_discovered() == []
+    ck.queue_discovered([{"name": "Acme", "ats": "greenhouse", "slug": "acme"}])
+    ck.queue_discovered([{"name": "Acme", "ats": "greenhouse", "slug": "acme"},
+                         {"name": "Beta", "ats": "lever", "slug": "beta"}])
+    got = ck.take_discovered()
+    assert [e["name"] for e in got] == ["Acme", "Beta"], "must dedupe, not double-list"
+    assert ck.take_discovered() == [], "announced once, then cleared"
+
+
+def test_report_renders_the_discovered_section(tmp_path, monkeypatch):
+    from engine import report as _report
+    monkeypatch.setattr(_report, "OUT_DIR", tmp_path)
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    path = _report.write_report(
+        con, [], health=[],
+        run_detail={"pulled": 0, "sources_ok": 0,
+                    "discovered": [{"name": "Acme", "ats": "greenhouse",
+                                    "slug": "acme", "open_roles": 3}]},
+        filename="t.md")
+    body = path.read_text()
+    assert "Newly discovered employers" in body and "Acme" in body
