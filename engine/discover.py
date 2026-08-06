@@ -36,7 +36,12 @@ def slug_candidates(name: str, extra: Iterable[str] = ()) -> list[str]:
     full = "".join(words)
     fullhyph = "-".join(words)
     first = core[0] if core else ""
-    initials = "".join(w[0] for w in core) if len(core) > 1 else ""
+    # Initials only when there are enough of them. A two-letter slug is almost
+    # always somebody else: probing "Fisher Phillips" found lever:fp, a Polish IT
+    # company in Gliwice, and "DLA Piper" found recruitee:dp, a Belgian firm in
+    # West-Vlaanderen. Both would have been registered as the law firm and polled
+    # forever, quietly feeding the wrong company's jobs into the report.
+    initials = "".join(w[0] for w in core) if len(core) > 2 else ""
 
     cands = [joined, hyph, full, fullhyph, first, initials]
     cands += [c + "careers" for c in (joined, hyph) if c]
@@ -63,8 +68,21 @@ def _p_ashby(s: str):
 
 
 def _p_smartrecruiters(s: str):
+    """0 openings is indistinguishable from "no such company" here, so 0 means NOT FOUND.
+
+    SmartRecruiters answers 200 with {"totalFound": 0} for ANY slug, including
+    "asdfqwerzxcv". Returning 0 made every guessed slug look like a discovered
+    board: one run over 30 company names registered 27 phantom employers, each of
+    which would then be polled forever and always return nothing. There is no
+    other existence check; api.smartrecruiters.com/v1/companies/<slug> 404s even
+    for real companies, and careers.smartrecruiters.com/<anything> returns the
+    same SPA shell. So a real board has to prove itself with at least one posting.
+    The cost is a genuinely empty SmartRecruiters board going undiscovered, which
+    is much cheaper than a registry full of employers that do not exist."""
     d = fetch_json(f"https://api.smartrecruiters.com/v1/companies/{s}/postings?limit=1")
-    return d.get("totalFound") if isinstance(d, dict) and "totalFound" in d else None
+    if not isinstance(d, dict) or "totalFound" not in d:
+        return None
+    return d["totalFound"] or None
 
 
 def _p_workable(s: str):

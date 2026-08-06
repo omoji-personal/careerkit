@@ -1814,3 +1814,46 @@ def test_a_real_foreign_location_still_fails():
     j = score(J(title="Solution Architect", location="India - Bangalore",
                 description="Salesforce architecture role. " + "x" * 400), p)
     assert j.gate == "EXCLUDED"
+
+
+def test_smartrecruiters_probe_rejects_a_slug_that_does_not_exist(monkeypatch):
+    """SmartRecruiters answers 200 with totalFound 0 for ANY slug. Returning 0 made
+    every guessed slug look like a real board: one discover run over 30 company
+    names registered 27 employers that do not exist, each then polled forever."""
+    from engine import discover
+    monkeypatch.setattr(discover, "fetch_json", lambda url, **k: {"totalFound": 0, "content": []})
+    assert discover._p_smartrecruiters("asdfqwerzxcv") is None
+
+    monkeypatch.setattr(discover, "fetch_json", lambda url, **k: {"totalFound": 571, "content": []})
+    assert discover._p_smartrecruiters("KIPP") == 571
+
+    monkeypatch.setattr(discover, "fetch_json", lambda url, **k: None)
+    assert discover._p_smartrecruiters("whatever") is None
+
+
+def test_no_probe_reports_a_board_found_on_an_empty_response(monkeypatch):
+    """A probe returning a falsy-but-not-None count is how a phantom employer gets
+    registered. Every probe must return None, not 0, when it cannot prove the board
+    exists."""
+    from engine import discover
+    monkeypatch.setattr(discover, "fetch_json", lambda url, **k: {})
+    monkeypatch.setattr(discover, "fetch", lambda url, **k: (200, ""))
+    for name, fn in discover.PROBES.items():
+        got = fn("nonexistent-slug-xyz")
+        assert got is None or got > 0, f"{name} returned {got!r} for an empty response"
+
+
+def test_two_letter_initials_are_not_used_as_slug_candidates():
+    """A two-letter slug is almost always a different company. Probing
+    "Fisher Phillips" matched lever:fp, a Polish IT firm in Gliwice, and
+    "DLA Piper" matched recruitee:dp, a Belgian company. Both would have been
+    registered as the law firm and polled forever, feeding a stranger's jobs
+    into the report under the right employer's name."""
+    from engine.discover import slug_candidates
+    for name in ("Fisher Phillips", "DLA Piper", "Husch Blackwell"):
+        cands = slug_candidates(name)
+        two_letter = [c for c in cands if len(c) == 2]
+        assert not two_letter, f"{name} still yields {two_letter}"
+    # three or more initials are distinctive enough to keep
+    assert "lcfcr" in slug_candidates("Lawyers Committee for Civil Rights")
+    assert "mam" in slug_candidates("Morgan and Morgan")
