@@ -111,6 +111,15 @@ NON_US_CC = re.compile(
 # Canada, Toronto, or Ontario, all of which NON_US catches first.
 AMBIGUOUS_CC = frozenset({"ca", "co", "de", "in", "id", "il", "ma", "ar"})
 
+# A location field that names no place. Workday boards routinely collapse a
+# multi-city requisition to "3 Locations", and some emit "Multiple Locations" or
+# "Various". That string is not evidence of a disqualifying location, it is the
+# absence of evidence, and failing on it discarded 28 Salesforce reqs in one run,
+# any of which could have listed the user's own metro among the hidden cities.
+UNRESOLVED_LOC = re.compile(
+    r"^\s*(?:\d+\s*locations?|multiple\s+locations?|various(?:\s+locations?)?|"
+    r"several\s+locations?|see\s+(?:job\s+)?description|multiple\s+sites?)\s*$", re.I)
+
 VAGUE_REMOTE = re.compile(
     r"\b(anywhere in the world|worldwide|global(ly)?|any location|"
     r"work from anywhere)\b", re.I)
@@ -535,6 +544,12 @@ def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
         return "fail", f"onsite/hybrid outside target metros: {loc[:60]}"
     if not loc:
         return "unknown", "no location given"
+    if UNRESOLVED_LOC.match(loc):
+        # The board hid the cities behind a count. Route to VERIFY so the user
+        # can open it, rather than discarding a role that may well be in their
+        # own metro.
+        return "unknown", (f"'{loc[:40]}' - board did not name the cities; "
+                           f"open it to see whether one is yours")
     if BARE_US_LOC.match(loc):
         # A bare country name is not an office. Route to VERIFY, never auto-fail.
         return "unknown", f"'{loc[:40]}' - bare US location, remote vs onsite unstated"

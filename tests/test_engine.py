@@ -1788,3 +1788,29 @@ def test_a_dream_employer_cannot_waive_what_you_cannot_do(tmp_path):
     # and it still blocks everywhere else
     elsewhere = score(J(company="Acme", title="Staff Software Engineer"), prof)
     assert elsewhere.gate in ("SLOT-BLOCKED", "EXCLUDED")
+
+
+@pytest.mark.parametrize("loc", ["2 Locations", "3 Locations", "Multiple Locations",
+                                 "Various", "Several Locations", "See job description"])
+def test_a_location_that_names_no_place_is_verified_not_discarded(loc):
+    """Workday collapses a multi-city requisition to "3 Locations". That is the
+    absence of evidence, not evidence of a bad location, and failing on it
+    discarded 28 Salesforce reqs in one run, any of which could have listed the
+    user's own metro among the hidden cities."""
+    from engine.score import Profile, score
+    p = Profile()
+    p.lanes = [(40, __import__("re").compile("architect", __import__("re").I), "a")]
+    j = score(J(title="Solution Architect", location=loc,
+                description="Salesforce architecture role. " + "x" * 400), p)
+    assert j.gate == "VERIFY", f"{loc!r} produced {j.gate}, should need a manual check"
+
+
+def test_a_real_foreign_location_still_fails():
+    """The fix must not turn the location rail off."""
+    import re as _re
+    from engine.score import Profile, score
+    p = Profile()
+    p.lanes = [(40, _re.compile("architect", _re.I), "a")]
+    j = score(J(title="Solution Architect", location="India - Bangalore",
+                description="Salesforce architecture role. " + "x" * 400), p)
+    assert j.gate == "EXCLUDED"
