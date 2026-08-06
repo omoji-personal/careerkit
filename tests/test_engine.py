@@ -1716,3 +1716,48 @@ def test_a_posting_seen_in_exactly_one_earlier_run_is_not_new_today():
     assert not is_new(carried, 20)
     # with no run anchor the old heuristic still applies
     assert is_new(once_before)
+
+
+def test_rescore_applies_changed_criteria_to_stored_postings(db, tmp_path):
+    """Editing your criteria only affected postings the boards happened to show
+    you again afterwards. Everything already stored kept its old verdict, so the
+    report went on offering roles the new rules reject."""
+    import yaml as _yaml
+    from engine import pull as _pull, store
+    from engine.score import Profile
+
+    j = J(company="Zoom", title="Customer Success Manager, Education",
+          description="We use Salesforce daily. " + "x" * 400)
+    j.gate, j.score = "QUALIFIED", 42
+    store.upsert(db, [j])
+    assert db.execute("SELECT gate FROM jobs WHERE uid=?", (j.uid,)).fetchone()["gate"] == "QUALIFIED"
+
+    # criteria narrowed: a bare CSM title is no longer in family
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "sf", "titles": ["/(salesforce).{0,25}(architect|consultant)/"]}],
+        "location": {"remote_us": True},
+    }))
+    out = _pull.rescore(db, Profile.load(p), echo=lambda *a: None)
+
+    row = db.execute("SELECT gate FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert row["gate"] == "EXCLUDED", f"stale verdict survived: {row['gate']}"
+    assert out["changed"] >= 1 and out["dropped"] >= 1
+
+
+def test_rescore_makes_no_network_requests(db, monkeypatch, tmp_path):
+    """It judges from stored text. Reaching for the network would make a
+    criteria change as slow and as failure-prone as a full pull."""
+    import yaml as _yaml
+    from engine import http, pull as _pull, store
+    from engine.score import Profile
+
+    def boom(*a, **k):
+        raise AssertionError("rescore made a network request")
+    monkeypatch.setattr(http, "fetch", boom)
+    monkeypatch.setattr(http, "fetch_json", boom)
+
+    store.upsert(db, [J(company="Acme", title="Salesforce Solution Architect")])
+    p = tmp_path / "p.yaml"
+    p.write_text(_yaml.safe_dump({"lanes": [{"key": "sf", "titles": ["salesforce"]}]}))
+    _pull.rescore(db, Profile.load(p), echo=lambda *a: None)

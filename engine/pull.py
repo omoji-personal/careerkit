@@ -196,3 +196,40 @@ def rebuild_report(con, *, min_score: int = 0, echo=print):
                         run_id=last["run_id"] if last else None)
     echo(f"Report: {path}")
     return path
+
+
+def rescore(con, profile, *, echo=print) -> dict:
+    """Re-judge every stored posting against the CURRENT profile.
+
+    Changing your criteria only affected postings that happened to be re-sighted
+    afterwards. Everything already in the database kept the verdict it was given
+    under the old rules, potentially forever, because a posting the new search
+    terms no longer surface is never re-scored. For a tool whose premise is that
+    your rules are the only rules, that left the report showing roles the rules
+    no longer accept.
+
+    Scores from stored text, so it makes no network requests."""
+    from .models import Job
+    from .score import score
+
+    rows = list(con.execute("SELECT * FROM jobs"))
+    changed, dropped = 0, 0
+    for r in rows:
+        j = Job(company=r["company"], title=r["title"], url=r["url"],
+                source=r["source"], location=r["location"] or "",
+                description=r["description"] or "", posted_at=r["posted_at"] or "",
+                department=r["department"] or "", comp_min=r["comp_min"],
+                comp_max=r["comp_max"], comp_text=r["comp_text"] or "",
+                lane=r["lane"] or "", employer_tier=r["employer_tier"] or "")
+        score(j, profile)
+        if j.gate == r["gate"] and j.score == r["score"]:
+            continue
+        changed += 1
+        if r["gate"] in ("QUALIFIED", "VERIFY") and j.gate not in ("QUALIFIED", "VERIFY"):
+            dropped += 1
+        con.execute("UPDATE jobs SET gate=?, score=?, reasons=?, lane=? WHERE uid=?",
+                    (j.gate, j.score, " | ".join(j.reasons), j.lane or r["lane"], r["uid"]))
+    con.commit()
+    echo(f"  re-scored {len(rows)} stored postings against the current profile")
+    echo(f"  {changed} changed verdict, {dropped} no longer surface")
+    return {"total": len(rows), "changed": changed, "dropped": dropped}

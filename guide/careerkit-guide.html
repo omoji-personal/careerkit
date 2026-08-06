@@ -281,13 +281,15 @@ claude              # open Claude Code in this folder
     <dt>/ingest &lt;url&gt;</dt><dd>Score and register anything you found elsewhere, so the engine knows about it.</dd>
     <dt>/compose</dt><dd>Resume, cover letter and profile work, gated by your claims register.</dd>
     <dt>/outreach</dt><dd>Referrals, thank-yous and nudges. Draft only by default.</dd>
-    <dt>/criteria</dt><dd>Change what surfaces.</dd>
+    <dt>/criteria</dt><dd>Change what surfaces. Follow it with <code>rescore</code>, which
+      re-judges postings already stored against the new rules.</dd>
     <dt>/audit</dt><dd>Review what the gates killed. Run it monthly.</dd>
   </dl>
 
   <h3>Running the engine directly</h3>
   <p>Claude does this for you, but it is an ordinary command line tool.</p>
 <pre>./careerkit.py pull            # poll everything, score, write a report
+./careerkit.py rescore         # re-judge stored postings after a criteria change
 ./careerkit.py doctor          # profile, sources, freshness, drift: one check
 ./careerkit.py status          # what is in the database, which sources are broken
 ./careerkit.py audit           # what the gates killed, and why

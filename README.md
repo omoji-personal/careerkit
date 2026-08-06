@@ -146,6 +146,7 @@ Claude does this for you, but it is a normal CLI:
 
 ```
 ./careerkit.py pull          # poll every board + feed, score, write a report
+./careerkit.py rescore       # re-judge stored postings after a criteria change
 ./careerkit.py doctor        # one check: profile, sources, freshness, drift
 ./careerkit.py status        # what is in the database, which sources are broken
 ./careerkit.py audit         # show what the gates killed, and why
@@ -157,6 +158,11 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py ingest-url -- "https://boards.greenhouse.io/acme/jobs/1"
 ./careerkit.py pull --no-cache      # really re-fetch, ignoring the 6h cache
 ```
+
+`rescore` is the one to run after you change your criteria. Editing your profile
+only affects postings the boards happen to show you again afterwards, so
+everything already in your database keeps the verdict it was given under the old
+rules. `rescore` re-judges all of it from stored text, with no network requests.
 
 `doctor` is the one to run if something feels off. It checks that your profile
 parses, that no source has been failing repeatedly, that the last run finished and was recent, and that your database

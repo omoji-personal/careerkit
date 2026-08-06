@@ -10,6 +10,7 @@
     ./careerkit.py ingest-urls FILE    resolve pasted job URLs -> employers, register
     ./careerkit.py audit [--grep RX]   re-fetch + re-score, show every kill and why
     ./careerkit.py report [--format json|csv]   rebuild the report, or export rows
+    ./careerkit.py rescore             re-judge stored postings after a criteria change
     ./careerkit.py doctor              one check: profile, sources, freshness, drift
     ./careerkit.py status | mark UID STATUS
 """
@@ -425,6 +426,16 @@ def cmd_history(args) -> None:
               + (f"  ({e['detail'][:40]})" if e["detail"] else ""))
 
 
+def cmd_rescore(args) -> None:
+    """Apply changed criteria to postings already in the database.
+
+    Without this, editing your profile only affects postings the boards happen
+    to show you again afterwards."""
+    con = store.connect()
+    _pull.rescore(con, load_profile())
+    _pull.rebuild_report(con, min_score=getattr(args, "min_score", 0))
+
+
 def cmd_doctor(args) -> None:
     """One place that answers "is this thing working?".
 
@@ -752,6 +763,9 @@ def main() -> None:
     sp = sub.add_parser("db", help="database integrity and backup")
     sp.set_defaults(fn=cmd_db)
     sp.add_argument("action", choices=["check", "backup"])
+
+    sp = sub.add_parser("rescore"); sp.set_defaults(fn=cmd_rescore)
+    sp.add_argument("--min-score", type=int, default=0)
 
     sp = sub.add_parser("doctor"); sp.set_defaults(fn=cmd_doctor)
 
