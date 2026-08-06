@@ -71,7 +71,6 @@ from engine import adapters as _adapters
 from engine import discover as _discover
 from engine.discover import discover_many  # noqa: E402
 from engine import pull as _pull
-from engine.report import write_report  # noqa: E402
 from engine.score import Profile, ProfileError, score  # noqa: E402
 from engine import score as _score_mod
 from engine import search as _search
@@ -360,11 +359,6 @@ def cmd_verify(args) -> None:
 def cmd_report(args) -> None:
     con = store.connect()
     rows = store.query(con, min_score=args.min_score, limit=300)
-    health = list(con.execute(
-        "SELECT * FROM source_health ORDER BY consecutive_failures DESC"))
-    last = con.execute("SELECT detail FROM runs WHERE finished IS NOT NULL "
-                       "ORDER BY run_id DESC LIMIT 1").fetchone()
-    detail = json.loads(last["detail"]) if last and last["detail"] else {}
 
     fmt = getattr(args, "format", "md")
     if fmt in ("json", "csv"):
@@ -389,7 +383,7 @@ def cmd_report(args) -> None:
         print(f"Exported {len(rows)} rows: {path}")
         return
 
-    print("Report:", write_report(con, rows, health=health, run_detail=detail))
+    _pull.rebuild_report(con, min_score=args.min_score)
 
 
 def OUT_DIR_FOR_EXPORT() -> Path:

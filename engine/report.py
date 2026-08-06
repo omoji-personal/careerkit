@@ -17,7 +17,7 @@ from .models import ATS_SOURCES, sanitize_external
 OUT_DIR = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "out"
 
 
-def is_new(r) -> bool:
+def is_new(r, current_run: int | None = None) -> bool:
     """First sighting was THIS run, not merely today.
 
     "new" used to mean first_seen == last_seen, which is a date comparison. Two
@@ -28,6 +28,13 @@ def is_new(r) -> bool:
     keys = r.keys() if hasattr(r, "keys") else []
     if "first_seen_run" in keys:
         if r["first_seen_run"] is not None:
+            # Compare against the run being reported, when it is known.
+            # first_seen_run == last_seen_run says "seen in exactly one run",
+            # which is true FOREVER for a posting sighted once and never again,
+            # so seven rows from a previous run were being announced as new
+            # again today. Same mistake as the date test it replaced.
+            if current_run is not None:
+                return r["first_seen_run"] == current_run
             return r["first_seen_run"] == r["last_seen_run"]
         if r["last_seen_run"] is not None:
             # Written before run stamping existed, and re-sighted since. It
@@ -90,14 +97,15 @@ def _group(rows: list[sqlite3.Row]) -> list[list[sqlite3.Row]]:
     return out
 
 
-def _row_block(rows: list[sqlite3.Row], idx: int) -> str:
+def _row_block(rows: list[sqlite3.Row], idx: int, new_uids: set | None = None) -> str:
     r = rows[0]
     comp = ""
     if r["comp_min"]:
         comp = f"${r['comp_min']:,}" + (f" - ${r['comp_max']:,}" if r["comp_max"] else "+")
     else:
         comp = "not stated"
-    age = "NEW" if is_new(r) else f"first seen {r['first_seen']}"
+    age = ("NEW" if (r["uid"] in new_uids if new_uids is not None else is_new(r))
+           else f"first seen {r['first_seen']}")
     lines = [
         f"### {idx}. {sanitize_external(r['title'], 120)} - {sanitize_external(r['company'], 60)}"
         + (f"  ({len(rows)} open reqs)" if len(rows) > 1 else "")
@@ -126,12 +134,13 @@ def _row_block(rows: list[sqlite3.Row], idx: int) -> str:
 
 def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
                  health: list[sqlite3.Row], run_detail: dict,
-                 filename: str | None = None) -> Path:
+                 filename: str | None = None, run_id: int | None = None) -> Path:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     today = date.today().isoformat()
     path = OUT_DIR / (filename or f"sourcing-{today}.md")
 
-    new_rows = [r for r in rows if is_new(r)]
+    new_rows = [r for r in rows if is_new(r, run_id)]
+    _new_uids = {r["uid"] for r in new_rows}
     qual = _group([r for r in rows if r["gate"] == "QUALIFIED"])
     verify = _group([r for r in rows if r["gate"] == "VERIFY"])
 
@@ -152,7 +161,7 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
 
     L += ["---", "", "## Qualified", ""]
     if qual:
-        L += [_row_block(r, i) + "\n" for i, r in enumerate(qual, 1)]
+        L += [_row_block(r, i, _new_uids) + "\n" for i, r in enumerate(qual, 1)]
     else:
         L += ["_Nothing cleared every screenable rail this run._", ""]
 
@@ -160,7 +169,7 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
           "_Passes the role and location rails but one rail could not be evidenced "
           "from the posting text._", ""]
     if verify:
-        L += [_row_block(r, i) + "\n" for i, r in enumerate(verify, 1)]
+        L += [_row_block(r, i, _new_uids) + "\n" for i, r in enumerate(verify, 1)]
     else:
         L += ["_None._", ""]
 

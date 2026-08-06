@@ -1700,3 +1700,19 @@ def test_importing_the_cli_does_not_re_exec_the_interpreter():
     m = _re.search(r'^(\S.*)?\n?if __name__ == "__main__":\n    _use_venv\(\)', src, _re.M)
     assert m, "_use_venv() must be guarded by __name__ == '__main__'"
     assert not _re.search(r"^_use_venv\(\)$", src, _re.M), "unguarded call is back"
+
+
+def test_a_posting_seen_in_exactly_one_earlier_run_is_not_new_today():
+    """first_seen_run == last_seen_run means "seen in exactly one run", which
+    stays true FOREVER for a posting sighted once and never again. Seven rows
+    from the previous run were announced as new again the next day. The same
+    mistake as the date test this replaced, one layer up."""
+    from engine.report import is_new
+    once_before = _sight(first_seen_run=18, last_seen_run=18)
+    new_this_run = _sight(first_seen_run=20, last_seen_run=20)
+    carried = _sight(first_seen_run=15, last_seen_run=20)
+    assert not is_new(once_before, 20), "a one-off from run 18 is not new in run 20"
+    assert is_new(new_this_run, 20)
+    assert not is_new(carried, 20)
+    # with no run anchor the old heuristic still applies
+    assert is_new(once_before)

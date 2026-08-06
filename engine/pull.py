@@ -150,7 +150,7 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
               "errors": fetched["errors"], "discovered": list(discovered)}
     qualified = sum(1 for r in rows if r["gate"] == "QUALIFIED")
     store.finish_run(con, run_id, len(all_jobs), len(new), qualified, detail)
-    path = write_report(con, rows, health=health, run_detail=detail)
+    path = write_report(con, rows, health=health, run_detail=detail, run_id=run_id)
 
     return {"run_id": run_id, "path": path, "pulled": len(all_jobs),
             "kept": len(keep), "new": len(new), "qualified": qualified,
@@ -176,3 +176,23 @@ def broken_sources(con, reg: dict, threshold: int = 2) -> list:
         "SELECT * FROM source_health WHERE consecutive_failures >= ? "
         "ORDER BY consecutive_failures DESC", (threshold,))
         if b["source"] not in retired]
+
+
+def rebuild_report(con, *, min_score: int = 0, echo=print):
+    """Regenerate the report from the database, as of the last COMPLETED run.
+
+    Both front ends had their own copy of this, and one of them kept calling
+    write_report without a run id, so "new" silently reverted to the old
+    heuristic there and announced week-old postings as new. Third time this
+    class of duplication has cost something, so it lives here now."""
+    import json as _json
+    rows = store.query(con, min_score=min_score, limit=300)
+    health = list(con.execute(
+        "SELECT * FROM source_health ORDER BY consecutive_failures DESC, source"))
+    last = con.execute("SELECT run_id, detail FROM runs WHERE finished IS NOT NULL "
+                       "ORDER BY run_id DESC LIMIT 1").fetchone()
+    detail = _json.loads(last["detail"]) if last and last["detail"] else {}
+    path = write_report(con, rows, health=health, run_detail=detail,
+                        run_id=last["run_id"] if last else None)
+    echo(f"Report: {path}")
+    return path
