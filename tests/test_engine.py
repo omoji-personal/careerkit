@@ -276,6 +276,25 @@ def test_hourly_board_comp_is_annualised():
     assert lo == 60 * 2080 and hi == 80 * 2080
 
 
+def test_a_junk_floor_does_not_annualise_a_salary_band():
+    """Seen live 2026-08-06. An Indeed listing advertised "Pay: $1.00 -
+    $250,000.00 per year". The board field arrived as (1, 250000); lo < 1000 was
+    read as an hourly rate and both ends were multiplied by 2080, so the report
+    showed a band of $2,080 to $520,000,000. The top of the range is the tell:
+    nobody is paid a quarter of a million dollars an hour."""
+    from engine.score import extract_comp
+    j = J()
+    j.comp_min, j.comp_max = 1, 250_000
+    assert extract_comp(j) == (1, 250_000)
+
+
+def test_a_genuine_hourly_band_still_annualises():
+    from engine.score import extract_comp
+    j = J()
+    j.comp_min, j.comp_max = 60, 80
+    assert extract_comp(j) == (60 * 2080, 80 * 2080)
+
+
 def test_comp_range_is_read_from_the_body():
     from engine.score import extract_comp
     j = J(description="The salary range for this role is $120,000 - $150,000 per year.")

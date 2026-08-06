@@ -445,7 +445,13 @@ def extract_comp(job: Job) -> tuple[int | None, int | None]:
     ALL figures in the window; hourly bands normalize x2080."""
     if job.comp_min or job.comp_max:
         lo, hi = job.comp_min, job.comp_max
-        if lo and lo < 1000:
+        # A low floor alone does not mean the board quoted an hourly rate. Boards
+        # accept junk: an Indeed listing advertised "Pay: $1.00 - $250,000.00 per
+        # year", and treating lo < 1000 as hourly multiplied BOTH ends by 2080,
+        # reporting a band of $2,080 to $520,000,000. The top of the range settles
+        # it - nobody is paid $250,000 an hour - so only annualise when the whole
+        # band looks hourly, not just its floor.
+        if lo and lo < 1000 and (hi is None or hi < 1000):
             lo, hi = lo * 2080, (hi * 2080 if hi else None)
         return lo, hi
     text = f"{job.comp_text}\n{job.description}"
