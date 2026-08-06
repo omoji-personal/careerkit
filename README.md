@@ -171,6 +171,12 @@ only affects postings the boards happen to show you again afterwards, so
 everything already in your database keeps the verdict it was given under the old
 rules. `rescore` re-judges all of it from stored text, with no network requests.
 
+One caveat worth knowing, because it decides which command you need. Screened-out
+postings are never stored, so `rescore` can only re-judge what survived. A change
+to your **criteria** needs a `rescore`; a change to the **engine's rails** needs a
+`pull`, because the postings a rail used to reject are not in your database to
+re-judge.
+
 `doctor` is the one to run if something feels off. It checks that your profile
 parses, that no source has been failing repeatedly, that the last run finished and was recent, and that your database
 and `tracker.md` agree about what you have applied to.
