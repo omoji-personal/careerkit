@@ -16,6 +16,10 @@ tracker are gitignored and stay on your machine.
 **[Read the guide](guide/Careerkit-Guide.pdf)** for how scoring actually works,
 what leaves your machine, and the failure modes worth knowing about.
 
+**[What has gone wrong](WHAT-HAS-GONE-WRONG.md)** is the honest list of bugs
+this tool has had, in plain English, and what was done about each one. Worth
+reading before you trust it with your own search.
+
 ## What you need
 
 - [Claude Code](https://claude.com/claude-code) (Pro plan minimum; expect
@@ -187,8 +191,8 @@ proper names in a draft that do not appear in `profile/claims.md`. It reads
 tokens, not meaning, so a clean result is not a certification that a document is
 accurate. It catches the careless cases. Keep reading the draft.
 
-`./run-tests.sh` runs the regression suite. Every test in it locks down a bug
-that actually shipped, so it is worth keeping green if you change the engine.
+`./run-tests.sh` runs the regression suite. Nearly every test in it locks down a
+bug that actually shipped, so it is worth keeping green if you change the engine.
 It also runs four adapters (Greenhouse, Lever, Ashby, SmartRecruiters) against
 saved real payloads, so those boards changing their JSON shape fails a test
 rather than quietly returning nothing. The other thirteen have no fixture yet,
