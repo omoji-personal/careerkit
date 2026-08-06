@@ -160,7 +160,7 @@ PROFILE_SCHEMA: dict = {
     "comp": {"screen_floor": (int, float), "accept_floor": (int, float)},
     "location": {"remote_us": bool, "relocation": bool, "metros": list,
                  "home_metro": str, "states": list},
-    "exclusions": {"titles": list, "products": list, "certs_refused": list,
+    "exclusions": {"titles": list, "titles_always": list, "products": list, "certs_refused": list,
                    "body_patterns": list, "competing_platforms": list,
                    "clearance": bool, "quota": bool, "companies": list},
     "lanes": list, "dream_lanes": list, "dream_companies": list,
@@ -331,6 +331,7 @@ class Profile:
     lanes: list[tuple[int, re.Pattern, str]] = field(default_factory=list)
     dream_lanes: list[tuple[int, re.Pattern, str]] = field(default_factory=list)
     slot_block: re.Pattern | None = None
+    slot_block_always: re.Pattern | None = None
     products_block: re.Pattern | None = None
     certs_refused: re.Pattern | None = None
     body_blocks: list[tuple[re.Pattern, str]] = field(default_factory=list)
@@ -382,6 +383,13 @@ class Profile:
                 p.dream_lanes.append((int(lane.get("weight", 40)), pat, lane.get("key", "?")))
         p.dream_lanes.sort(key=lambda t: -t[0])
         p.slot_block = _compile_alt(exc.get("titles"), where="exclusions.titles", strict=True)
+        # Role families the person cannot do, as opposed to ones they would
+        # rather avoid. Never waived, not even for a dream employer, for the
+        # same reason clearance is not: enthusiasm does not make someone a
+        # software engineer. Waiving these was producing a list of roles at
+        # exciting companies that the user had no real chance at.
+        p.slot_block_always = _compile_alt(exc.get("titles_always"),
+                                           where="exclusions.titles_always", strict=True)
         p.products_block = _compile_alt(exc.get("products"), where="exclusions.products", strict=True)
         # Blank entries in an EXCLUSION list were filtered out silently. An
         # exclusion that quietly compiles to nothing stops applying, and
@@ -581,6 +589,13 @@ def score(job: Job, p: Profile) -> Job:
         job.lane = lane_key
 
     # --- slot block ------------------------------------------------------
+    if p.slot_block_always:
+        m = p.slot_block_always.search(title)
+        if m:
+            job.gate, job.score = "SLOT-BLOCKED", base
+            job.reasons = [f"role family not pursued: '{m.group(0)[:40]}'"]
+            return job
+
     if p.slot_block and not exempt:
         m = p.slot_block.search(title)
         if m:

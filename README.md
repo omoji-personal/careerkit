@@ -73,7 +73,14 @@ is the part to change first.
 
 `profile/profile.yaml` is the only place scoring rules exist. Lanes (the job
 titles you want), exclusions, target metros, comp floors, and autonomy settings
-all live there. To change what surfaces, change that file, usually by asking
+all live there.
+
+Two kinds of exclusion, and the difference matters. `exclusions.titles` is what
+you would rather avoid, and a dream employer waives it. `exclusions.titles_always`
+is what you cannot do, and nothing waives it: wanting to work somewhere does not
+make you a software engineer. Put role families you lack the background for in
+the second list, or an exciting company will fill your report with roles you have
+no real chance at. To change what surfaces, change that file, usually by asking
 Claude to run `/criteria`. Never by editing engine code.
 
 If a rule you wrote is unusable (an empty list item, a broken regex) the engine

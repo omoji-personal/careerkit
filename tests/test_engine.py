@@ -1761,3 +1761,30 @@ def test_rescore_makes_no_network_requests(db, monkeypatch, tmp_path):
     p = tmp_path / "p.yaml"
     p.write_text(_yaml.safe_dump({"lanes": [{"key": "sf", "titles": ["salesforce"]}]}))
     _pull.rescore(db, Profile.load(p), echo=lambda *a: None)
+
+
+def test_a_dream_employer_cannot_waive_what_you_cannot_do(tmp_path):
+    """exclusions.titles is waived for dream employers, which conflates "I would
+    relocate for them" with "I can do any job there". A Staff Software Engineer
+    req at a dream company was surfacing to someone who is not an engineer."""
+    import yaml as _yaml
+    from engine.score import Profile, score
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "sf", "titles": ["salesforce"]}],
+        "dream_lanes": [{"key": "d", "titles": ["business systems", "software engineer"]}],
+        "dream_companies": ["Wonka"],
+        "exclusions": {"titles": ["director"], "titles_always": ["software engineer"]},
+    }))
+    prof = Profile.load(p)
+
+    blocked = score(J(company="Wonka", title="Staff Software Engineer, GTM Systems"), prof)
+    assert blocked.gate == "SLOT-BLOCKED", f"capability exclusion was waived: {blocked.gate}"
+
+    # a preference-level exclusion is still waived for the dream employer
+    allowed = score(J(company="Wonka", title="Director, Business Systems"), prof)
+    assert allowed.gate != "SLOT-BLOCKED"
+
+    # and it still blocks everywhere else
+    elsewhere = score(J(company="Acme", title="Staff Software Engineer"), prof)
+    assert elsewhere.gate in ("SLOT-BLOCKED", "EXCLUDED")
