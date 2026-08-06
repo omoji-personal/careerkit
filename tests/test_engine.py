@@ -289,6 +289,41 @@ def test_a_year_number_is_not_read_as_salary():
     assert extract_comp(j) == (None, None)
 
 
+def test_body_parsed_comp_is_written_back_onto_the_job():
+    """Caught on a clean-clone first run, 2026-08-06. The one qualified role read
+    "Comp not stated" in its header while the reasons line directly beneath it
+    said "comp $150,000-$208,000". score() used the parsed band to make the gate
+    decision and to write the reasons string, then dropped it: comp_min/comp_max
+    were never assigned, so nothing reached the row. Cost: `report --format csv`
+    exported a blank comp column for every posting whose band came from the body
+    rather than a board field, which was 55 of 418 rows in the real database."""
+    from engine.score import Profile, score
+    p = Profile()
+    p.lanes = [(50, __import__('re').compile(r"(product manager)", 2), "pm")]
+    p.domain_terms = None
+    j = J(title="Product Manager", location="Remote, US",
+          description="The salary range for this role is $150,000 - $208,000 per year. " + "d" * 400)
+    out = score(j, p)
+    assert (out.comp_min, out.comp_max) == (150_000, 208_000), \
+        f"parsed comp never reached the row: {out.comp_min}, {out.comp_max}"
+
+
+def test_hourly_normalisation_is_written_back_too():
+    """Same defect, quieter half: extract_comp annualises an hourly board field
+    x2080 for gating, but the raw hourly figure stayed on the row. A contract
+    posting therefore exported comp_min=75, and an hourly band annualised
+    elsewhere is exactly what made a $144/hr contract look like a $299K salary."""
+    from engine.score import Profile, score
+    p = Profile()
+    p.lanes = [(50, __import__('re').compile(r"(product manager)", 2), "pm")]
+    p.domain_terms = None
+    j = J(title="Product Manager", location="Remote, US", description="d" * 400)
+    j.comp_min, j.comp_max = 75, 90
+    out = score(j, p)
+    assert out.comp_min == 75 * 2080 and out.comp_max == 90 * 2080, \
+        f"hourly rate left un-annualised on the row: {out.comp_min}, {out.comp_max}"
+
+
 # --------------------------------------------------------------------------
 # score.location_verdict
 # --------------------------------------------------------------------------
@@ -1743,6 +1778,63 @@ def test_rescore_applies_changed_criteria_to_stored_postings(db, tmp_path):
     row = db.execute("SELECT gate FROM jobs WHERE uid=?", (j.uid,)).fetchone()
     assert row["gate"] == "EXCLUDED", f"stale verdict survived: {row['gate']}"
     assert out["changed"] >= 1 and out["dropped"] >= 1
+
+
+def test_rescore_preserves_the_boards_remote_claim(db, tmp_path):
+    """Caught on a clean-clone first run, 2026-08-06. A jobicy posting located
+    only "USA" passed at pull as remote-US, because the feed set remote_flag=True
+    and location_verdict trusts it. remote_flag was not a column, so rescore
+    rebuilt the Job with remote_flag=None and demoted the row to VERIFY. Nothing
+    in the profile had changed, and the report gave no sign the run had lost
+    evidence. Every remote-first feed sets this flag, so it hit a whole class."""
+    import yaml as _yaml
+    from engine import pull as _pull, store
+    from engine.score import Profile
+
+    j = J(company="Chime", title="Senior Lifecycle Marketing Manager", location="USA",
+          description="The salary range for this role is $150,000 - $208,000 per year. " + "x" * 400)
+    j.remote_flag = True
+    j.gate, j.score = "QUALIFIED", 52
+    store.upsert(db, [j])
+
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "lifecycle", "titles": ["/lifecycle (marketing )?(manager|lead)/"]}],
+        "location": {"remote_us": True},
+    }))
+    _pull.rescore(db, Profile.load(p), echo=lambda *a: None)
+
+    row = db.execute("SELECT gate, reasons FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert row["gate"] == "QUALIFIED", \
+        f"rescore lost the board's remote claim and demoted the row: {row['gate']} ({row['reasons']})"
+
+
+def test_rescore_persists_the_comp_it_resolved(db, tmp_path):
+    """The UPDATE wrote gate, score, reasons and lane only. score() resolves comp
+    by parsing the body, so a row whose band never made it to the database could
+    not be repaired by any number of rescores, and the CSV export kept showing an
+    empty comp column for it."""
+    import yaml as _yaml
+    from engine import pull as _pull, store
+    from engine.score import Profile
+
+    j = J(company="Chime", title="Senior Lifecycle Marketing Manager", location="Remote, US",
+          description="The salary range for this role is $150,000 - $208,000 per year. " + "x" * 400)
+    j.comp_min = j.comp_max = None
+    j.gate, j.score = "QUALIFIED", 52
+    store.upsert(db, [j])
+    assert db.execute("SELECT comp_min FROM jobs WHERE uid=?", (j.uid,)).fetchone()["comp_min"] is None
+
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "lifecycle", "titles": ["/lifecycle (marketing )?(manager|lead)/"]}],
+        "location": {"remote_us": True},
+    }))
+    _pull.rescore(db, Profile.load(p), echo=lambda *a: None)
+
+    row = db.execute("SELECT comp_min, comp_max FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert (row["comp_min"], row["comp_max"]) == (150_000, 208_000), \
+        f"rescore did not persist resolved comp: {row['comp_min']}, {row['comp_max']}"
 
 
 def test_rescore_makes_no_network_requests(db, monkeypatch, tmp_path):

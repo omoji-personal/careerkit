@@ -77,6 +77,13 @@ _MIGRATIONS = [
     ("jobs", "first_seen_run", "INTEGER"),
     ("jobs", "last_seen_run", "INTEGER"),
     ("runs", "state", "TEXT"),
+    # The board's own remote claim. Twelve adapters and feeds set it and
+    # location_verdict trusts it, but it was never a column, so rescore rebuilt
+    # every Job with remote_flag=None and re-judged it without that evidence. A
+    # remote-board posting whose location string is just "USA" passed at pull and
+    # became VERIFY on the next rescore, with no change to the profile and no way
+    # to tell from the report that the run had lost information.
+    ("jobs", "remote_flag", "INTEGER"),
 ]
 
 
@@ -306,12 +313,14 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                 cur.execute(
                     "INSERT INTO jobs (uid,group_key,board,company,title,url,location,source,lane,"
                     "employer_tier,posted_at,department,comp_min,comp_max,comp_text,"
-                    "score,gate,reasons,description,first_seen,last_seen,first_seen_run,last_seen_run) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "score,gate,reasons,description,first_seen,last_seen,first_seen_run,last_seen_run,"
+                    "remote_flag) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (j.uid, j.group_key, j.board, j.company, j.title, j.url, j.location, j.source,
                      j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
                      j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
-                     j.description[:20000], today, today, run_id, run_id),
+                     j.description[:20000], today, today, run_id, run_id,
+                     None if j.remote_flag is None else int(j.remote_flag)),
                 )
                 new.append(j)
             cur.execute(

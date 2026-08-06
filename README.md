@@ -4,8 +4,9 @@
 criteria it read 19,550 postings and surfaced 161.
 
 It watches the job boards employers actually post on, 17 applicant tracking
-platforms plus 14 public feeds, and scores every posting against rules you wrote
-yourself. Then it helps you evaluate roles, build applications, prepare for
+platforms plus 14 public feeds (8 of them live immediately; 4 want an API key
+you register for, 2 are scrapers and off by default), and scores every posting
+against rules you wrote yourself. Then it helps you evaluate roles, build applications, prepare for
 interviews, and keep track of where everything stands.
 
 It is built for people who are not programmers. You talk to Claude; Claude runs

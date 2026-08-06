@@ -699,6 +699,19 @@ def score(job: Job, p: Profile) -> Job:
 
     # --- comp ------------------------------------------------------------
     lo, hi = extract_comp(job)
+    # Write the resolved figures back, or they exist only inside this function.
+    # Two things were lost without this, both silent: a band parsed out of the
+    # posting body never reached the row, so the report printed "Comp not stated"
+    # in the header while the reasons line right under it quoted the band, and
+    # `report --format csv` exported an empty comp column for a third of the
+    # postings that had one. And extract_comp's hourly x2080 normalization was
+    # discarded too, leaving a raw "75" in the database for an hourly role -
+    # the same annualization confusion that made a contract req look like a
+    # $299-366K salary. Only overwrite when something was resolved.
+    if lo is not None:
+        job.comp_min = lo
+    if hi is not None:
+        job.comp_max = hi
     comp_state = "unknown"
     if lo and p.screen_floor:
         top = hi or lo

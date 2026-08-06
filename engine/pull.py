@@ -118,7 +118,14 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
     excluded: Counter = Counter()
     for j in scored:
         if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.reasons:
-            excluded[j.reasons[0].split(":")[0][:38]] += 1
+            # split(":") already drops the variable payload ("non-US: Berlin" ->
+            # "non-US"), so what is left is a small set of fixed phrases. A hard
+            # 38-char clip did nothing but mangle the longest one, and the first
+            # run a new user sees reported "domain terms never mentioned in
+            # postin". Give the canned phrases room, and mark any real overflow
+            # with an ellipsis so a truncation is visible as one.
+            label = j.reasons[0].split(":")[0].strip()
+            excluded[label if len(label) <= 60 else label[:59] + "…"] += 1
 
     keep = [j for j in scored if j.gate in ("QUALIFIED", "VERIFY")]
     # run_id is what makes "new" mean "first seen THIS run" rather than "first
@@ -215,20 +222,36 @@ def rescore(con, profile, *, echo=print) -> dict:
     rows = list(con.execute("SELECT * FROM jobs"))
     changed, dropped = 0, 0
     for r in rows:
+        keys = r.keys()
+        # remote_flag is the board's own remote claim and location_verdict trusts
+        # it. Rebuilding the Job without it re-judged remote-board postings as if
+        # the board had never said so, which quietly demoted them to VERIFY on a
+        # rescore the user ran for an unrelated reason.
+        rf = r["remote_flag"] if "remote_flag" in keys else None
         j = Job(company=r["company"], title=r["title"], url=r["url"],
                 source=r["source"], location=r["location"] or "",
                 description=r["description"] or "", posted_at=r["posted_at"] or "",
                 department=r["department"] or "", comp_min=r["comp_min"],
                 comp_max=r["comp_max"], comp_text=r["comp_text"] or "",
-                lane=r["lane"] or "", employer_tier=r["employer_tier"] or "")
+                lane=r["lane"] or "", employer_tier=r["employer_tier"] or "",
+                board=r["board"] if "board" in keys else "",
+                remote_flag=None if rf is None else bool(rf))
         score(j, profile)
-        if j.gate == r["gate"] and j.score == r["score"]:
+        # score() resolves comp (parsing the body, annualising hourly figures), so
+        # persist it here too. Leaving it out of the UPDATE meant a rescore could
+        # never repair a row whose comp had been dropped, and the report kept
+        # printing "Comp not stated" above a reasons line quoting the band.
+        comp_changed = (j.comp_min, j.comp_max) != (r["comp_min"], r["comp_max"])
+        if j.gate == r["gate"] and j.score == r["score"] and not comp_changed:
             continue
-        changed += 1
-        if r["gate"] in ("QUALIFIED", "VERIFY") and j.gate not in ("QUALIFIED", "VERIFY"):
-            dropped += 1
-        con.execute("UPDATE jobs SET gate=?, score=?, reasons=?, lane=? WHERE uid=?",
-                    (j.gate, j.score, " | ".join(j.reasons), j.lane or r["lane"], r["uid"]))
+        if j.gate != r["gate"] or j.score != r["score"]:
+            changed += 1
+            if r["gate"] in ("QUALIFIED", "VERIFY") and j.gate not in ("QUALIFIED", "VERIFY"):
+                dropped += 1
+        con.execute("UPDATE jobs SET gate=?, score=?, reasons=?, lane=?, comp_min=?, comp_max=? "
+                    "WHERE uid=?",
+                    (j.gate, j.score, " | ".join(j.reasons), j.lane or r["lane"],
+                     j.comp_min, j.comp_max, r["uid"]))
     con.commit()
     echo(f"  re-scored {len(rows)} stored postings against the current profile")
     echo(f"  {changed} changed verdict, {dropped} no longer surface")
