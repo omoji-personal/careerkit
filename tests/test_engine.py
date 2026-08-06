@@ -1968,3 +1968,20 @@ def test_two_letter_initials_are_not_used_as_slug_candidates():
     # three or more initials are distinctive enough to keep
     assert "lcfcr" in slug_candidates("Lawyers Committee for Civil Rights")
     assert "mam" in slug_candidates("Morgan and Morgan")
+
+
+def test_a_generic_first_word_is_not_a_slug_candidate():
+    """Seen live 2026-08-06. Discovering "National Public Radio" produced the
+    candidate "national", which is a real greenhouse board belonging to a
+    public-affairs firm in Toronto and Montreal. Registering it would have fed
+    that firm's Canadian postings into the report as NPR's, silently and
+    forever. Same family as the two-letter initials collision."""
+    from engine.discover import slug_candidates
+    assert "national" not in slug_candidates("National Public Radio")
+    assert "delta" not in slug_candidates("Delta Air Lines")
+
+
+def test_a_distinctive_two_word_name_still_offers_its_first_word():
+    from engine.discover import slug_candidates
+    assert "neuraflash" in slug_candidates("NeuraFlash Consulting")
+    assert "anthropic" in slug_candidates("Anthropic")

@@ -24,6 +24,17 @@ _STOP = {
     "international", "systems", "software", "labs", "cloud",
 }
 
+# Words too common to identify a company on their own. Any of these as a bare
+# slug is far more likely to be somebody else's board than the employer meant.
+_GENERIC_FIRST = {
+    "national", "american", "united", "general", "first", "premier", "advanced",
+    "allied", "atlantic", "pacific", "central", "northern", "southern", "eastern",
+    "western", "capital", "summit", "pinnacle", "apex", "vertex", "delta", "alpha",
+    "omega", "prime", "core", "next", "new", "modern", "future", "smart", "bright",
+    "clear", "direct", "express", "elite", "select", "superior", "standard",
+    "quality", "reliable", "trusted", "secure", "safe", "green", "blue", "red",
+}
+
 
 def slug_candidates(name: str, extra: Iterable[str] = ()) -> list[str]:
     """Plausible board slugs for a company name, most likely first."""
@@ -35,7 +46,14 @@ def slug_candidates(name: str, extra: Iterable[str] = ()) -> list[str]:
     hyph = "-".join(core)
     full = "".join(words)
     fullhyph = "-".join(words)
-    first = core[0] if core else ""
+    # The first word alone, but only when it is doing the identifying. Probing
+    # "National Public Radio" produced the candidate "national", which is a live
+    # greenhouse board belonging to a public-affairs firm in Toronto. Its jobs
+    # would have entered the report as NPR's. The first word is redundant when a
+    # company is a single word (it equals `joined` already) and it is a weak
+    # identifier the moment the name has several, so require it to be both
+    # distinctive and most of the name.
+    first = core[0] if len(core) == 2 and core[0] not in _GENERIC_FIRST else ""
     # Initials only when there are enough of them. A two-letter slug is almost
     # always somebody else: probing "Fisher Phillips" found lever:fp, a Polish IT
     # company in Gliwice, and "DLA Piper" found recruitee:dp, a Belgian firm in
