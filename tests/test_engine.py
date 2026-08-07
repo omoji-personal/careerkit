@@ -2795,3 +2795,39 @@ def test_enrich_row_skips_what_it_cannot_improve(db):
     rows = {r["company"]: r for r in db.execute("SELECT * FROM jobs")}
     assert jd.enrich_row(rows["A"])["needed"] is False
     assert jd.enrich_row(rows["B"])["needed"] is True
+
+
+def test_a_url_shared_by_two_requisitions_is_not_a_contradiction(db, tmp_path):
+    """A URL does not identify a row. uid deliberately splits two distinct
+    requisitions at one employer, and boards do serve one page for several: 27
+    of 468 rows in a real database shared a URL, across four ATS platforms.
+    Assuming otherwise made the checker cry contradiction whenever the lookup
+    returned the sibling the report was not describing."""
+    from engine import consistency, store
+    a = J(company="Salesforce", title="Senior Technical Consultant (Japan)",
+          url="https://wd.test/job/1")
+    a.source, a.external_id = "workday", "JR1"
+    a.gate, a.score = "EXCLUDED", 0
+    b = J(company="Salesforce", title="Senior Technical Consultant (Japan)",
+          url="https://wd.test/job/1")
+    b.source, b.external_id = "workday", "JR2"
+    b.gate, b.score = "VERIFY", 10
+    store.upsert(db, [a, b])
+    assert a.uid != b.uid, "the two requisitions must be distinct rows"
+
+    rpt = tmp_path / "sourcing-test.md"
+    rpt.write_text("## Qualified\n\n"
+                   "### 1. Senior Technical Consultant (Japan) - Salesforce\n"
+                   "- **Score** 10 | **VERIFY** | NEW\n"
+                   "- **Location**  | **Comp** not stated\n"
+                   "- https://wd.test/job/1\n")
+    assert consistency.check_report(db, rpt) == []
+
+    # but a report claiming something NO row says is still a contradiction
+    rpt.write_text("## Qualified\n\n"
+                   "### 1. Senior Technical Consultant (Japan) - Salesforce\n"
+                   "- **Score** 99 | **QUALIFIED** | NEW\n"
+                   "- **Location**  | **Comp** not stated\n"
+                   "- https://wd.test/job/1\n")
+    problems = consistency.check_report(db, rpt)
+    assert problems and "none of the 2 rows" in problems[0], problems

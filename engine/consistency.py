@@ -98,11 +98,38 @@ def check_report(con: sqlite3.Connection, report_path: str | Path) -> list[str]:
                 break
         if not url:
             continue                      # a block with no URL is not a posting
-        row = con.execute("SELECT * FROM jobs WHERE url = ?", (url,)).fetchone()
-        if row is None:
+        # A URL does not identify a row. uid deliberately splits two distinct
+        # requisitions at one employer, and boards do serve one page for several
+        # of them: 27 of 468 rows in a real database shared a URL with another,
+        # across four ATS platforms. Assuming otherwise made the checker report
+        # a contradiction whenever the report described one requisition and the
+        # lookup happened to return its sibling.
+        candidates = con.execute("SELECT * FROM jobs WHERE url = ?", (url,)).fetchall()
+        if not candidates:
             problems.append(f"{block['company']} / {block['title']}: report shows a "
                             f"posting the database does not have ({url})")
             continue
+        row = candidates[0]
+        if len(candidates) > 1:
+            # Judge against the sibling the report is actually describing, and
+            # only complain if none of them match.
+            shown = {}
+            for line in block["lines"]:
+                m = _SCORE.match(line)
+                if m:
+                    shown = {"gate": m.group("gate"), "score": int(m.group("score"))}
+                    break
+            match = [c for c in candidates
+                     if c["gate"] == shown.get("gate") and c["score"] == shown.get("score")]
+            if match:
+                row = match[0]
+            else:
+                have = ", ".join(f"{c['gate']}/{c['score']}" for c in candidates)
+                problems.append(
+                    f"{block['company']} / {block['title']}: report shows "
+                    f"{shown.get('gate')}/{shown.get('score')} but none of the "
+                    f"{len(candidates)} rows at this URL say that ({have})")
+                continue
 
         where = f"{row['company']} / {row['title']}"
         for line in block["lines"]:
