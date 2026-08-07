@@ -207,3 +207,31 @@ def test_the_whole_chain_from_payload_to_report(tmp_path, monkeypatch):
         assert (rebuilt.gate, rebuilt.score) == (row["gate"], row["score"]), \
             f"{row['company']} / {row['title']}: {row['gate']}/{row['score']} -> " \
             f"{rebuilt.gate}/{rebuilt.score}"
+
+
+def test_adapter_fixture_coverage_does_not_regress():
+    """Which adapters are covered by a real payload, and which are not.
+
+    Nine of seventeen still have no fixture, so nine boards can change their
+    JSON and this suite stays green while a live search quietly loses data.
+    They are absent for one reason: no live public board could be located to
+    capture from. Writing a fixture from an assumed shape would be worse than
+    none, because it would test the assumption rather than the board and read as
+    coverage in this file.
+
+    Asserting the current count stops the gap being forgotten, and fails loudly
+    if somebody adds an adapter without one.
+    """
+    covered = {p.stem for p in FIXTURES.glob("*.json")} | {p.stem for p in FIXTURES.glob("*.xml")}
+    known = {"greenhouse", "lever", "ashby", "smartrecruiters", "workable", "recruitee",
+             "bamboohr", "rippling", "teamtailor", "workday", "oracle_orc", "eightfold",
+             "phenom", "icims", "jobvite", "paylocity", "personio"}
+    have = covered & known
+    missing = known - covered
+    assert len(have) >= 8, (
+        f"adapter fixture coverage regressed to {len(have)}/17: {sorted(have)}")
+    # Documented, not silent. Capturing any of these is the single most useful
+    # contribution to this repository.
+    assert missing == {"workable", "teamtailor", "workday", "oracle_orc", "eightfold",
+                       "phenom", "icims", "jobvite", "paylocity"}, (
+        f"the uncovered set changed; update this list deliberately: {sorted(missing)}")

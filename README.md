@@ -196,10 +196,13 @@ accurate. It catches the careless cases. Keep reading the draft.
 
 `./run-tests.sh` runs the regression suite. Nearly every test in it locks down a
 bug that actually shipped, so it is worth keeping green if you change the engine.
-It also runs four adapters (Greenhouse, Lever, Ashby, SmartRecruiters) against
-saved real payloads, so those boards changing their JSON shape fails a test
-rather than quietly returning nothing. The other thirteen have no fixture yet,
-which is the most useful contribution anyone could make.
+It also runs eight adapters (Greenhouse, Lever, Ashby, SmartRecruiters,
+BambooHR, Rippling, Recruitee, Personio) against saved real payloads, so those
+boards changing their JSON shape fails a test rather than quietly returning
+nothing. The other nine have no fixture, because no live public board could be
+found to capture one from. Capturing any of them is the most useful
+contribution anyone could make, and a fixture invented from a guessed shape is
+worse than none.
 
 `./careerkit.py status` additionally reports where the database and your
 `tracker.md` disagree: an application recorded in one but not the other. Those
