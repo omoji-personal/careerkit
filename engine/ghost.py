@@ -40,14 +40,22 @@ def score_row(row) -> tuple[int, list[str]]:
         return (row[k] if k in keys else default) or default
 
     source = get("source")
+    # NULL and "" mean different things and conflating them floods the report.
+    # A row stored before this evidence was captured has NULL in both columns:
+    # nobody looked, so the absence says nothing. A row fetched since has "",
+    # meaning the feed looked and the employer resolved to nothing, which is a
+    # real signal. Scoring "never looked" as "found nothing" flagged 55 of 56
+    # live rows on the first run against a real database.
+    looked = ("url_direct" in keys and row["url_direct"] is not None) or \
+             ("company_site" in keys and row["company_site"] is not None)
     url_direct = get("url_direct")
     company_site = get("company_site")
 
-    if _is_aggregator(source) and not url_direct:
+    if looked and _is_aggregator(source) and not url_direct:
         pts += 2
         why.append("only ever seen on aggregators, with no employer apply link")
 
-    if _is_aggregator(source) and not company_site:
+    if looked and _is_aggregator(source) and not company_site:
         pts += 2
         why.append("no corporate website resolved for the employer")
 

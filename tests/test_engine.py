@@ -2576,3 +2576,24 @@ def test_an_ordinary_salary_that_happens_to_divide_by_2080_is_not_enough(db):
     store.upsert(db, [j])
     row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
     assert not any("2080" in w for w in ghost.score_row(row)[1])
+
+
+def test_a_row_stored_before_the_evidence_existed_is_not_flagged(db):
+    """NULL means nobody looked; empty string means the feed looked and found
+    nothing. Conflating them flagged 55 of 56 live rows the first time this ran
+    against a real database, because every historical row predated the capture."""
+    from engine import ghost, store
+    j = J(company="Some Consultancy", title="Salesforce Architect", url="https://agg.test/9")
+    j.source = "jobspy:indeed"
+    j.gate = "QUALIFIED"
+    store.upsert(db, [j])
+    db.execute("UPDATE jobs SET url_direct=NULL, company_site=NULL WHERE uid=?", (j.uid,))
+    db.commit()
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert ghost.score_row(row)[0] == 0, ghost.score_row(row)
+
+    # but once the feed has looked and found nothing, that is real evidence
+    db.execute("UPDATE jobs SET url_direct='', company_site='' WHERE uid=?", (j.uid,))
+    db.commit()
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert ghost.score_row(row)[0] >= 4
