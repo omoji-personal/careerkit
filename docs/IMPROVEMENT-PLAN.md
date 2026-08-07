@@ -25,7 +25,7 @@ example tests, because an invariant survives a rewrite and an example does not.
 
 ---
 
-# P0 ,  The tool recommends things it should already know are dead
+# P0. The tool recommends things it should already know are dead
 
 ## 1. Ingest email as ground truth for application state
 
@@ -113,7 +113,7 @@ in Atlanta. Separately, Slalom's Life Sciences CRM Architect was recommended on
 
 ---
 
-# P1 ,  Correctness of what it already claims
+# P1. Correctness of what it already claims
 
 ## 4. Report and database must agree, mechanically
 
@@ -185,7 +185,7 @@ $520,000,000. Both are fixed. What is still missing is **judgement**:
 
 ---
 
-# P2 ,  Judgement and history
+# P2. Judgement and history
 
 ## 8. Remember the relationship, not just the posting
 
