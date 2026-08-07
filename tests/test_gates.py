@@ -64,7 +64,7 @@ def test_the_secret_scan_catches_each_shape_it_claims_to():
     samples = ["AKIA" + "IOSFODNN7EXAMPLE",
                "sk-" + "ant-api03-abcdefghij",
                "ghp" + "_" + "a" * 24,
-               "-----BEGIN " + "RSA PRIVATE KEY-----"]
+               "-" * 5 + "BEGIN RSA " + "PRIVATE" + " KEY" + "-" * 5]
     for s in samples:
         assert SECRET.search(s), f"the gate would not catch {s[:12]!r}"
 
