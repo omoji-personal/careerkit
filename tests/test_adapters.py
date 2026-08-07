@@ -76,3 +76,49 @@ def test_adapter_survives_an_empty_or_wrong_shaped_payload(name, cfg, stub_fetch
     for payload in ({}, [], {"jobs": None}, {"content": None}, "not json at all"):
         stub_fetch(payload)
         assert getattr(adapters, name)(cfg) == []
+
+
+# --------------------------------------------------------------------------
+# Text-based adapters. These parse XML or HTML rather than JSON, so they need a
+# different stub, but the contract is identical: a real payload in, usable Jobs
+# out. Personio serves XML; a change to its tag names is exactly the silent
+# failure a fixture exists to catch.
+# --------------------------------------------------------------------------
+
+TEXT_CASES = [
+    ("personio", "personio.xml", {"ats": "personio", "slug": "acme", "name": "Acme"}),
+]
+
+
+@pytest.fixture
+def stub_text(monkeypatch):
+    def make(body, status=200):
+        monkeypatch.setattr(adapters, "fetch", lambda url, *a, **k: (status, body))
+    return make
+
+
+@pytest.mark.parametrize("name,fixture,cfg", TEXT_CASES)
+def test_text_adapter_maps_its_real_payload(name, fixture, cfg, stub_text):
+    path = FIXTURES / fixture
+    if not path.exists():
+        pytest.skip(f"no fixture for {name}")
+    stub_text(path.read_text())
+
+    jobs = getattr(adapters, name)(cfg)
+
+    assert jobs, f"{name} mapped a real payload to zero jobs"
+    for j in jobs:
+        assert j.title.strip(), f"{name}: empty title"
+        assert j.url.startswith("http"), f"{name}: bad url {j.url!r}"
+        assert j.source == name
+        assert j.company == "Acme"
+        assert j.external_id, f"{name}: no external_id, uid collapses siblings"
+        assert "<" not in j.description or ">" not in j.description, \
+            f"{name}: HTML survived into the description"
+
+
+@pytest.mark.parametrize("name,fixture,cfg", TEXT_CASES)
+def test_text_adapter_survives_junk(name, fixture, cfg, stub_text):
+    for body, status in (("", 200), ("<html>nope</html>", 200), ("", 404), ("x" * 50, 500)):
+        stub_text(body, status)
+        assert getattr(adapters, name)(cfg) == []
