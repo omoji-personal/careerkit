@@ -255,7 +255,14 @@ def rescore(con, profile, *, echo=print) -> dict:
         # never repair a row whose comp had been dropped, and the report kept
         # printing "Comp not stated" above a reasons line quoting the band.
         comp_changed = (j.comp_min, j.comp_max) != (r["comp_min"], r["comp_max"])
-        if j.gate == r["gate"] and j.score == r["score"] and not comp_changed:
+        # Reasons are part of the verdict, not decoration. A row whose gate and
+        # score are unchanged can still be explained differently under new rules,
+        # and skipping the write left the database asserting a reason the current
+        # rules would never give. That is the same drift as a report contradicting
+        # the row it was rendered from, one layer earlier.
+        reasons_changed = " | ".join(j.reasons) != (r["reasons"] or "")
+        if (j.gate == r["gate"] and j.score == r["score"]
+                and not comp_changed and not reasons_changed):
             continue
         if j.gate != r["gate"] or j.score != r["score"]:
             changed += 1

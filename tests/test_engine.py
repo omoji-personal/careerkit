@@ -2597,3 +2597,84 @@ def test_a_row_stored_before_the_evidence_existed_is_not_flagged(db):
     db.commit()
     row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
     assert ghost.score_row(row)[0] >= 4
+
+
+def test_a_body_too_thin_to_screen_cannot_be_qualified():
+    """An empty description scored QUALIFIED at 50. Every body rail passed,
+    not because the posting was clean but because there was nothing to read,
+    and the output could not tell the two apart. This is the shape behind every
+    recommendation that died on a requirement nobody had read."""
+    import re as _re
+    from engine.models import Job
+    from engine.score import Profile, score
+    p = Profile()
+    p.remote_us = True
+    p.lanes = [(50, _re.compile(r"(salesforce administrator)", _re.I), "sf")]
+    p.domain_terms = None
+
+    def gate(desc):
+        j = Job(company="Acme", title="Salesforce Administrator", url="u", source="greenhouse",
+                location="Remote, United States", description=desc)
+        score(j, p)
+        return j.gate, j.reasons
+
+    g, why = gate("")
+    assert g == "VERIFY", g
+    assert any("could not run" in r for r in why), why
+    g, _ = gate("Salesforce admin needed.")
+    assert g == "VERIFY", "a stub is still not a description"
+    g, _ = gate("x" * 400)
+    assert g == "QUALIFIED", "a real body must still qualify"
+
+
+def test_a_product_the_posting_calls_optional_does_not_block(tmp_path):
+    """"3+ years of Marketing Cloud preferred, not required" tripped the product
+    rail on the years-of-experience context alone and discarded a role the user
+    could do."""
+    import yaml as _yaml
+    from engine.models import Job
+    from engine.score import Profile, score
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "sf", "titles": ["/salesforce administrator/"]}],
+        "location": {"remote_us": True},
+        "exclusions": {"products": ["marketing cloud"]}}))
+    profile = Profile.load(p)
+
+    def gate(body):
+        j = Job(company="Acme", title="Salesforce Administrator", url="u", source="greenhouse",
+                location="Remote, United States", description=body + " " + "d" * 300)
+        score(j, profile)
+        return j.gate
+
+    assert gate("3+ years of experience in Marketing Cloud preferred, not required.") != "SLOT-BLOCKED"
+    assert gate("Experience with Marketing Cloud is a plus.") != "SLOT-BLOCKED"
+    # and a genuine requirement must still block
+    assert gate("Must have 5+ years of deep expertise in Marketing Cloud.") == "SLOT-BLOCKED"
+    assert gate("Requires proficiency in Marketing Cloud administration.") == "SLOT-BLOCKED"
+
+
+def test_rescore_writes_a_changed_reason_even_when_the_gate_is_unchanged(db, tmp_path):
+    """Found while measuring a new rail's effect: five rows should have gained a
+    "description too thin" reason and none did, because rescore only wrote when
+    gate or score moved. The database then asserts an explanation the current
+    rules would never give, which is the report-contradicts-the-row drift one
+    layer earlier."""
+    import yaml as _yaml
+    from engine import pull as _pull, store
+    from engine.score import Profile
+    j = J(company="Acme", title="Salesforce Administrator", url="https://example.test/rw",
+          location="Remote, United States", description="")
+    j.gate, j.score = "VERIFY", 50
+    j.reasons = ["some stale explanation"]
+    store.upsert(db, [j])
+
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "sf", "titles": ["/salesforce administrator/"]}],
+        "location": {"remote_us": True}}))
+    _pull.rescore(db, Profile.load(p), echo=lambda *a: None)
+
+    reasons = db.execute("SELECT reasons FROM jobs WHERE uid=?", (j.uid,)).fetchone()[0]
+    assert "stale explanation" not in reasons, reasons
+    assert "could not run" in reasons, reasons

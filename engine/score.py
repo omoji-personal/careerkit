@@ -567,6 +567,18 @@ def _rail_hit(pattern, text: str):
     return None
 
 
+# Below this, a posting has no description worth screening. Feed rows routinely
+# carry a title, a location and a stub, and the rails then pass on silence.
+THIN_BODY = 200
+
+# A requirement the posting itself downgrades. "3+ years with Marketing Cloud
+# preferred, not required" tripped the product rail on the "3+ years" context
+# alone, discarding a role the user could do.
+_PREFERENCE = re.compile(
+    r"\b(preferred|preferable|nice[ -]to[ -]have|a plus|bonus|desirable|"
+    r"not required|but not required|advantageous|ideally|would be great)\b", re.I)
+
+
 def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
     """pass / fail / unknown. A board's own remote flag is corroboration, not
     US evidence (aggregators set it on foreign roles); a pass needs positive
@@ -721,6 +733,8 @@ def score(job: Job, p: Profile) -> Job:
         # (e.g. "3 years specializing in B2B commerce" under a plain SA title).
         for m in p.products_block.finditer(text):
             ctx = text[max(0, m.start() - 70):m.start()]
+            if _PREFERENCE.search(_sentence_around(text, m)):
+                continue          # the posting says this one is optional
             if re.search(r"(\d\+? ?years?|require[sd]?|must have|deep (knowledge|expertise)|"
                          r"speciali[sz]|expert(ise)? in|proficien)", ctx, re.I):
                 job.gate, job.score = "SLOT-BLOCKED", base
@@ -827,6 +841,15 @@ def score(job: Job, p: Profile) -> Job:
 
     # --- gate ------------------------------------------------------------
     unknowns = []
+    # Every body rail above "passed" when there was no body to read. That is not
+    # the posting being clean, it is the rails never having run, and the two are
+    # indistinguishable in the output: an empty description scored QUALIFIED at
+    # 50 with reasons that mentioned only location and comp. This is the shape
+    # behind every recommendation that died on a requirement nobody had read,
+    # so say so in the gate, which is exactly what VERIFY is defined to mean.
+    if len((job.description or "").strip()) < THIN_BODY:
+        unknowns.append(f"only {len((job.description or '').strip())} characters of "
+                        f"description, so the requirement rails could not run")
     if loc_v == "unknown":
         unknowns.append(loc_e)
     if comp_state == "unknown" and p.screen_floor:
