@@ -71,7 +71,6 @@ def report_is_stale(con: sqlite3.Connection, report_path: str | Path) -> str | N
     path = Path(report_path)
     if not path.exists():
         return None
-    row = con.execute("SELECT MAX(finished) AS t FROM runs").fetchone()
     db_file = Path(con.execute("PRAGMA database_list").fetchall()[0][2] or "")
     newest = db_file.stat().st_mtime if db_file.exists() else 0
     if newest and path.stat().st_mtime < newest - 1:

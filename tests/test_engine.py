@@ -2075,3 +2075,102 @@ def test_repair_clears_a_comp_a_guard_can_no_longer_recognise(db):
     consistency.repair_comp(db, apply=True)
     assert db.execute("SELECT comp_min FROM jobs WHERE uid=?", (bad.uid,)).fetchone()[0] is None
     assert db.execute("SELECT comp_min FROM jobs WHERE uid=?", (good.uid,)).fetchone()[0] == 150_000
+
+
+# --------------------------------------------------------------------------
+# pull and rescore must reach the same verdict for the same posting
+# --------------------------------------------------------------------------
+
+def test_pull_and_rescore_agree_on_every_field_the_scorer_reads(db, tmp_path):
+    """The invariant that turns a whole bug class into arithmetic.
+
+    remote_flag was set by twelve adapters, trusted by location_verdict, and
+    never stored. rescore rebuilt each Job without it and demoted genuinely
+    remote roles to VERIFY, on the command the README tells users to run after a
+    criteria change. No error, no signal, worse results.
+
+    Rather than remembering to add a column each time, assert the property: a
+    posting scored as fetched and the same posting scored as reconstructed from
+    the database must reach an identical verdict. Any field that breaks this is
+    by definition a missing column, and this test says which one."""
+    import yaml as _yaml
+    from engine import pull as _pull, store
+    from engine.score import Profile, score
+
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "pm", "titles": ["/product manager/"]},
+                  {"key": "lifecycle", "titles": ["/lifecycle (marketing )?manager/"]}],
+        "location": {"remote_us": True, "metros": ["Atlanta"]},
+        "comp": {"screen_floor": 100000},
+    }))
+    profile = Profile.load(p)
+
+    # A spread that exercises the fields the scorer actually reads.
+    fetched = []
+    for i, (loc, remote, cmin, desc) in enumerate([
+        ("USA", True, None, "The salary range for this role is $150,000 - $208,000 per year. " + "d" * 400),
+        ("Atlanta, GA", None, 140_000, "onsite role " + "d" * 400),
+        ("Remote, US", None, None, "no comp mentioned here at all " + "d" * 400),
+        ("United States", True, 60, "hourly contract " + "d" * 400),
+    ]):
+        j = J(company=f"Co{i}", title="Product Manager", url=f"https://example.test/pr{i}",
+              location=loc, description=desc)
+        j.remote_flag = remote
+        j.comp_min = cmin
+        j.comp_max = cmin * 2 if cmin else None
+        fetched.append(j)
+
+    for j in fetched:
+        score(j, profile)
+    store.upsert(db, [j for j in fetched if j.gate in ("QUALIFIED", "VERIFY")])
+
+    mismatches = []
+    for original in fetched:
+        row = db.execute("SELECT * FROM jobs WHERE uid=?", (original.uid,)).fetchone()
+        if row is None:
+            continue                       # screened out, never stored, fine
+        rebuilt = _pull.job_from_row(row)
+        score(rebuilt, profile)
+        if (rebuilt.gate, rebuilt.score) != (original.gate, original.score):
+            mismatches.append(
+                f"{original.company} ({original.location!r}, remote_flag="
+                f"{original.remote_flag}): fetched -> {original.gate}/{original.score}, "
+                f"from database -> {rebuilt.gate}/{rebuilt.score}")
+
+    assert not mismatches, (
+        "a field the scorer reads is not surviving the round trip through the "
+        "database:\n  " + "\n  ".join(mismatches))
+
+
+def test_registry_level_rails_exempt_survives_a_rescore(db, tmp_path):
+    """Found by the equivalence property test, 2026-08-06.
+
+    An employer marked rails_exempt in employers.yaml ("judge this one on fit,
+    not on the mechanical rails") passed at pull and was EXCLUDED on the next
+    rescore. score() re-derives the exemption for anyone named in the profile's
+    dream_companies, which is why nobody noticed: the profile-driven path worked
+    and the registry-driven path silently did not."""
+    import yaml as _yaml
+    from engine import pull as _pull, store
+    from engine.score import Profile, score
+
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "pm", "titles": ["/product manager/"]}],
+        "location": {"remote_us": True, "metros": ["Atlanta"]},
+    }))
+    profile = Profile.load(p)
+
+    j = J(company="SomeEmployer", title="Product Manager", url="https://example.test/rx",
+          location="Berlin, Germany", description="d" * 400)
+    j.rails_exempt = True          # comes from the registry, not the profile
+    score(j, profile)
+    assert j.gate == "QUALIFIED", "carve-out should pass a non-US location at pull"
+    store.upsert(db, [j])
+
+    rebuilt = _pull.job_from_row(db.execute(
+        "SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone())
+    score(rebuilt, profile)
+    assert rebuilt.gate == "QUALIFIED", (
+        f"registry carve-out lost on rescore: {j.gate} -> {rebuilt.gate}")

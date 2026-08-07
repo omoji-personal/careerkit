@@ -205,6 +205,31 @@ def rebuild_report(con, *, min_score: int = 0, echo=print):
     return path
 
 
+def job_from_row(r):
+    """Rebuild the Job a stored row represents.
+
+    Extracted so that rescore and the equivalence test cannot drift apart. The
+    bug this guards against was exactly a drift: remote_flag was set by twelve
+    adapters, trusted by location_verdict, and never stored, so rescore silently
+    re-judged remote postings as if the board had never said they were remote.
+    Any field the scorer reads and this function cannot restore is a missing
+    column, and test_pull_and_rescore_agree turns that into a failing test.
+    """
+    from .models import Job
+    keys = r.keys()
+    rf = r["remote_flag"] if "remote_flag" in keys else None
+    rx = r["rails_exempt"] if "rails_exempt" in keys else None
+    return Job(company=r["company"], title=r["title"], url=r["url"],
+               source=r["source"], location=r["location"] or "",
+               description=r["description"] or "", posted_at=r["posted_at"] or "",
+               department=r["department"] or "", comp_min=r["comp_min"],
+               comp_max=r["comp_max"], comp_text=r["comp_text"] or "",
+               lane=r["lane"] or "", employer_tier=r["employer_tier"] or "",
+               board=r["board"] if "board" in keys else "",
+               remote_flag=None if rf is None else bool(rf),
+               rails_exempt=bool(rx))
+
+
 def rescore(con, profile, *, echo=print) -> dict:
     """Re-judge every stored posting against the CURRENT profile.
 
@@ -216,26 +241,12 @@ def rescore(con, profile, *, echo=print) -> dict:
     no longer accept.
 
     Scores from stored text, so it makes no network requests."""
-    from .models import Job
     from .score import score
 
     rows = list(con.execute("SELECT * FROM jobs"))
     changed, dropped = 0, 0
     for r in rows:
-        keys = r.keys()
-        # remote_flag is the board's own remote claim and location_verdict trusts
-        # it. Rebuilding the Job without it re-judged remote-board postings as if
-        # the board had never said so, which quietly demoted them to VERIFY on a
-        # rescore the user ran for an unrelated reason.
-        rf = r["remote_flag"] if "remote_flag" in keys else None
-        j = Job(company=r["company"], title=r["title"], url=r["url"],
-                source=r["source"], location=r["location"] or "",
-                description=r["description"] or "", posted_at=r["posted_at"] or "",
-                department=r["department"] or "", comp_min=r["comp_min"],
-                comp_max=r["comp_max"], comp_text=r["comp_text"] or "",
-                lane=r["lane"] or "", employer_tier=r["employer_tier"] or "",
-                board=r["board"] if "board" in keys else "",
-                remote_flag=None if rf is None else bool(rf))
+        j = job_from_row(r)
         score(j, profile)
         # score() resolves comp (parsing the body, annualising hourly figures), so
         # persist it here too. Leaving it out of the UPDATE meant a rescore could

@@ -84,6 +84,11 @@ _MIGRATIONS = [
     # became VERIFY on the next rescore, with no change to the profile and no way
     # to tell from the report that the run had lost information.
     ("jobs", "remote_flag", "INTEGER"),
+    # The employer-registry carve-out ("judge this employer on fit, not on the
+    # mechanical rails"). score() re-derives it for anyone named in the profile's
+    # dream_companies, which hid the gap: an exemption that came from
+    # employers.yaml was lost on rescore and the role went QUALIFIED to EXCLUDED.
+    ("jobs", "rails_exempt", "INTEGER"),
 ]
 
 
@@ -314,13 +319,14 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     "INSERT INTO jobs (uid,group_key,board,company,title,url,location,source,lane,"
                     "employer_tier,posted_at,department,comp_min,comp_max,comp_text,"
                     "score,gate,reasons,description,first_seen,last_seen,first_seen_run,last_seen_run,"
-                    "remote_flag) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "remote_flag,rails_exempt) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (j.uid, j.group_key, j.board, j.company, j.title, j.url, j.location, j.source,
                      j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
                      j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
                      j.description[:20000], today, today, run_id, run_id,
-                     None if j.remote_flag is None else int(j.remote_flag)),
+                     None if j.remote_flag is None else int(j.remote_flag),
+                     int(bool(j.rails_exempt))),
                 )
                 new.append(j)
             cur.execute(
