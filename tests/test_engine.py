@@ -2199,9 +2199,18 @@ def test_the_same_posting_reposted_keeps_its_rejected_status(db):
     repost.gate = "QUALIFIED"
     store.upsert(db, [repost])
 
-    rows = db.execute("SELECT status FROM jobs WHERE company='Delta Air Lines'").fetchall()
-    assert len(rows) == 1, "a repost should adopt the existing row, not add one"
-    assert rows[0]["status"] == "rejected", "a repost must not reset a rejection to new"
+    # Since identity and grouping were split, a qualifier in brackets makes a
+    # DISTINCT row rather than collapsing, because collapsing is how a real job
+    # gets hidden. The two still share a group_key, so the report shows them as
+    # one entry with siblings, and the rejection stays visible rather than being
+    # overwritten by the repost.
+    rows = db.execute("SELECT uid, status, group_key FROM jobs "
+                      "WHERE company='Delta Air Lines'").fetchall()
+    assert len({r["group_key"] for r in rows}) == 1, "siblings must group together"
+    assert any(r["status"] == "rejected" for r in rows), "the rejection must survive"
+    from engine import applied
+    assert any("Delta" in d for d in applied.surfacing_a_closed_door(db)), \
+        "a live sibling at an employer that declined you must be flagged"
 
 
 def test_a_different_role_at_an_employer_who_declined_you_is_flagged(db):
@@ -2289,3 +2298,110 @@ def test_careerkit_home_moves_the_profile_too(tmp_path, monkeypatch):
     from engine.report import OUT_DIR
     assert str(home) in str(store.DB_PATH), store.DB_PATH
     assert str(home) in str(OUT_DIR), OUT_DIR
+
+
+# --------------------------------------------------------------------------
+# found by surveying comparable tools, 2026-08-06, then verified against source
+# --------------------------------------------------------------------------
+
+def test_parenthesised_words_are_kept_because_uid_depends_on_them():
+    """_norm_title deleted whatever was inside brackets, so "Success Architect
+    (Agentforce)" and "Success Architect (Data Cloud)" produced one uid. Two
+    genuinely different requisitions became one row, and marking either applied
+    hid the other. Same failure the duplicate-title collapse was fixed for,
+    surviving in a form nobody had tested."""
+    from engine.models import Job
+
+    def uid(t):
+        return Job(company="Salesforce", title=t, url="u", source="s").uid
+
+    assert uid("Success Architect (Agentforce)") != uid("Success Architect (Data Cloud)")
+    assert uid("Solutions Engineer (Public Sector)") != uid("Solutions Engineer (Private Sector)")
+    # Decoration must still collapse, which is what the noise list is for.
+    assert uid("Salesforce Admin (Remote)") == uid("Salesforce Admin")
+    assert uid("Salesforce Admin (US)") == uid("Salesforce Admin")
+    assert uid("Data Analyst (Hybrid)") == uid("Data Analyst")
+
+
+def test_a_body_that_demands_office_days_overrides_a_remote_label():
+    """The location field and the body contradict each other, and the field is
+    the one that lies. A req labelled Remote whose description said "Onsite 5x
+    per week (Outside of Atlanta, GA)" passed straight to QUALIFIED. A human
+    reading the description caught that; the tool never would have."""
+    from engine.models import Job
+    from engine.score import Profile, location_verdict
+    p = Profile()
+    p.remote_us, p.metros = True, ["Atlanta"]
+
+    def verdict(loc, body):
+        j = Job(company="X", title="Salesforce Administrator", url="u", source="s",
+                location=loc, description=body + " " + "d" * 300)
+        return location_verdict(j, p)
+
+    for body in ["This is a hybrid role requiring 4 days per week onsite in Chicago.",
+                 "Employees are expected in the office 3 days a week.",
+                 "Onsite 5x per week (Outside of Atlanta, GA)."]:
+        v, why = verdict("Remote - US", body)
+        assert v == "unknown", f"{body!r} should not pass: {v} {why}"
+        assert "description says" in why
+
+
+def test_a_passing_mention_of_hybrid_does_not_block_a_remote_role():
+    """The rail gates on a binding attendance clause, not on the word appearing.
+    Culture blurb is not a requirement, and treating it as one would discard
+    real remote roles, which is the more expensive error."""
+    from engine.models import Job
+    from engine.score import Profile, location_verdict
+    p = Profile()
+    p.remote_us, p.metros = True, ["Atlanta"]
+    for body in ["Fully remote, work from anywhere in the US.",
+                 "We have been a hybrid company since 2020 and hybrid teams are welcome."]:
+        j = Job(company="X", title="Salesforce Administrator", url="u", source="s",
+                location="Remote - US", description=body + " " + "d" * 300)
+        v, why = location_verdict(j, p)
+        assert v == "pass", f"{body!r} should still pass: {v} {why}"
+
+
+def test_a_rail_reason_quotes_the_sentence_not_a_slice():
+    """A reason reading "onsite 5x per w" cannot tell the user whether the rail
+    was right, which is the only thing a reason is for."""
+    from engine.models import Job
+    from engine.score import Profile, location_verdict
+    p = Profile()
+    p.remote_us, p.metros = True, ["Atlanta"]
+    j = Job(company="X", title="Admin", url="u", source="s", location="Remote - US",
+            description="Great team. Onsite 5x per week (Outside of Atlanta, GA). Benefits are good. " + "d" * 250)
+    _, why = location_verdict(j, p)
+    assert "Onsite 5x per week (Outside of Atlanta, GA)." in why, why
+
+
+def test_identity_distinguishes_while_grouping_collapses():
+    """The split that resolves the trade-off. Over-collapsing hides a real job,
+    which the project treats as the failure it exists to prevent;
+    under-collapsing merely shows a duplicate. So uid keeps the bracketed words
+    and group_key drops them: distinct rows, presented together."""
+    from engine.models import Job
+
+    def pair(a, b):
+        ja = Job(company="Salesforce", title=a, url="1", source="s")
+        jb = Job(company="Salesforce", title=b, url="2", source="s")
+        return ja.uid == jb.uid, ja.group_key == jb.group_key
+
+    same_uid, same_group = pair("Success Architect (Agentforce)", "Success Architect (Data Cloud)")
+    assert not same_uid, "two different reqs must not share an identity"
+    assert same_group, "but they should still present as siblings"
+
+    same_uid, same_group = pair("Salesforce Admin (Remote)", "Salesforce Admin")
+    assert same_uid and same_group, "decoration must still collapse entirely"
+
+
+def test_group_key_still_matches_the_legacy_uid_scheme():
+    """group_key is byte-identical to the pre-2026-08-05 uid, which is what lets
+    an existing database migrate in place instead of stranding applied status on
+    orphaned rows. Splitting identity from grouping must not disturb that."""
+    import hashlib
+    from engine.models import Job, _norm_company, _norm_title
+    j = Job(company="Acme Inc.", title="Product Manager (Remote)", url="u", source="s")
+    legacy = hashlib.sha256(
+        f"{_norm_company(j.company)}|{_norm_title(j.title)}".encode()).hexdigest()[:20]
+    assert j.group_key == legacy

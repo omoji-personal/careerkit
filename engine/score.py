@@ -500,6 +500,32 @@ def extract_comp(job: Job) -> tuple[int | None, int | None]:
     return (best[0], best[-1] if len(best) > 1 else None)
 
 
+# A binding attendance requirement, not a passing mention of the word hybrid.
+# Requires a commitment verb or a cadence, so "we have been hybrid since 2020"
+# and "hybrid teams welcome" do not trip it, while "requires 3 days per week in
+# the office" and "onsite 5x per week" do.
+ONSITE_REQUIREMENT = re.compile(
+    r"(?:\b(?:require[sd]?|must|expected|expectation)\b[^.]{0,80}?"
+    r"\b(?:on.?site|in.?office|in the office|hybrid)\b)"
+    r"|(?:\b(?:on.?site|in.?office|in the office|hybrid)\b[^.]{0,60}?"
+    r"\b\d\s*(?:\+|x)?\s*(?:days?|times?)\b[^.]{0,30}?\b(?:per|a|each)\s*(?:week|month))"
+    r"|(?:\b\d\s*(?:\+|x)?\s*(?:days?|times?)\s*(?:per|a|each)\s*(?:week|month)"
+    r"[^.]{0,40}?\b(?:on.?site|in.?office|in the office))"
+    r"|(?:\bon.?site\s*\d\s*x?\s*per\s*week\b)",
+    re.I)
+
+
+def _sentence_around(text: str, m: "re.Match") -> str:
+    """Quote the sentence a rail fired on, not a 40-character slice of it.
+
+    A reason reading "onsite 5x per w" is unusable for deciding whether the rail
+    was right, which is the only thing the reason is for."""
+    start = text.rfind(".", 0, m.start()) + 1
+    end = text.find(".", m.end())
+    end = len(text) if end == -1 else end + 1
+    return " ".join(text[start:end].split())[:180]
+
+
 def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
     """pass / fail / unknown. A board's own remote flag is corroboration, not
     US evidence (aggregators set it on foreign roles); a pass needs positive
@@ -541,6 +567,17 @@ def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
                                    f"only in body text")
             if US_STATE_LOCK.search(body):
                 return "unknown", "remote but state-restricted; needs check"
+            # The location field and the body can contradict each other, and the
+            # field is the one that lies. A req labelled "Remote" whose body says
+            # "Onsite 5x per week (Outside of Atlanta, GA)" passed straight to
+            # QUALIFIED; a human reading the description caught it, the tool
+            # never would have. Gate on a BINDING attendance clause rather than
+            # on the word "hybrid" appearing anywhere, because "we were hybrid
+            # before 2020" and "hybrid teams welcome" are not requirements.
+            onsite = ONSITE_REQUIREMENT.search(body)
+            if onsite:
+                return "unknown", (f"labelled remote but the description says "
+                                   f"{_sentence_around(body, onsite)!r}")
             return "pass", f"remote-US: {loc[:60] or 'flagged remote'}"
         if loc and not re.search(r"^\s*(remote|anywhere)?\s*$", loc, re.I):
             return "unknown", f"'{loc[:50]}' - remote but US eligibility unconfirmed"

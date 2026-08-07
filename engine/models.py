@@ -97,7 +97,7 @@ class Job:
         hash would make an aggregator's uid differ from its group_key, breaking
         both the "aggregators still collapse" property and in-place migration
         of an existing database."""
-        basis = self._basis
+        basis = f"{_norm_company(self.company)}|{_norm_title_strict(self.title)}"
         if self.external_id and self.source in ATS_SOURCES:
             basis = f"{basis}|{self.external_id}"
         return hashlib.sha256(basis.encode()).hexdigest()[:20]
@@ -157,8 +157,39 @@ def _norm_company(c: str) -> str:
 
 
 def _norm_title(t: str) -> str:
+    """Loose normalisation, used for GROUPING sibling sightings.
+
+    Deliberately still drops parenthesised content, for two reasons. It keeps
+    group_key byte-identical to the pre-2026-08-05 uid, which is what lets an
+    existing database migrate in place without stranding applied status. And
+    grouping is presentation: a role listed as "Product Owner (Salesforce)" on
+    one board and "Product Owner" on another should appear as one entry with two
+    sightings, not twice.
+
+    Identity is a different question and uses _norm_title_strict below.
+    """
     t = t.lower()
     t = re.sub(r"\(.*?\)", " ", t)
     t = re.sub(r"[^a-z0-9 ]", " ", t)
     t = re.sub(r"\b(remote|us|usa|united states|hybrid|onsite|full time|fulltime|ft)\b", " ", t)
     return _WS_RE.sub(" ", t).strip()
+
+def _norm_title_strict(t: str) -> str:
+    """Strict normalisation, used for IDENTITY.
+
+    Anything discarded here is a distinction the tool can never see again.
+    Dropping parenthesised content did exactly that: "Success Architect
+    (Agentforce)" and "Success Architect (Data Cloud)" produced one uid, so two
+    genuinely different requisitions became one row and marking either applied
+    hid the other permanently. That is the same failure the duplicate-title
+    collapse was fixed for, surviving in a form nobody had tested.
+
+    Brackets are punctuation and go; the words inside them stay. The noise list
+    still removes what really is decoration, so "(Remote)" and "(US)" collapse
+    while "(Agentforce)" does not.
+    """
+    t = t.lower()
+    t = re.sub(r"[^a-z0-9 ]", " ", t)
+    t = re.sub(r"\b(remote|us|usa|united states|hybrid|onsite|full time|fulltime|ft)\b", " ", t)
+    return _WS_RE.sub(" ", t).strip()
+
