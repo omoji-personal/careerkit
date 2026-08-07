@@ -122,3 +122,88 @@ def test_text_adapter_survives_junk(name, fixture, cfg, stub_text):
     for body, status in (("", 200), ("<html>nope</html>", 200), ("", 404), ("x" * 50, 500)):
         stub_text(body, status)
         assert getattr(adapters, name)(cfg) == []
+
+
+# --------------------------------------------------------------------------
+# End to end: fixtures in, report out
+# --------------------------------------------------------------------------
+# Every test above exercises one layer. Nothing ran the whole chain, which is
+# how the report came to disagree with the database that produced it: each half
+# was individually correct. This drives real payloads through the real adapters,
+# the real scorer, real storage and the real renderer, and asserts the document
+# a person would actually read.
+
+def test_the_whole_chain_from_payload_to_report(tmp_path, monkeypatch):
+    import json as _json
+    import yaml as _yaml
+    from engine import consistency, pull as _pull, store as store2
+    from engine.report import write_report
+    from engine.score import Profile
+
+    monkeypatch.setenv("CAREERKIT_HOME", str(tmp_path))
+    for mod in ("engine.store", "engine.report"):
+        import importlib, sys
+        importlib.reload(sys.modules[mod])
+
+    payload = _json.loads((FIXTURES / "greenhouse.json").read_text())
+    calls = {"n": 0}
+
+    def fake(url, *a, **k):
+        calls["n"] += 1
+        return payload if calls["n"] == 1 else {"jobs": [], "content": []}
+    monkeypatch.setattr(adapters, "fetch_json", fake)
+
+    jobs = adapters.greenhouse({"ats": "greenhouse", "slug": "acme", "name": "Acme"})
+    assert jobs, "fixture produced no jobs"
+
+    # The fixture's postings state no salary, so on their own they never
+    # exercise the path where the scorer resolves a band from the body. That is
+    # the exact defect this chain was built to catch, and without a posting that
+    # has one the test passes with the bug reintroduced. Add one.
+    from engine.models import Job as _Job
+    jobs.append(_Job(
+        company="Acme", title="Senior Data Scientist", url="https://boards.test/acme/9",
+        source="greenhouse", external_id="9", location="Remote, United States",
+        description=("Minimum Qualifications\n- 5 years of experimentation work.\n"
+                     "The salary range for this role is $150,000 - $208,000 per year. "
+                     + "d" * 300)))
+
+    prof = tmp_path / "profile.yaml"
+    prof.write_text(_yaml.safe_dump({
+        # Real lane patterns, matched to what the fixture actually contains.
+        # A catch-all is rejected by the profile guard, correctly: a rule that
+        # matches everything in an exclusion list hides every posting.
+        "lanes": [{"key": "ds", "titles": ["/data scientist/"]},
+                  {"key": "ae", "titles": ["/account executive/"]}],
+        "location": {"remote_us": True, "metros": ["London", "Bangalore"],
+                     "relocation": True},
+    }))
+    profile = Profile.load(prof)
+
+    from engine.score import score_all
+    scored = score_all(jobs, profile)
+    keep = [j for j in scored if j.gate in ("QUALIFIED", "VERIFY")]
+
+    con = store2.connect()
+    run_id = store2.start_run(con)
+    store2.upsert(con, keep, run_id=run_id)
+    rows = list(con.execute(
+        "SELECT * FROM jobs WHERE gate IN ('QUALIFIED','VERIFY') ORDER BY score DESC"))
+    path = write_report(con, rows, health=[], run_detail={}, run_id=run_id)
+
+    text = pathlib.Path(path).read_text()
+    assert "# Sourcing run" in text
+
+    # The claim this whole file exists to make: what a person reads matches what
+    # the database holds.
+    assert consistency.check_report(con, path) == [], consistency.check_report(con, path)
+    assert consistency.check_db(con) == [], consistency.check_db(con)
+
+    # And every stored row survives the round trip the scorer depends on.
+    from engine.score import score as score_one
+    for row in con.execute("SELECT * FROM jobs"):
+        rebuilt = _pull.job_from_row(row)
+        score_one(rebuilt, profile)
+        assert (rebuilt.gate, rebuilt.score) == (row["gate"], row["score"]), \
+            f"{row['company']} / {row['title']}: {row['gate']}/{row['score']} -> " \
+            f"{rebuilt.gate}/{rebuilt.score}"
