@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import date, datetime
 import re
 import sqlite3
@@ -78,7 +79,13 @@ from engine import search as _search
 from engine.search import resolve, workday_parts  # noqa: E402
 from engine.verify import verify_entry  # noqa: E402
 
-ROOT = Path(__file__).resolve().parent
+# CAREERKIT_HOME is what makes `new-instance.sh` work: several instances share
+# this one script and each keeps its own profile, database and reports. store.py
+# and report.py already honoured it; this file did not, so pointing the CLI at
+# another instance read that instance's DATABASE while scoring it against the
+# REPO's profile. Silent, and exactly the wrong direction: the numbers looked
+# real because the postings were.
+ROOT = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent)
 PROFILE = ROOT / "profile" / "profile.yaml"
 EMPLOYERS = ROOT / "profile" / "employers.yaml"
 KEYS = ROOT / "profile" / "keys.yaml"
@@ -485,6 +492,52 @@ def _latest_report():
     return str(reports[-1]) if reports else None
 
 
+def cmd_applied(args) -> None:
+    """Reconcile profile/applications.jsonl against the database.
+
+    Exists because the tool recommended a role the owner had been rejected from
+    the previous day, and a wider check found roughly twenty applications in six
+    weeks against six the database knew about. Evidence that names a company but
+    not a role is never written automatically: at an employer with several
+    openings that marks the wrong one."""
+    from engine import applied as _applied
+    con = store.connect()
+    path = Path(args.file) if args.file else (PROFILE.parent / "applications.jsonl")
+    ev = _applied.load_evidence(path)
+    if not ev:
+        print(f"No evidence file at {path}.")
+        print("Write one line of JSON per application, e.g.")
+        print('  {"company": "Acme", "title": "Salesforce Admin", "status": "rejected", "on": "2026-08-05"}')
+        return
+
+    res = _applied.reconcile(con, ev, apply=args.apply)
+    for m in res["matched"]:
+        verb = "marked" if args.apply else "would mark"
+        print(f"  {verb} {m['status']:<13} {m['company'][:28]:<28} {m['matched_title'][:44]}")
+        print(f"      ({m['confidence']})")
+    for a in res["ambiguous"]:
+        print(f"  ?  {a['company'][:28]:<28} {a.get('title') or '(role not named)'}")
+        print(f"      {a['why']}; not written. Candidates:")
+        for c in a["candidates"][:6]:
+            print(f"        {c['uid'][:12]}  {c['title'][:60]}")
+    for u in res["unmatched"]:
+        print(f"  -  {u['company'][:28]:<28} {u.get('title') or ''}")
+        print(f"      {u['why']}")
+    for pr in res["problems"]:
+        print(f"  x  {pr}")
+
+    print(f"\n{len(res['matched'])} matched, {len(res['ambiguous'])} ambiguous, "
+          f"{len(res['unmatched'])} unmatched.")
+    if res["matched"] and not args.apply:
+        print("Nothing written. Re-run with --apply to record the matched ones.")
+
+    doors = _applied.surfacing_a_closed_door(con)
+    if doors:
+        print(f"\n{len(doors)} live row(s) at an employer that already declined you:")
+        for d in doors[:20]:
+            print(f"  !  {d}")
+
+
 def cmd_doctor(args) -> None:
     """One place that answers "is this thing working?".
 
@@ -508,6 +561,13 @@ def cmd_doctor(args) -> None:
     n_emp = len([e for e in reg.get("employers", []) if e.get("active", True)])
     if not n_emp:
         problems.append("no active employers registered - run discover or ingest-urls")
+
+    try:
+        from engine import applied as _applied
+        for d in _applied.surfacing_a_closed_door(con)[:10]:
+            problems.append(f"already declined: {d}")
+    except Exception:
+        pass
 
     broken = _pull.broken_sources(con, reg)
     for b in broken:
@@ -818,6 +878,10 @@ def main() -> None:
 
     sp = sub.add_parser("doctor"); sp.set_defaults(fn=cmd_doctor)
 
+    sp = sub.add_parser("applied"); sp.set_defaults(fn=cmd_applied)
+    sp.add_argument("--file", help="default: profile/applications.jsonl")
+    sp.add_argument("--apply", action="store_true", help="write the unambiguous matches")
+
     sp = sub.add_parser("consistency"); sp.set_defaults(fn=cmd_consistency)
     sp.add_argument("--report", help="default: the newest report in out/")
     sp.add_argument("--repair", action="store_true",
@@ -841,7 +905,7 @@ def main() -> None:
     # Commands that write are serialized against each other; read-only ones stay
     # usable while a long pull is running.
     MUTATING = {"pull", "audit", "discover", "ingest-url", "ingest-urls",
-                "verify", "mark"}
+                "verify", "mark", "applied"}
     try:
         if args.cmd in MUTATING:
             with store.RunLock():

@@ -2174,3 +2174,118 @@ def test_registry_level_rails_exempt_survives_a_rescore(db, tmp_path):
     score(rebuilt, profile)
     assert rebuilt.gate == "QUALIFIED", (
         f"registry carve-out lost on rescore: {j.gate} -> {rebuilt.gate}")
+
+
+# --------------------------------------------------------------------------
+# applied: the tool must not recommend a door that is already shut
+# --------------------------------------------------------------------------
+
+def test_the_same_posting_reposted_keeps_its_rejected_status(db):
+    """Half of the Delta case, and the half already handled. Two titles that
+    differ only by a suffix normalise to one uid, so a repost adopts the
+    existing row and its status rather than arriving as a fresh find. Asserted
+    because it is load-bearing: if uid normalisation ever tightens, the tool
+    starts recommending rejected roles again."""
+    from engine import store
+    first = J(company="Delta Air Lines", title="Business Technology Product Owner (Salesforce)",
+              url="https://example.test/d1")
+    first.gate = "VERIFY"
+    store.upsert(db, [first])
+    db.execute("UPDATE jobs SET status='rejected' WHERE uid=?", (first.uid,))
+    db.commit()
+
+    repost = J(company="Delta Air Lines", title="Business Technology Product Owner",
+               url="https://example.test/d2")
+    repost.gate = "QUALIFIED"
+    store.upsert(db, [repost])
+
+    rows = db.execute("SELECT status FROM jobs WHERE company='Delta Air Lines'").fetchall()
+    assert len(rows) == 1, "a repost should adopt the existing row, not add one"
+    assert rows[0]["status"] == "rejected", "a repost must not reset a rejection to new"
+
+
+def test_a_different_role_at_an_employer_who_declined_you_is_flagged(db):
+    """The half that was NOT handled. A rejection at an employer is a fact about
+    the relationship, not only about one requisition, and the report gave no hint
+    of it. Worth surfacing rather than excluding, because a different team at a
+    large employer is a genuinely different conversation."""
+    from engine import applied, store
+    old = J(company="Delta Air Lines", title="Salesforce Product Owner",
+            url="https://example.test/d1")
+    old.gate = "VERIFY"
+    live = J(company="Delta Air Lines", title="Salesforce Platform Analyst",
+             url="https://example.test/d2")
+    live.gate = "QUALIFIED"
+    store.upsert(db, [old, live])
+    db.execute("UPDATE jobs SET status='rejected' WHERE uid=?", (old.uid,))
+    db.commit()
+
+    doors = applied.surfacing_a_closed_door(db)
+    assert any("Delta" in d for d in doors), doors
+
+
+def test_an_unrelated_role_at_the_same_employer_reads_differently(db):
+    from engine import applied, store
+    old = J(company="Koch", title="Payroll Systems Analyst", url="https://example.test/k1")
+    live = J(company="Koch", title="Salesforce Administrator", url="https://example.test/k2")
+    live.gate = "QUALIFIED"
+    store.upsert(db, [old, live])
+    db.execute("UPDATE jobs SET status='rejected' WHERE uid=?", (old.uid,))
+    db.commit()
+    doors = applied.surfacing_a_closed_door(db)
+    assert not any("title overlap" in d for d in doors), doors
+
+
+def test_evidence_naming_no_role_is_never_auto_applied_when_ambiguous(db, tmp_path):
+    """Confirmations frequently say only "thanks for applying to Acme". Marking a
+    row on a company match alone picks the wrong requisition at any employer with
+    more than one opening, which was true of Anthropic, OpenAI and Salesforce in
+    the real database."""
+    from engine import applied, store
+    a = J(company="Anthropic", title="Customer Success Manager, Industries", url="https://example.test/a1")
+    b = J(company="Anthropic", title="Program Manager, GTM Systems", url="https://example.test/a2")
+    store.upsert(db, [a, b])
+    res = applied.reconcile(db, [{"company": "Anthropic", "status": "applied", "_line": 1}],
+                            apply=True)
+    assert not res["matched"] and len(res["ambiguous"]) == 1
+    for uid in (a.uid, b.uid):
+        assert db.execute("SELECT status FROM jobs WHERE uid=?", (uid,)).fetchone()[0] == "new"
+
+
+def test_evidence_for_an_unseen_employer_is_reported_not_dropped(db):
+    """He applied to Pathstone and Elios AI and the tool had never surfaced
+    either. That is a coverage finding, not noise, so it must not be swallowed."""
+    from engine import applied
+    res = applied.reconcile(db, [{"company": "Pathstone", "title": "Senior Salesforce Administrator",
+                                  "status": "applied", "_line": 1}])
+    assert len(res["unmatched"]) == 1
+    assert "no posting from this employer" in res["unmatched"][0]["why"]
+
+
+def test_a_malformed_evidence_line_does_not_stop_the_run(tmp_path):
+    from engine import applied
+    p = tmp_path / "applications.jsonl"
+    p.write_text('{"company": "Acme", "status": "applied"}\n'
+                 'not json at all\n'
+                 '{"company": "Beta", "status": "applied"}\n')
+    ev = applied.load_evidence(p)
+    assert len([e for e in ev if not e.get("_bad")]) == 2
+    assert len([e for e in ev if e.get("_bad")]) == 1
+
+
+def test_careerkit_home_moves_the_profile_too(tmp_path, monkeypatch):
+    """CAREERKIT_HOME is what makes several instances share one script. store and
+    report honoured it and the CLI did not, so pointing the CLI at another
+    instance read that instance's DATABASE while scoring against the REPO's
+    profile. The numbers looked real because the postings were."""
+    import importlib, sys
+    home = tmp_path / "instance"
+    (home / "profile").mkdir(parents=True)
+    (home / "profile" / "profile.yaml").write_text("lanes: []\n")
+    monkeypatch.setenv("CAREERKIT_HOME", str(home))
+    for mod in [m for m in sys.modules if m.startswith("engine")]:
+        importlib.reload(sys.modules[mod])
+    from engine import store
+    from engine.report import OUT_DIR
+    assert str(home) in str(store.DB_PATH), store.DB_PATH
+    assert str(home) in str(OUT_DIR), OUT_DIR
