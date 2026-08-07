@@ -25,7 +25,7 @@ example tests, because an invariant survives a rewrite and an example does not.
 
 ---
 
-# P0 — The tool recommends things it should already know are dead
+# P0 ,  The tool recommends things it should already know are dead
 
 ## 1. Ingest email as ground truth for application state
 
@@ -102,7 +102,7 @@ in Atlanta. Separately, Slalom's Life Sciences CRM Architect was recommended on
   aggregator-only provenance with no ATS URL (+2), no resolvable company website
   (+2), comp band exactly divisible by 2080 (+3, the annualised-hourly tell),
   employer absent from the registry and undiscoverable (+1). At 4 or more, mark
-  the row `⚠ UNVERIFIED EMPLOYER`.
+  the row UNVERIFIED EMPLOYER.
 - **Expiry parsing**: regex for `accept(ing)? applications until <date>`,
   `apply by <date>`, `posting closes <date>`. Past date sets gate `EXCLUDED`
   with reason `posting closed <date>`.
@@ -113,7 +113,7 @@ in Atlanta. Separately, Slalom's Life Sciences CRM Architect was recommended on
 
 ---
 
-# P1 — Correctness of what it already claims
+# P1 ,  Correctness of what it already claims
 
 ## 4. Report and database must agree, mechanically
 
@@ -185,7 +185,7 @@ $520,000,000. Both are fixed. What is still missing is **judgement**:
 
 ---
 
-# P2 — Judgement and history
+# P2 ,  Judgement and history
 
 ## 8. Remember the relationship, not just the posting
 
@@ -198,7 +198,7 @@ lower-banded req.
 **Build.** An `employer_history` table: applications, interview stages, named
 contacts, outcomes, and any standing invitation. Populated by `mailsync` (item 1)
 and by hand. Any row at a company with history gets a banner in the report:
-`⚠ 4 interview rounds 2025, declined, open invitation from csmith@npr.org`.
+`4 interview rounds 2025, declined, open invitation from csmith@npr.org`.
 
 **Value.** This is the difference between a job board and something that knows
 your search. It is also what turns a rejection into an asset.
