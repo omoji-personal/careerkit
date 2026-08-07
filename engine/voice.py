@@ -180,19 +180,25 @@ def check_draft(text: str, name: str = "draft") -> list[Finding]:
             "A phrase that reads as filler in every message it appears in.",
             m.group(0), name))
 
-    if len(words) >= 40:
-        n = len(_CONTRACTION.findall(text))
-        if n == 0:
-            out.append(Finding(
-                "contractions", "high",
-                f"No contractions in {len(words)} words. Most people write with "
-                f"them constantly; their total absence is one of the most "
-                f"consistent machine tells.", "", name))
-        elif n / (len(words) / 100) < 1.0:
-            out.append(Finding(
-                "contractions", "low",
-                f"{n} contraction(s) in {len(words)} words. Low, though not "
-                f"necessarily wrong for a formal cover letter.", "", name))
+    # Contraction absence is only diagnostic once there is enough text to have
+    # offered the writer several chances to use one. Measured against real
+    # samples from one user: a 276-word public post ran 4.0 contractions per 100
+    # words, while a 53-word warm-network note he wrote himself, and which
+    # worked, had none at all. Firing HIGH at 40 words flagged that note. Short
+    # transactional writing legitimately has no contractions in it, so below the
+    # threshold this is advisory only.
+    n = len(_CONTRACTION.findall(text))
+    if len(words) >= 120 and n == 0:
+        out.append(Finding(
+            "contractions", "high",
+            f"No contractions in {len(words)} words. Over a piece this long most "
+            f"people reach for one; their total absence is a consistent machine "
+            f"tell.", "", name))
+    elif len(words) >= 40 and n == 0:
+        out.append(Finding(
+            "contractions", "low",
+            f"No contractions in {len(words)} words. Short notes often have none, "
+            f"so this is only worth a look, not a rewrite.", "", name))
 
     if "—" in text:
         out.append(Finding("em-dash", "medium",
@@ -208,7 +214,15 @@ def check_draft(text: str, name: str = "draft") -> list[Finding]:
         toks = _tokens(s)
         if len(toks) < 8:
             continue
-        abstract = len(_ABSTRACT.findall(s)) + len(_NOMINAL.findall(s))
+        # A nominalisation on its own means nothing: "compensation", "position"
+        # and "information" are the plainest words available for those ideas.
+        # Counting them alone flagged "Can you please share more information and
+        # a compensation range?", which is a perfectly direct question. Require
+        # at least one genuinely evasive noun before the density matters.
+        vague = len(_ABSTRACT.findall(s))
+        if not vague:
+            continue
+        abstract = vague + len(_NOMINAL.findall(s))
         if abstract >= 3 or (abstract >= 2 and len(toks) < 18):
             out.append(Finding(
                 "register-not-mechanism", "medium",

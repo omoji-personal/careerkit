@@ -65,8 +65,62 @@ BATCH_SENT = {
 }
 
 
+# Text the user demonstrably wrote himself, which is the hardest bar: the lint
+# must stay quiet on it. Provenance matters here and was checked rather than
+# assumed. His published Torque post is his own rewrite, bearing no resemblance
+# to the draft prepared for him; the Landmark note is logged as "owner drafted
+# this himself"; the recruiter question is his unaided reply in the thread.
+#
+# Deliberately NOT in this set: the four connection notes that were accepted,
+# and the CareerKit announcement, which published verbatim from a prepared file.
+# Those were written FOR him. Calibrating his voice against them would make the
+# whole tool circular.
+OWN_WRITING = {
+    "torque-post": (
+        "I've been using Claude to do real work in Salesforce orgs for a while "
+        "now, and it's genuinely good at it. Faster than me for most things.\n\n"
+        "What kept catching me out was verification. An agent deploys something, "
+        "gets a success response, and tells you it's done. Salesforce agrees. "
+        "And it can still be wrong in ways nothing in that response would show "
+        "you. Permissions that were never granted. A bulk job reporting success "
+        "with failed rows inside it.\n\n"
+        "None of that is the agent being careless. The API tells the truth. It's "
+        "just that \"the call succeeded\" and \"the work is done\" are two "
+        "different things, and nothing was checking the second one.\n\n"
+        "So I built Torque. It sits between the agent and Salesforce and reads "
+        "each command before it goes out.\n\n"
+        "It's MIT and public. Fair warning: the repo is about a week old, and "
+        "most of it was written by Claude with Torque's own guardrails pointed "
+        "back at it the whole time. That felt like the only way to build this "
+        "without being a hypocrite about it."),
+    "landmark-note": (
+        "Hey Michael. I was looking at Landmark, looks like an exciting venture "
+        "with some quality ex-Jabian talent. Was wondering if you think there is "
+        "any Salesforce work I could get involved with, either in-house or as an "
+        "offering to clients. Happy to chat or meet if you think there is "
+        "something worth exploring."),
+    "recruiter-ask": (
+        "Hi! This sounds like an exciting opportunity! Can you please share more "
+        "information and a compensation range? Thank you."),
+}
+
+
 def _checks(findings):
     return {f.check for f in findings}
+
+
+def test_his_own_writing_is_not_flagged():
+    """The bar that matters most. Every finding here is a false positive by
+    definition, because a human wrote it and it worked.
+
+    Two real ones were caught this way and fixed. The 53-word Landmark note has
+    no contractions and was flagged HIGH until the threshold moved to 120 words.
+    "Can you please share more information and a compensation range?" was flagged
+    as evasive register because "information" and "compensation" end in -tion.
+    """
+    noisy = [f for f in lint(OWN_WRITING) if f.severity in ("high", "medium")]
+    assert not noisy, "flagged the user's own writing:\n" + "\n".join(
+        f"  {f.check} ({f.where}): {f.message}" for f in noisy)
 
 
 def test_the_killed_batch_is_flagged():
