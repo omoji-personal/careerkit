@@ -416,6 +416,34 @@ def cmd_claims_lint(args) -> None:
     sys.exit(1 if findings else 0)
 
 
+def cmd_voice_lint(args) -> None:
+    """Find the patterns that make a draft read as machine-written.
+
+    Pass every draft in a batch at once. The worst tells only exist BETWEEN
+    documents: two notes sharing an opening, or one fact thesaurused across
+    three. Linting them one at a time cannot see the thing that gets noticed.
+    """
+    from engine.voice import format_report, lint
+    drafts, missing = {}, []
+    for p in args.drafts:
+        path = Path(p)
+        if not path.exists():
+            missing.append(p)
+            continue
+        drafts[path.name] = path.read_text()
+    if missing:
+        sys.exit("No such draft(s): " + ", ".join(missing))
+    if not drafts:
+        sys.exit("Nothing to lint.")
+    if len(drafts) == 1:
+        print("Note: one draft only, so the cross-draft checks did not run. "
+              "Pass the whole batch to catch shared openings and reworded "
+              "repeats, which is where batches usually give themselves away.\n")
+    findings = lint(drafts)
+    print(format_report(findings, len(drafts)))
+    sys.exit(1 if any(f.severity == "high" for f in findings) else 0)
+
+
 def cmd_history(args) -> None:
     """What has actually happened, in order.
 
@@ -942,6 +970,11 @@ def main() -> None:
     sp.add_argument("--report", help="default: the newest report in out/")
     sp.add_argument("--repair", action="store_true",
                     help="clear impossible comp values so rescore can re-derive them")
+
+    sp = sub.add_parser("voice-lint", help="flag machine-written patterns in drafts")
+    sp.add_argument("drafts", nargs="+", help="one or more draft files; pass the "
+                                              "whole batch, not one at a time")
+    sp.set_defaults(fn=cmd_voice_lint)
 
     sp = sub.add_parser("claims-lint"); sp.set_defaults(fn=cmd_claims_lint)
     sp.add_argument("draft", help="the resume, cover letter or answer to check")
