@@ -3,3 +3,9 @@
 # a second setup step.
 -r requirements.txt
 pytest>=8.0
+# pyflakes is a hard dependency of the suite, not a convenience. tests/test_gates.py
+# asserts it is importable before believing its silence, because a lint that cannot
+# run reports nothing and that is indistinguishable from a lint that ran and found
+# nothing. It was installed by hand locally and absent in CI, so the suite passed
+# here and failed there for four commits.
+pyflakes>=3.0
