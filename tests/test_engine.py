@@ -2678,3 +2678,43 @@ def test_rescore_writes_a_changed_reason_even_when_the_gate_is_unchanged(db, tmp
     reasons = db.execute("SELECT reasons FROM jobs WHERE uid=?", (j.uid,)).fetchone()[0]
     assert "stale explanation" not in reasons, reasons
     assert "could not run" in reasons, reasons
+
+
+def test_a_board_that_names_a_different_company_is_rejected(monkeypatch):
+    """Every collision so far was the same mistake: a guessed slug resolved to a
+    real board, the probe counted its postings, and nobody asked whose board it
+    was. Greenhouse answers that question directly. For the NPR case it returns
+    "NATIONAL", which is the Toronto firm's actual name and settles it."""
+    from engine import discover
+    monkeypatch.setattr(discover, "_board_name",
+                        lambda ats, slug: "NATIONAL" if slug == "national" else None)
+    ok, why = discover.verify_board("National Public Radio",
+                                    {"ats": "greenhouse", "slug": "national"})
+    assert not ok and "NATIONAL" in why, why
+
+
+def test_a_board_that_names_the_right_company_is_accepted(monkeypatch):
+    from engine import discover
+    monkeypatch.setattr(discover, "_board_name", lambda ats, slug: "Stripe")
+    ok, _ = discover.verify_board("Stripe", {"ats": "greenhouse", "slug": "stripe"})
+    assert ok
+
+
+def test_a_platform_that_publishes_no_name_is_not_penalised(monkeypatch):
+    """Only greenhouse exposes this today. Treating silence as a mismatch would
+    reject every lever, ashby and workable board, which is a far worse error
+    than the collision being fixed."""
+    from engine import discover
+    monkeypatch.setattr(discover, "_board_name", lambda ats, slug: None)
+    ok, why = discover.verify_board("Fisher Phillips", {"ats": "lever", "slug": "fp"})
+    assert ok and "not verifiable" in why
+
+
+def test_name_matching_asks_what_fraction_of_the_target_is_covered():
+    """Asking whether the shorter string is contained would pass "NATIONAL"
+    against "National Public Radio", which is the exact collision."""
+    from engine.discover import _name_matches
+    assert not _name_matches("National Public Radio", "NATIONAL")
+    assert _name_matches("Georgia-Pacific", "Georgia-Pacific LLC")
+    assert _name_matches("Stripe", "Stripe")
+    assert not _name_matches("Fisher Phillips", "FP Sp. z o.o.")

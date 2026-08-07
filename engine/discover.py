@@ -189,7 +189,65 @@ PROBEABLE = len(PROBE_ORDER) + 1
 # a posting URL (`ingest-urls`), which contains the id. Documented rather than
 # silently absent: "discover found nothing" otherwise reads as "this employer
 # has no public board", which for these four is wrong.
+_REJECTED: list[dict] = []
+
 UNPROBEABLE = ("oracle_orc", "eightfold", "phenom", "paylocity")
+
+
+# --------------------------------------------------------------------------
+# Does the board that answered actually belong to the company we asked for?
+# --------------------------------------------------------------------------
+# Every collision so far was the same mistake: a guessed slug resolved to a real
+# board, the probe counted its postings, and nobody asked whose board it was.
+# "Fisher Phillips" found a Polish IT company at lever:fp. "DLA Piper" found a
+# Belgian firm at recruitee:dp. "National Public Radio" found a Toronto public
+# affairs firm at greenhouse:national. Each was patched by narrowing the slug
+# generator, which is guessing about guessing.
+#
+# Some platforms simply tell you. Greenhouse returns {"name": "Stripe"} from its
+# board endpoint, and for the NPR case it returns "NATIONAL", which is the other
+# company's actual name and settles the question outright. Where a name is
+# available this is evidence rather than heuristic, so it is checked first and
+# a mismatch is disqualifying.
+
+def _board_name(ats: str, slug: str) -> str | None:
+    """The company name the board reports for itself, when it reports one."""
+    try:
+        if ats == "greenhouse":
+            d = fetch_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}")
+            return (d or {}).get("name") or None
+    except Exception:
+        return None
+    return None
+
+
+def _name_matches(target: str, board_name: str) -> bool:
+    """Does the board's own name account for the company we searched for?
+
+    Deliberately asks what fraction of the TARGET the board name covers, not the
+    other way round. "NATIONAL" contains all of itself and would pass any
+    shorter-string test, while covering only one word of "National Public
+    Radio", which is exactly the collision being caught.
+    """
+    def words(x):
+        x = re.sub(r"[^\w\s]", " ", (x or "").lower())
+        return {w for w in x.split() if w and w not in _STOP}
+
+    want, got = words(target), words(board_name)
+    if not want or not got:
+        return True                    # nothing to judge on; leave it to the caller
+    return len(want & got) / len(want) >= 0.6
+
+
+def verify_board(name: str, entry: dict) -> tuple[bool, str]:
+    """Is this discovered board really this employer's? Returns (ok, why)."""
+    board_name = _board_name(entry.get("ats", ""), entry.get("slug", ""))
+    if board_name is None:
+        return True, "platform does not publish a board name; not verifiable"
+    if _name_matches(name, board_name):
+        return True, f"board reports itself as {board_name!r}"
+    return False, (f"board {entry.get('ats')}:{entry.get('slug')} reports itself as "
+                   f"{board_name!r}, which is not {name!r}")
 
 
 def discover_company(
@@ -225,8 +283,14 @@ def discover_company(
                                     -1 if n else 0,
                                     plat, s, n))
         if results:
-            _, _, plat, s, n = sorted(results)[0]   # reliable platform, roles first
-            return {"name": name, "ats": plat, "slug": s, "open_roles": n}
+            for _, _, plat, s_, n in sorted(results):
+                entry = {"name": name, "ats": plat, "slug": s_, "open_roles": n}
+                ok, why = verify_board(name, entry)
+                if ok:
+                    entry["verified"] = why
+                    return entry
+                entry["rejected"] = why
+                _REJECTED.append(entry)
     # Workday is the biggest enterprise ATS and had no probe here at all:
     # discover_workday was fully implemented and never called. It walks tenant x
     # datacenter x site so it is slow, which is why it runs only after the fast
