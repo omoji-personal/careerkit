@@ -436,6 +436,55 @@ def cmd_rescore(args) -> None:
     _pull.rebuild_report(con, min_score=getattr(args, "min_score", 0))
 
 
+def cmd_consistency(args) -> None:
+    """Does the report tell the truth about the database it came from?
+
+    Added after a row shipped reading "Comp not stated" in its header and
+    "comp $150,000-$208,000" in the line beneath. Both were rendered from the
+    same posting. The value reached the reader by one path and the row by
+    another, so they disagreed silently, and the CSV export dropped the band for
+    a third of the postings that had one."""
+    from engine import consistency as _cons
+    con = store.connect()
+
+    db_problems = _cons.check_db(con)
+    rpt = args.report or _latest_report()
+    stale = _cons.report_is_stale(con, rpt) if rpt else None
+    if stale:
+        print(f"  !  {stale}")
+        print("     Checking the database only.\n")
+        rpt_problems = []
+    else:
+        rpt_problems = _cons.check_report(con, rpt) if rpt else ["no report found to check"]
+
+    if args.repair:
+        fixed = _cons.repair_comp(con, apply=True)
+        for m in fixed:
+            print(f"  repaired  {m}")
+        print(f"{len(fixed)} row(s) cleared; run `rescore` to re-derive them.\n"
+              if fixed else "Nothing to repair.\n")
+        db_problems = _cons.check_db(con)
+
+    if not db_problems and not rpt_problems:
+        print(f"Consistent. Database and {Path(rpt).name if rpt else 'report'} agree.")
+        return
+    if db_problems:
+        print(f"{len(db_problems)} problem(s) inside the database:")
+        for m in db_problems[:40]:
+            print(f"  x  {m}")
+    if rpt_problems:
+        print(f"\n{len(rpt_problems)} disagreement(s) between the report and the database:")
+        for m in rpt_problems[:40]:
+            print(f"  x  {m}")
+    raise SystemExit(1)
+
+
+def _latest_report():
+    from engine.report import OUT_DIR
+    reports = sorted(OUT_DIR.glob("sourcing-*.md")) if OUT_DIR.exists() else []
+    return str(reports[-1]) if reports else None
+
+
 def cmd_doctor(args) -> None:
     """One place that answers "is this thing working?".
 
@@ -768,6 +817,11 @@ def main() -> None:
     sp.add_argument("--min-score", type=int, default=0)
 
     sp = sub.add_parser("doctor"); sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("consistency"); sp.set_defaults(fn=cmd_consistency)
+    sp.add_argument("--report", help="default: the newest report in out/")
+    sp.add_argument("--repair", action="store_true",
+                    help="clear impossible comp values so rescore can re-derive them")
 
     sp = sub.add_parser("claims-lint"); sp.set_defaults(fn=cmd_claims_lint)
     sp.add_argument("draft", help="the resume, cover letter or answer to check")

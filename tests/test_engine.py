@@ -1985,3 +1985,93 @@ def test_a_distinctive_two_word_name_still_offers_its_first_word():
     from engine.discover import slug_candidates
     assert "neuraflash" in slug_candidates("NeuraFlash Consulting")
     assert "anthropic" in slug_candidates("Anthropic")
+
+
+# --------------------------------------------------------------------------
+# consistency: the report must agree with the database it came from
+# --------------------------------------------------------------------------
+
+def test_consistency_catches_a_report_that_contradicts_the_row(db, tmp_path):
+    """The defect this module exists for. A row shipped with "Comp not stated"
+    in its header and "comp $150,000-$208,000" in the reasons line beneath it,
+    because score() resolved the band and never wrote it to the row."""
+    from engine import consistency, store
+    j = J(company="Chime", title="Senior Lifecycle Marketing Manager",
+          url="https://example.test/1", location="USA")
+    j.gate, j.score = "QUALIFIED", 52
+    j.comp_min = j.comp_max = None
+    j.reasons = ["remote-US: USA", "comp $150,000-$208,000"]
+    store.upsert(db, [j])
+
+    rpt = tmp_path / "sourcing-test.md"
+    rpt.write_text(
+        "## Qualified\n\n"
+        "### 1. Senior Lifecycle Marketing Manager - Chime\n"
+        "- **Score** 52 | **QUALIFIED** | NEW\n"
+        "- **Location** USA | **Comp** not stated\n"
+        "- **Why** remote-US: USA | comp $150,000-$208,000\n"
+        "- https://example.test/1\n")
+
+    problems = consistency.check_report(db, rpt)
+    assert any("not stated" in p and "band" in p for p in problems), problems
+
+
+def test_consistency_is_quiet_when_report_and_row_agree(db, tmp_path):
+    from engine import consistency, store
+    j = J(company="Chime", title="Senior Lifecycle Marketing Manager",
+          url="https://example.test/2", location="USA")
+    j.gate, j.score = "QUALIFIED", 52
+    j.comp_min, j.comp_max = 150_000, 208_000
+    j.reasons = ["remote-US: USA", "comp $150,000-$208,000"]
+    store.upsert(db, [j])
+    rpt = tmp_path / "sourcing-test.md"
+    rpt.write_text(
+        "## Qualified\n\n"
+        "### 1. Senior Lifecycle Marketing Manager - Chime\n"
+        "- **Score** 52 | **QUALIFIED** | NEW\n"
+        "- **Location** USA | **Comp** $150,000 - $208,000\n"
+        "- **Why** remote-US: USA | comp $150,000-$208,000\n"
+        "- https://example.test/2\n")
+    assert consistency.check_report(db, rpt) == []
+
+
+def test_consistency_catches_an_impossible_comp_spread(db):
+    """Seen live: an Indeed band of "$1.00 - $250,000.00 per year" was read as
+    hourly and annualised to $2,080 - $520,000,000. The parse is fixed, but a row
+    corrupted before the fix keeps its values, because 2080 no longer looks like
+    an hourly rate. The database check is what surfaces the survivors."""
+    from engine import consistency, store
+    j = J(company="Wonderlust Glass", title="Executive Sales Professional",
+          url="https://example.test/3")
+    j.comp_min, j.comp_max = 2080, 520_000_000
+    store.upsert(db, [j])
+    assert any("implausible comp spread" in p for p in consistency.check_db(db))
+
+
+def test_consistency_catches_a_band_the_row_does_not_carry(db):
+    from engine import consistency, store
+    j = J(company="Acme", title="Product Manager", url="https://example.test/4")
+    j.comp_min = j.comp_max = None
+    j.reasons = ["comp $120,000-$150,000"]
+    store.upsert(db, [j])
+    assert any("comp_min is NULL" in p for p in consistency.check_db(db))
+
+
+def test_repair_clears_a_comp_a_guard_can_no_longer_recognise(db):
+    """The guard that prevents the bad parse also stops recognising its victims,
+    because $2,080 is a plausible salary floor. Comp is derived data, so clearing
+    it lets the next rescore re-derive it under the corrected rules."""
+    from engine import consistency, store
+    bad = J(company="Wonderlust Glass", title="Executive Sales", url="https://example.test/9")
+    bad.comp_min, bad.comp_max = 2080, 520_000_000
+    good = J(company="Chime", title="Lifecycle Manager", url="https://example.test/10")
+    good.comp_min, good.comp_max = 150_000, 208_000
+    store.upsert(db, [bad, good])
+
+    preview = consistency.repair_comp(db, apply=False)
+    assert len(preview) == 1 and "Wonderlust" in preview[0]
+    assert db.execute("SELECT comp_min FROM jobs WHERE uid=?", (bad.uid,)).fetchone()[0] == 2080
+
+    consistency.repair_comp(db, apply=True)
+    assert db.execute("SELECT comp_min FROM jobs WHERE uid=?", (bad.uid,)).fetchone()[0] is None
+    assert db.execute("SELECT comp_min FROM jobs WHERE uid=?", (good.uid,)).fetchone()[0] == 150_000
