@@ -89,6 +89,10 @@ _MIGRATIONS = [
     # dream_companies, which hid the gap: an exemption that came from
     # employers.yaml was lost on rescore and the role went QUALIFIED to EXCLUDED.
     ("jobs", "rails_exempt", "INTEGER"),
+    # Evidence for the ghost-listing score. JobSpy resolves both and the feed
+    # was discarding them, which left the check with no data source.
+    ("jobs", "url_direct", "TEXT"),
+    ("jobs", "company_site", "TEXT"),
 ]
 
 
@@ -319,14 +323,14 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     "INSERT INTO jobs (uid,group_key,board,company,title,url,location,source,lane,"
                     "employer_tier,posted_at,department,comp_min,comp_max,comp_text,"
                     "score,gate,reasons,description,first_seen,last_seen,first_seen_run,last_seen_run,"
-                    "remote_flag,rails_exempt) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "remote_flag,rails_exempt,url_direct,company_site) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (j.uid, j.group_key, j.board, j.company, j.title, j.url, j.location, j.source,
                      j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
                      j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
                      j.description[:20000], today, today, run_id, run_id,
                      None if j.remote_flag is None else int(j.remote_flag),
-                     int(bool(j.rails_exempt))),
+                     int(bool(j.rails_exempt)), j.url_direct, j.company_site),
                 )
                 new.append(j)
             cur.execute(

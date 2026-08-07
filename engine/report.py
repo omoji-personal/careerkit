@@ -117,6 +117,16 @@ def _row_block(rows: list[sqlite3.Row], idx: int, new_uids: set | None = None) -
         f"- **Why** {sanitize_external(r['reasons'], 300)}",
         f"- {r['url']}",
     ]
+    # Surfaced, never used to drop a row: a ghost listing and a small employer
+    # with a thin web presence look the same from here, and silently discarding
+    # the second to catch the first is the failure this tool exists to prevent.
+    try:
+        from .ghost import flag as _ghost_flag
+        g = _ghost_flag(r)
+        if g:
+            lines.insert(1, f"- \u26a0 {g}")
+    except Exception:
+        pass
     if len(rows) > 1:
         # Every sibling carries its own uid and URL. Listing location and score
         # alone made the grouping destructive in practice: the user could see

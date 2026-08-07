@@ -531,6 +531,16 @@ def cmd_applied(args) -> None:
     if res["matched"] and not args.apply:
         print("Nothing written. Re-run with --apply to record the matched ones.")
 
+    try:
+        from engine import ghost as _ghost
+        g = _ghost.review(con)
+        if g:
+            print(f"\n{len(g)} live row(s) that may not be real postings:")
+            for m in g[:15]:
+                print(f"  ?  {m}")
+    except Exception:
+        pass
+
     doors = _applied.surfacing_a_closed_door(con)
     if doors:
         print(f"\n{len(doors)} live row(s) at an employer that already declined you:")

@@ -55,6 +55,15 @@ class Job:
     comp_max: int | None = None
     comp_text: str = ""
     external_id: str = ""
+    # Evidence, never identity. JobSpy already resolves the employer's own apply
+    # URL and corporate website out of an aggregator row and CareerKit was
+    # discarding both. They are what tells a real posting from a listing that
+    # exists only on scraper sites, which is how a consultancy that did not
+    # exist reached the top of a report with the highest band on the board.
+    # Deliberately NOT folded into uid or source: relabelling a scraped row as
+    # an ATS row would launder its provenance and break retirement.
+    url_direct: str = ""
+    company_site: str = ""
     lane: str = ""                   # which employer lane this company sits in
     rails_exempt: bool = False       # owner carve-out: judge on fit, not mechanical rails
     employer_tier: str = ""          # A / B / C from the registry

@@ -2490,3 +2490,89 @@ def test_a_negated_phrase_does_not_trip_a_hard_rail():
     assert g == "EXCLUDED" and "TS/SCI" in why
     # the reason quotes the sentence, not the title and location that precede it
     assert "Salesforce Administrator" not in why, why
+
+
+# --------------------------------------------------------------------------
+# ghost listings: is this posting real?
+# --------------------------------------------------------------------------
+
+def test_the_tria_prima_shape_is_flagged(db):
+    """A listing reached the top of a report with the highest band on the board:
+    $299,000 to $366,000 in the user's own metro. The band was an hourly contract
+    rate times 2080, the domain was parked for sale, no such consultancy existed,
+    and every sighting came from a scraper. Nothing in the tool disagreed,
+    because nothing was asking whether the posting was real."""
+    from engine import ghost, store
+    j = J(company="Tria Prima", title="Principal Salesforce Solution Consultant",
+          url="https://aggregator.test/1", location="Atlanta, GA")
+    j.source = "jobspy:indeed"
+    j.comp_min, j.comp_max = 144 * 2080, 176 * 2080
+    j.gate = "QUALIFIED"
+    store.upsert(db, [j])
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    pts, why = ghost.score_row(row)
+    assert pts >= 4, (pts, why)
+    assert any("2080" in w for w in why), why
+    assert ghost.flag(row) is not None
+
+
+def test_a_corroborated_aggregator_row_is_not_flagged(db):
+    """The evidence that makes the difference is exactly what the feed was
+    throwing away: the employer's own apply link and corporate website."""
+    from engine import ghost, store
+    j = J(company="Chime", title="Lifecycle Marketing Manager", url="https://aggregator.test/2")
+    j.source = "jobspy:indeed"
+    j.url_direct = "https://boards.greenhouse.io/chime/jobs/1"
+    j.company_site = "https://chime.com"
+    j.comp_min, j.comp_max = 150_000, 208_000
+    j.gate = "QUALIFIED"
+    store.upsert(db, [j])
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert ghost.score_row(row)[0] == 0
+    assert ghost.flag(row) is None
+
+
+def test_an_employer_ats_row_is_never_ghost_flagged(db):
+    """A posting on the employer's own board is corroborated by definition."""
+    from engine import ghost, store
+    j = J(company="Acme", title="Salesforce Administrator",
+          url="https://boards.greenhouse.io/acme/jobs/9")
+    j.source, j.external_id, j.gate = "greenhouse", "9", "QUALIFIED"
+    store.upsert(db, [j])
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert ghost.score_row(row)[0] == 0
+
+
+def test_the_evidence_fields_survive_a_rescore(db, tmp_path):
+    """Ghost scoring runs off stored evidence, so the evidence has to persist.
+    This is the same class as the remote_flag bug: a field the tool reads that
+    the database never kept."""
+    import yaml as _yaml
+    from engine import pull as _pull, store
+    from engine.score import Profile
+    j = J(company="Chime", title="Lifecycle Marketing Manager", url="https://aggregator.test/3")
+    j.source = "jobspy:indeed"
+    j.url_direct = "https://boards.greenhouse.io/chime/jobs/1"
+    j.company_site = "https://chime.com"
+    store.upsert(db, [j])
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({"lanes": [{"key": "x", "titles": ["/lifecycle/"]}],
+                                  "location": {"remote_us": True}}))
+    _pull.rescore(db, Profile.load(p), echo=lambda *a: None)
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    rebuilt = _pull.job_from_row(row)
+    assert rebuilt.url_direct == j.url_direct
+    assert rebuilt.company_site == j.company_site
+
+
+def test_an_ordinary_salary_that_happens_to_divide_by_2080_is_not_enough(db):
+    """$208,000 is exactly $100 an hour x 2080. Flagging a real band on that
+    alone is how a useful check turns into noise, so both ends must divide."""
+    from engine import ghost, store
+    j = J(company="Chime", title="Lifecycle Marketing Manager", url="https://aggregator.test/4")
+    j.source = "jobspy:indeed"
+    j.url_direct, j.company_site = "https://boards.greenhouse.io/chime/jobs/1", "https://chime.com"
+    j.comp_min, j.comp_max = 150_000, 208_000
+    store.upsert(db, [j])
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert not any("2080" in w for w in ghost.score_row(row)[1])

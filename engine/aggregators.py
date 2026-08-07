@@ -511,6 +511,8 @@ def jobspy_feed(cfg: dict) -> list[Job]:
                 comp_min=num(comp_lo), comp_max=num(comp_hi),
                 remote_flag=bool(r.get("is_remote") is True),
                 external_id=str(g("id")) or str(g("job_url")),
+                url_direct=str(g("job_url_direct")),
+                company_site=str(g("company_url_direct")),
                 source=f"jobspy:{g('site')}", raw={},
             ))
     return out

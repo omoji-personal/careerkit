@@ -227,7 +227,9 @@ def job_from_row(r):
                lane=r["lane"] or "", employer_tier=r["employer_tier"] or "",
                board=r["board"] if "board" in keys else "",
                remote_flag=None if rf is None else bool(rf),
-               rails_exempt=bool(rx))
+               rails_exempt=bool(rx),
+               url_direct=r["url_direct"] if "url_direct" in keys else "",
+               company_site=r["company_site"] if "company_site" in keys else "")
 
 
 def rescore(con, profile, *, echo=print) -> dict:
