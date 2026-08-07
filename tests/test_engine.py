@@ -2405,3 +2405,88 @@ def test_group_key_still_matches_the_legacy_uid_scheme():
     legacy = hashlib.sha256(
         f"{_norm_company(j.company)}|{_norm_title(j.title)}".encode()).hexdigest()[:20]
     assert j.group_key == legacy
+
+
+def test_a_429_widens_that_hosts_floor_for_the_rest_of_the_run(monkeypatch):
+    """The 429 defect was never a missing retry, it was a pace that never
+    adapted. The fixed 0.7s gap was reused for every later request to a host
+    that had just refused it, so once a board started limiting, the rest of the
+    run kept hitting it exactly as fast and the report simply showed fewer jobs
+    with no indication why."""
+    from engine import http
+
+    class Resp:
+        def __init__(self, code, headers=None):
+            self.status_code, self.text = code, ""
+            self.headers = headers or {}
+
+    http._host_floor.clear()
+    monkeypatch.setattr(http._session, "request", lambda m, u, **k: Resp(429))
+    monkeypatch.setattr(http.time, "sleep", lambda s: None)
+    monkeypatch.setattr(http, "_throttle", lambda url: None)
+    http.fetch("https://limited.test/a", use_cache=False)
+
+    floors = http.host_floors()
+    assert floors.get("limited.test", 0) > http._HOST_DELAY, floors
+    assert floors["limited.test"] <= http._MAX_HOST_DELAY
+
+
+def test_a_retry_after_header_is_honoured(monkeypatch):
+    from engine import http
+
+    class Resp:
+        def __init__(self):
+            self.status_code, self.text = 429, ""
+            self.headers = {"Retry-After": "12"}
+
+    http._host_floor.clear()
+    monkeypatch.setattr(http._session, "request", lambda m, u, **k: Resp())
+    monkeypatch.setattr(http.time, "sleep", lambda s: None)
+    monkeypatch.setattr(http, "_throttle", lambda url: None)
+    http.fetch("https://polite.test/a", use_cache=False)
+    assert http.host_floors()["polite.test"] >= 12.0
+
+
+def test_the_user_agent_says_what_this_is(monkeypatch):
+    """The tool publishes which of its sources are scrapers and tells users it
+    makes ordinary outbound requests. Sending a Chrome string it is not
+    contradicts that in the one place a site operator can check, and removes
+    their ability to identify or contact the tool specifically."""
+    from engine import http
+    assert "CareerKit" in http.UA
+    assert "Mozilla" not in http.UA and "Chrome" not in http.UA
+    assert "github.com" in http.UA, "leave them a way to find out what this is"
+
+
+def test_a_negated_phrase_does_not_trip_a_hard_rail():
+    """"This is not a quota-carrying role" and "No security clearance is
+    required" both fired the rail that exists to screen those very things out.
+    The failure discards a job the user wanted, which is the expensive
+    direction."""
+    import re as _re
+    from engine.models import Job
+    from engine.score import Profile, score
+
+    p = Profile()
+    p.remote_us = True
+    p.lanes = [(50, _re.compile(r"(salesforce administrator)", _re.I), "sf")]
+    p.domain_terms = None
+
+    def gate(body):
+        j = Job(company="X", title="Salesforce Administrator", url="u", source="s",
+                location="Remote, US", description=body + " " + "d" * 300)
+        score(j, p)
+        return j.gate, (j.reasons[0] if j.reasons else "")
+
+    g, _ = gate("This is not a quota-carrying role and you will not carry a sales quota.")
+    assert g != "EXCLUDED", "a denial must not fire the rail"
+    g, _ = gate("No security clearance is required for this position.")
+    assert g != "EXCLUDED", "a denial must not fire the rail"
+
+    # and the rails must still work
+    g, why = gate("Great team. You will own an annual sales quota of $2M. Benefits included.")
+    assert g == "EXCLUDED" and "sales quota" in why
+    g, why = gate("Nice office. An active TS/SCI clearance is required. Apply today.")
+    assert g == "EXCLUDED" and "TS/SCI" in why
+    # the reason quotes the sentence, not the title and location that precede it
+    assert "Salesforce Administrator" not in why, why

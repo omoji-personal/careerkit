@@ -105,7 +105,10 @@ Worth being precise about, because "nothing" would be a lie.
   tracking platforms (Greenhouse, Lever, Ashby, Workday and others) and from
   public job feeds.
   These are ordinary outbound web requests from your machine, throttled to one
-  request per host per 0.7s. Your identity is not attached to them.
+  request per host per 0.7s, widening automatically if a host asks us to slow
+  down. They identify themselves as CareerKit and link back to this repository,
+  so a site operator can tell what the traffic is. Your identity is not attached
+  to them.
 - **One exception, if you enable it:** the USAJobs feed requires your registered
   email in the request header. That is their API's rule, not a CareerKit choice.
   Skip that feed if you would rather not.

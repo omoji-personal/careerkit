@@ -27,10 +27,13 @@ CACHE_DIR = Path(os.environ.get("CAREERKIT_HOME")
                  or Path(__file__).resolve().parent.parent) / "data" / "httpcache"
 CACHE_TTL = 60 * 60 * 6  # 6 hours
 
-UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-)
+# Say what this is. The tool tells its users it makes "ordinary outbound web
+# requests" and publishes which sources are scraped; sending a Chrome string it
+# is not contradicts that in the one place a site operator can actually check.
+# It also gives them a way to contact or block the tool specifically, which is
+# the point of the header.
+UA = ("CareerKit/1.0 (open-source personal job search; "
+      "+https://github.com/omoji-personal/careerkit)")
 
 _session = requests.Session()
 _session.headers.update({"User-Agent": UA, "Accept": "application/json, text/html;q=0.9"})
@@ -38,6 +41,13 @@ _session.headers.update({"User-Agent": UA, "Accept": "application/json, text/htm
 # Per-host minimum gap between requests, seconds.
 _HOST_DELAY = 0.7
 _last_hit: dict[str, float] = {}
+# A host that answers 429 is telling us the fixed 0.7s gap is too fast for it.
+# The loop treated 429 as final (`if status < 500: break`), so it was never
+# retried and the pace never changed: once a board started rate-limiting, every
+# later request to it failed the same way for the rest of the run, and the
+# report simply showed fewer jobs with no indication why.
+_host_floor: dict[str, float] = {}
+_MAX_HOST_DELAY = 30.0
 # check-then-set on _last_hit was unsynchronised while cmd_verify runs 8 workers
 # and discover_many up to 72, so two requests to the same host could fire inside
 # the delay - breaking the politeness contract the README advertises and risking
@@ -48,14 +58,37 @@ _throttle_lock = threading.Lock()
 def _throttle(url: str) -> None:
     host = url.split("/")[2] if "://" in url else url
     with _throttle_lock:
+        floor = _host_floor.get(host, _HOST_DELAY)
         last = _last_hit.get(host, 0.0)
         gap = time.time() - last
-        wait = (_HOST_DELAY - gap + random.uniform(0, 0.15)) if gap < _HOST_DELAY else 0.0
+        wait = (floor - gap + random.uniform(0, 0.15)) if gap < floor else 0.0
         # Claim the slot before sleeping, so a second thread queues behind this
         # request rather than racing it.
         _last_hit[host] = time.time() + wait
     if wait > 0:
         time.sleep(wait)
+
+
+def back_off(url: str, retry_after: str | None = None) -> float:
+    """Widen this host's minimum gap after it pushes back. Returns the new gap."""
+    host = url.split("/")[2] if "://" in url else url
+    hinted = 0.0
+    if retry_after:
+        try:
+            hinted = float(retry_after)
+        except ValueError:
+            hinted = 0.0          # HTTP-date form; the doubling below covers it
+    with _throttle_lock:
+        current = _host_floor.get(host, _HOST_DELAY)
+        new = min(max(current * 2, hinted, _HOST_DELAY * 2), _MAX_HOST_DELAY)
+        _host_floor[host] = new
+    return new
+
+
+def host_floors() -> dict[str, float]:
+    """Hosts that asked us to slow down, and by how much. For diagnostics."""
+    with _throttle_lock:
+        return dict(_host_floor)
 
 
 def _cache_path(key: str) -> Path:
@@ -138,6 +171,16 @@ def fetch(
                 method, url, json=json_body, headers=headers or {}, timeout=timeout
             )
             status, text = resp.status_code, resp.text
+            if status == 429:
+                # Do NOT retry. A host answering 429 is asking for less traffic,
+                # and an immediate second attempt is the opposite of that. What
+                # was actually broken is that the pace never changed: the fixed
+                # 0.7s gap was reused for every later request to the same host,
+                # so once a board started limiting, the rest of the run kept
+                # hitting it at the pace it had just refused. Widen this host's
+                # floor instead, honouring its own Retry-After when it sends one.
+                back_off(url, getattr(resp, "headers", {}).get("Retry-After"))
+                break
             if status < 500:
                 break
         except Exception:

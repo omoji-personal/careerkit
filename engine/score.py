@@ -520,10 +520,51 @@ def _sentence_around(text: str, m: "re.Match") -> str:
 
     A reason reading "onsite 5x per w" is unusable for deciding whether the rail
     was right, which is the only thing the reason is for."""
-    start = text.rfind(".", 0, m.start()) + 1
-    end = text.find(".", m.end())
-    end = len(text) if end == -1 else end + 1
+    # The scored blob is title, location, department and description joined by
+    # newlines, so a newline is as much a sentence boundary as a full stop.
+    # Without that, a rail firing early in the description quoted the title and
+    # location as part of "the sentence".
+    start = max(text.rfind(".", 0, m.start()) + 1,
+                text.rfind("\n", 0, m.start()) + 1,
+                text.rfind("!", 0, m.start()) + 1,
+                text.rfind("?", 0, m.start()) + 1)
+    ends = [i for i in (text.find(".", m.end()), text.find("\n", m.end())) if i != -1]
+    end = (min(ends) + 1) if ends else len(text)
     return " ".join(text[start:end].split())[:180]
+
+
+# A rail fires on a phrase, but a posting can use the phrase to say the opposite.
+# "This is not a quota-carrying role" and "No security clearance is required" both
+# tripped the rail that exists to screen those very things out, and the failure is
+# in the expensive direction: it silently discards a job the user wanted.
+#
+# Deliberately narrow. It only looks backwards inside the same sentence, and only
+# for negators that actually reverse the phrase. Anything cleverer starts throwing
+# away real exclusions, which is the worse error of the two.
+_NEGATOR = re.compile(
+    r"\b(?:not?|never|without|no longer|isn'?t|aren'?t|does not|do not|don'?t|"
+    r"will not|won'?t|is not|are not|free from|exempt from|nor)\b", re.I)
+
+
+def _negated(text: str, m: "re.Match", window: int = 90) -> bool:
+    """Is this match inside a clause that negates it?
+
+    Looks back to the start of the sentence, capped, and asks whether a negator
+    sits between that boundary and the match. "You will own a sales quota" has
+    none; "you will not carry a sales quota" does.
+    """
+    start = max(text.rfind(".", 0, m.start()) + 1,
+                text.rfind("\n", 0, m.start()) + 1,
+                m.start() - window)
+    return bool(_NEGATOR.search(text[start:m.start()]))
+
+
+def _rail_hit(pattern, text: str):
+    """First match of `pattern` that the posting is not explicitly denying."""
+    for m in pattern.finditer(text):
+        if not _negated(text, m):
+            return m
+    return None
 
 
 def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
@@ -698,35 +739,35 @@ def score(job: Job, p: Profile) -> Job:
         loc_v, loc_e = "pass", "rails-exempt employer"
 
     if p.block_quota and not exempt:
-        m = QUOTA.search(text)
+        m = _rail_hit(QUOTA, text)
         if m:
             job.gate, job.score = "EXCLUDED", base
-            job.reasons = [f"revenue/quota rail: '{m.group(0)[:40]}'"]
+            job.reasons = [f"revenue/quota rail: {_sentence_around(text, m)!r}"]
             return job
 
     for pat, label in p.body_blocks:
         if exempt:
             break
-        m = pat.search(text)
+        m = _rail_hit(pat, text)
         if m:
             job.gate, job.score = "EXCLUDED", base
-            job.reasons = [f"{label}: '{m.group(0)[:60]}'"]
+            job.reasons = [f"{label}: {_sentence_around(text, m)!r}"]
             return job
 
     if p.certs_refused and not exempt:
-        m = p.certs_refused.search(text)
+        m = _rail_hit(p.certs_refused, text)
         if m:
             job.gate, job.score = "EXCLUDED", base
-            job.reasons = [f"requires refused cert: '{m.group(0)[:60]}'"]
+            job.reasons = [f"requires refused cert: {_sentence_around(text, m)!r}"]
             return job
 
     # Deliberately NOT exempt-gated, unlike every other rail: a dream employer
     # cannot waive a clearance requirement, so enthusiasm should not bypass it.
     if p.block_clearance:
-        m = CLEARANCE.search(text)
+        m = _rail_hit(CLEARANCE, text)
         if m:
             job.gate, job.score = "EXCLUDED", base
-            job.reasons = [f"clearance-gated: '{m.group(0)[:60]}'"]
+            job.reasons = [f"clearance-gated: {_sentence_around(text, m)!r}"]
             return job
 
     # --- domain evidence -------------------------------------------------
