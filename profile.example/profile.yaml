@@ -45,6 +45,13 @@ dream_lanes:
     weight: 46
     titles: ["/growth (product )?manager/", "product operations"]
 
+# Gates read ONLY from a posting's requirements section, never its duties.
+# A match excludes the role and quotes the offending sentence. This is what
+# catches the disqualifier buried three screens into a job description.
+hard_requirements:
+  architect certification: ["/(application|system) architect/"]
+  people management: ["/direct reports/", "/manage a team of \\d/"]
+
 exclusions:
   titles: [designer, copywriter, "/sales (development|manager)/", intern, internship,
            "/(software|data) engineer/", recruiter]

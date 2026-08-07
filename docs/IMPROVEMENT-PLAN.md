@@ -296,3 +296,42 @@ four days and would have prevented most of what went wrong today.
 - **Scoring sophistication.** No embeddings, no model-based ranking. The scoring
   rails are legible and debuggable, which is why every defect today was findable.
   A learned scorer would have hidden them.
+
+---
+
+## Status, 2026-08-06 evening
+
+Everything below was implemented the same day it was written, except the nine
+adapter fixtures noted in T1. Test count went from 185 to 259.
+
+| Item | State |
+|---|---|
+| 1. Application evidence | done. `applied`, and a warning when a live row sits at an employer that declined you |
+| 2. Requirements before scoring | done. `hard_requirements` in the profile, plus `enrich` to fetch what the row lacks |
+| 3. Ghost and expired postings | ghost scoring done and firing on live data; expiry parsing NOT done |
+| 4. Report and database agree | done. `consistency`, which then found a defect in itself on live data |
+| 5. pull and rescore equivalent | done, as a property test. It found `rails_exempt` was not persisted |
+| 6. Verify a discovered board | done, by asking the board its own name |
+| 7. Comp intelligence | partly. Provenance NOT recorded; the below-floor warning NOT added |
+| 8. Employer history | NOT done. `applied` is its foundation |
+| 9. Lane lint | NOT done |
+| T1. Adapter fixtures | 8 of 17, up from 4. Nine have no locatable live board to capture from |
+| T2. Invariant tests | done |
+| T3. Golden corpus | done, and it passed with a bug reintroduced until its corpus was fixed |
+| T4. Test the checkers | done |
+| T5. First run and upgrade | done |
+
+**What the day actually taught.** The plan predicted the classes correctly and
+under-predicted how many defects were in the fixes themselves. The ghost check
+flagged 55 of 56 rows on first contact with real data. The enrichment overwrote
+good postings with page furniture. The end-to-end test passed with the bug it
+was written for put back. The consistency checker reported three contradictions
+that turned out to be its own wrong assumption about URLs being unique.
+
+None of that was visible from reading code. All of it appeared within minutes of
+pointing the thing at a real database, which is the argument for doing that
+before believing any of it.
+
+**Left for next time**, in order: employer history (item 8), expiry parsing
+(part of item 3), comp provenance and the below-floor warning (item 7), the lane
+lint (item 9), and any adapter fixture anyone can capture.

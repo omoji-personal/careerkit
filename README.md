@@ -88,6 +88,22 @@ the second list, or an exciting company will fill your report with roles you hav
 no real chance at. To change what surfaces, change that file, usually by asking
 Claude to run `/criteria`. Never by editing engine code.
 
+`hard_requirements` is different from both, and it reads only the posting's
+requirements section:
+
+```
+hard_requirements:
+  architect certification: ["/(application|system) architect/"]
+  platform developer ii:   ["platform developer ii"]
+  people management:       ["/direct reports/", "/manage a team of/"]
+```
+
+A match excludes the role and quotes the sentence responsible. It ignores the
+responsibilities section on purpose, because "you will work with our architects"
+is not a demand that you be one, and it ignores a gate the posting itself calls
+preferred. This is the rail that catches the requirement buried three screens
+into a job description, which is where most wasted applications come from.
+
 If a rule you wrote is unusable (an empty list item, a broken regex) the engine
 names what it ignored and carries on. In an exclusion list it stops the run
 instead: dropping an exclusion fails open, the rail disappears, and everything
@@ -163,6 +179,11 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py pull          # poll every board + feed, score, write a report
 ./careerkit.py rescore       # re-judge stored postings after a criteria change
 ./careerkit.py doctor        # one check: profile, sources, freshness, drift
+./careerkit.py consistency   # does the report agree with the database it came from?
+./careerkit.py consistency --repair   # clear compensation that cannot be true
+./careerkit.py applied       # reconcile what you have applied to (see below)
+./careerkit.py applied --apply        # write the unambiguous matches
+./careerkit.py enrich        # fetch the full posting for rows that cannot be screened
 ./careerkit.py status        # what is in the database, which sources are broken
 ./careerkit.py audit         # show what the gates killed, and why
 ./careerkit.py report        # regenerate the latest report
@@ -184,6 +205,30 @@ postings are never stored, so `rescore` can only re-judge what survived. A chang
 to your **criteria** needs a `rescore`; a change to the **engine's rails** needs a
 `pull`, because the postings a rail used to reject are not in your database to
 re-judge.
+
+`applied` is how the tool learns what you have already done. Write one line of
+JSON per application to `profile/applications.jsonl`:
+
+```
+{"company": "Acme", "title": "Salesforce Admin", "status": "rejected", "on": "2026-08-05"}
+```
+
+`status` is applied, rejected, interviewing, offer or withdrawn, and `title` may
+be omitted when the confirmation email does not name the role. It never writes a
+status from a company match alone, because at an employer with several openings
+that marks the wrong one; those go to a review list instead. Once it knows, the
+report warns you when a live posting sits at an employer that already declined
+you. Claude can populate the file from your mail if you ask it to; the engine
+itself never touches your mailbox.
+
+`enrich` fetches the full posting for rows whose stored text has no requirements
+section. Aggregators carry a summary, and the part that decides whether you can
+do the job is frequently not in it. It only replaces a description when the
+fetch actually makes the row screenable.
+
+`consistency` asks whether the report you read agrees with the database that
+produced it. It exists because a row once said "Comp not stated" in its header
+and quoted a salary band on the line below.
 
 `doctor` is the one to run if something feels off. It checks that your profile
 parses, that no source has been failing repeatedly, that the last run finished and was recent, and that your database
