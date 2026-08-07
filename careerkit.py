@@ -548,6 +548,49 @@ def cmd_applied(args) -> None:
             print(f"  !  {d}")
 
 
+def cmd_enrich(args) -> None:
+    """Fetch the full posting for rows whose stored text cannot be screened.
+
+    Aggregator rows carry a summary. The part that decides whether you can do
+    the job lives in a Qualifications block the row frequently omits, and a rail
+    that cannot read its subject passes. In one real database 62 of 170 live
+    rows had no requirements section at all."""
+    from engine import jd as _jd
+    con = store.connect()
+    rows = con.execute(
+        "SELECT * FROM jobs WHERE gate IN ('QUALIFIED','VERIFY') AND status='new' "
+        "ORDER BY score DESC").fetchall()
+    todo = [(r, _jd.enrich_row(r)) for r in rows]
+    need = [(r, d) for r, d in todo if d["needed"]]
+    print(f"{len(rows)} live rows, {len(need)} without a readable requirements section.")
+    if not need:
+        return
+    limit = args.limit or len(need)
+    fetched = improved = 0
+    for r, d in need[:limit]:
+        text, src = _jd.fetch_canonical(r["url"])
+        fetched += 1
+        if not text:
+            print(f"  -  {r['company'][:24]:<24} {src}")
+            continue
+        gained = _jd.has_requirements(text) and not _jd.has_requirements(r["description"] or "")
+        # Only write when the fetch demonstrably makes the row screenable. Longer
+        # is not better: an early version replaced good 5,000 character postings
+        # with 20,000 characters of page furniture, which is a worse row wearing
+        # a bigger number.
+        if gained:
+            con.execute("UPDATE jobs SET description=? WHERE uid=?", (text[:20000], r["uid"]))
+            improved += 1
+            mark = "  +  " if gained else "  ~  "
+            print(f"{mark}{r['company'][:24]:<24} {len(r['description'] or ''):>5} -> "
+                  f"{len(text):>5} chars via {src}"
+                  + ("  (now has requirements)" if gained else ""))
+    con.commit()
+    print(f"\n{fetched} fetched, {improved} rows improved.")
+    if improved:
+        print("Run `rescore` to re-judge them against the fuller text.")
+
+
 def cmd_doctor(args) -> None:
     """One place that answers "is this thing working?".
 
@@ -888,6 +931,9 @@ def main() -> None:
 
     sp = sub.add_parser("doctor"); sp.set_defaults(fn=cmd_doctor)
 
+    sp = sub.add_parser("enrich"); sp.set_defaults(fn=cmd_enrich)
+    sp.add_argument("--limit", type=int, help="stop after N fetches")
+
     sp = sub.add_parser("applied"); sp.set_defaults(fn=cmd_applied)
     sp.add_argument("--file", help="default: profile/applications.jsonl")
     sp.add_argument("--apply", action="store_true", help="write the unambiguous matches")
@@ -915,7 +961,7 @@ def main() -> None:
     # Commands that write are serialized against each other; read-only ones stay
     # usable while a long pull is running.
     MUTATING = {"pull", "audit", "discover", "ingest-url", "ingest-urls",
-                "verify", "mark", "applied"}
+                "verify", "mark", "applied", "enrich"}
     try:
         if args.cmd in MUTATING:
             with store.RunLock():

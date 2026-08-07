@@ -2718,3 +2718,80 @@ def test_name_matching_asks_what_fraction_of_the_target_is_covered():
     assert _name_matches("Georgia-Pacific", "Georgia-Pacific LLC")
     assert _name_matches("Stripe", "Stripe")
     assert not _name_matches("Fisher Phillips", "FP Sp. z o.o.")
+
+
+# --------------------------------------------------------------------------
+# jd: read the requirements, not the responsibilities
+# --------------------------------------------------------------------------
+
+def test_a_gate_in_the_requirements_blocks_but_the_same_words_in_duties_do_not():
+    """Four roles were recommended on their titles in one day and every one died
+    in a requirements block: an architect credential, a Platform Developer II,
+    ten years plus direct reports. "You will partner with our system architects"
+    is not a demand that you be one, and matching it anywhere in the body is how
+    a good posting gets discarded instead."""
+    import re as _re
+    from engine import jd
+    pats = {"architect certification": _re.compile(r"(application|system) architect", _re.I),
+            "platform developer ii": _re.compile(r"platform developer ii", _re.I)}
+
+    blocked = """Responsibilities
+- Partner with our system architects on design
+
+Minimum Qualifications
+- Salesforce Application Architect certification required
+- Platform Developer II
+"""
+    labels = [lab for lab, _ in jd.hard_requirements(blocked, pats)]
+    assert "architect certification" in labels and "platform developer ii" in labels
+
+    fine = """Responsibilities
+- Partner with our system architects on design
+
+Minimum Qualifications
+- 3 years of Salesforce administration
+"""
+    assert jd.hard_requirements(fine, pats) == []
+
+
+def test_a_requirement_the_posting_calls_preferred_is_not_a_gate():
+    import re as _re
+    from engine import jd
+    pats = {"platform developer ii": _re.compile(r"platform developer ii", _re.I)}
+    text = """Minimum Qualifications
+- Platform Developer II certification preferred, not required
+"""
+    assert jd.hard_requirements(text, pats) == []
+
+
+def test_enrichment_prefers_structured_markup_over_stripping_a_page():
+    """An early version stripped the whole page and replaced good 5,000
+    character postings with 20,000 characters of navigation and footer, which is
+    a worse row wearing a bigger number. schema.org JobPosting markup carries the
+    description and nothing else."""
+    from engine import jd
+    page = ('<html><head><script type="application/ld+json">'
+            '{"@context":"https://schema.org/","@type":"JobPosting",'
+            '"title":"Admin","description":"<p>Minimum Qualifications</p>'
+            '<ul><li>3 years of Salesforce</li></ul>"}'
+            '</script></head><body>' + ("nav " * 3000) + '</body></html>')
+    text = jd._from_jsonld(page)
+    assert "Minimum Qualifications" in text
+    assert "nav" not in text
+    assert len(text) < 200
+
+
+def test_a_page_without_markup_yields_nothing_rather_than_chrome():
+    from engine import jd
+    assert jd._from_jsonld("<html><body>" + ("nav " * 3000) + "</body></html>") == ""
+
+
+def test_enrich_row_skips_what_it_cannot_improve(db):
+    from engine import jd, store
+    have = J(company="A", title="Admin", url="https://x/1",
+             description="Minimum Qualifications\n- 3 years of Salesforce\n" + "d" * 300)
+    thin = J(company="B", title="Admin", url="https://x/2", description="short blurb")
+    store.upsert(db, [have, thin])
+    rows = {r["company"]: r for r in db.execute("SELECT * FROM jobs")}
+    assert jd.enrich_row(rows["A"])["needed"] is False
+    assert jd.enrich_row(rows["B"])["needed"] is True

@@ -172,6 +172,11 @@ PROFILE_SCHEMA: dict = {
     "exclusions": {"titles": list, "titles_always": list, "products": list, "certs_refused": list,
                    "body_patterns": list, "competing_platforms": list,
                    "clearance": bool, "quota": bool, "companies": list},
+    # Gates read from a posting's REQUIREMENTS section only, never from its
+    # responsibilities. "You will work with our architects" is not a demand that
+    # you be one, and matching it anywhere in the body is how a good posting gets
+    # discarded. Each entry is a label mapped to a list of phrases.
+    "hard_requirements": dict,
     "lanes": list, "dream_lanes": list, "dream_companies": list,
     "search_terms": list, "lane_title_context": dict, "signals": list,
     "domain_terms": list, "notes": str,
@@ -343,6 +348,7 @@ class Profile:
     slot_block_always: re.Pattern | None = None
     products_block: re.Pattern | None = None
     certs_refused: re.Pattern | None = None
+    hard_requirements: dict = field(default_factory=dict)
     body_blocks: list[tuple[re.Pattern, str]] = field(default_factory=list)
     competing: re.Pattern | None = None
     domain_terms: re.Pattern | None = None
@@ -416,6 +422,23 @@ class Profile:
             p.certs_refused = re.compile(
                 r"\b(" + alt + r")\b.{0,40}\b(required|must have|require|certification required)\b|"
                 r"\b(required|must have)\b.{0,40}\b(" + alt + r")\b", re.I)
+        # hard_requirements: label -> phrases the candidate cannot satisfy.
+        # Same strict treatment: dropping one silently reopens a gate.
+        hr_raw = cfg.get("hard_requirements") or {}
+        if not isinstance(hr_raw, dict):
+            raise ProfileError("hard_requirements must be a mapping of label to phrases")
+        for label, phrases in hr_raw.items():
+            kept = [str(x).strip() for x in (phrases or []) if x is not None and str(x).strip()]
+            if phrases and len(kept) != len(phrases):
+                raise ProfileError(
+                    f"hard_requirements.{label}: blank or null entries in a gate "
+                    f"list. Remove them in profile/profile.yaml and re-run.")
+            if kept:
+                pat = _compile_alt(kept, where=f"hard_requirements.{label}",
+                                   strict=True)
+                if pat is not None:
+                    p.hard_requirements[str(label)] = pat
+
         # body_patterns is a hard kill rail (a match sets EXCLUDED), so it gets
         # the same strict treatment as the other exclusion lists. It did not,
         # which made the documented "an exclusion never fails open" guarantee
@@ -782,6 +805,19 @@ def score(job: Job, p: Profile) -> Job:
         if m:
             job.gate, job.score = "EXCLUDED", base
             job.reasons = [f"clearance-gated: {_sentence_around(text, m)!r}"]
+            return job
+
+    # Gates the candidate cannot clear, read from the REQUIREMENTS section only.
+    # Four roles were recommended on their titles in one day and every one died
+    # here: an architect credential, a Platform Developer II, ten years plus
+    # direct reports. The rails could not see any of it because the gate lives in
+    # a section the feed row did not carry, and a rail that cannot read its
+    # subject passes.
+    if p.hard_requirements and not exempt:
+        from .jd import hard_requirements as _hard
+        for label, sentence in _hard(job.description or "", p.hard_requirements):
+            job.gate, job.score = "EXCLUDED", base
+            job.reasons = [f"requirement not met ({label}): {sentence!r}"]
             return job
 
     # --- domain evidence -------------------------------------------------
