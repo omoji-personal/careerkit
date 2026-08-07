@@ -1,0 +1,354 @@
+{
+ "offers": [
+  {
+   "options_cv": "required",
+   "position": 243,
+   "max_hours_per_week": "40",
+   "employment_type_code": "fulltime_permanent",
+   "locations_question_required": true,
+   "min_hours": 40,
+   "category_code": "accountancy",
+   "locations_question_type": "multiple_choice",
+   "experience_code": "experienced",
+   "state_name": "Berlin",
+   "careers_apply_url": "https://jobs.acme.com/o/senior-financial-accountant-fmd-berlinbrandenburg-region-germany/c/new",
+   "max_hours": 40,
+   "salary": {
+    "max": "75000",
+    "min": "60000",
+    "period": "year",
+    "currency": "EUR"
+   },
+   "created_at": "2026-08-05 09:41:37 UTC",
+   "options_cover_letter": "optional",
+   "translations": {
+    "en": {
+     "description": "<p><strong>How you will make an impact</strong></p><p style=\"text-align:start;\">As our&nbsp;<strong>(Senior) Financial Accountant, </strong>you<strong>&nbsp;</strong>will be part of the Finance Team and report to the VP of Finance &amp; Legal. You will be expected to proactively and continuously develop existing accounting processes and participate in projects to automate our accounting processes and make them more efficient. You will be interacting closely with your teammates from various departments on topics such as invoice approvals, company expenses, and debt collection. The Finance team is responsible for the company\u2019s financial affairs and legal matters.</p><p style=\"min-height: 1.7em;\"></p><p><strong>Some of your tasks and responsibilities include</strong></p><ul><li><p>Record monthly journal entries based on German GAAP/HGB (accounts payable, accounts receivable, and general ledger accounts).</p></li><li><p>Maintenance of master data as well as reconciliation and management of AP and AR accounts.</p></li><li><p>Full ownership of the DATEV general ledger infrastructure, maximizing DATEV Unternehmen Online workflows/interfaces, and managing automated transaction pipelines.</p></li><li><p>Account monitoring and processing of open items lists and processing of provisions and accrual/deferral bookings.</p></li><li><p>Payment transactions, creation of payment runs, and operational liquidity management, working closely with our FP&amp;A / Financial Controlling department.</p></li><li><p>Independent execution of monthly closing activities.</p></li><li><p>Preparation of annual financial statements in coordination with our tax advisors, execution of year-end closing entries alongside the tax advisor, and preparation of corresponding documentation.</p></li><li><p>Accompanying the annual audit and main point of contact for all accounting-related inquiries.</p></li><li><p>Handles the preparation and submission of VAT, EC Sales List (ZM), and OSS tax returns.</p></li><li><p>Implementation of new processes and optimization of existing workflows in financial accounting, including execution of automation projects (e.g., using AI tools).</p></li><li><p>Works closely with our FP&amp;A / Financial Controlling team members for monthly reporting and ad-hoc financial projects.</p></li></ul>",
+     "title": "(Senior) Financial Accountant (f/m/d) - Berlin/Brandenburg Region, Germany",
+     "highlight": null,
+     "requirements": "<p><strong>What we expect from you</strong></p><ul><li><p>5+ years of relevant professional experience in financial accounting, with a strong focus on monthly closing activities and German Commercial Code (HGB) accounting standards.</p></li><li><p>Expert knowledge of DATEV as well as a proven track record in optimizing and automating accounting processes (e.g., DATEV interfaces, document workflows).</p></li><li><p>Ability to independently design, implement, and monitor complex internal control systems (ICS / IKS).</p></li><li><p>Strong proficiency in Google Workspace applications and Microsoft Office, particularly Google Sheets and MS Excel.</p></li><li><p>Excellent command of German and proficient in English, with the ability to serve as a skilled main point of contact for FP&amp;A and external tax advisors.</p></li><li><p>Startup experience or background in a fast-paced environment preferred, alongside a genuine interest in new processes and modern ways of working. Ability to learn quickly and work effectively with others in a fast-moving setup.</p></li><li><p>A reliable, structured working style and a strong sense of ownership for your assigned areas of work.</p></li><li><p>Able to come into the office 2 days per week, or 3 when needed. We're centrally located, close to Hackescher Markt.</p></li></ul><p style=\"min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>The process</strong></p><ul><li><p>Intro call with our People Team</p></li><li><p>Hiring Manager Interview</p></li><li><p>Optional Case study or an accounting test</p></li><li><p>Team fit call</p></li><li><p>Job offer</p></li></ul><p style=\"text-align:start;\">The response time after application, screening applications, and setting up the first intro call is usually within 1-2 weeks. You could expect some alterations when necessary.</p><p style=\"min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>About us</strong></p><p class=\"p1\" style=\"text-align:start;\">Acme is a dynamic Berlin-based startup that empowers thousands of developers and content teams to create dynamic digital experiences that effortlessly engage their customers. Acme is on a mission to eliminate complexity for global teams and help them scale content without friction. Our platform empowers you to create, deliver, and distribute content faster and at scale. We\u2019re a team committed to shaping the future of AI-powered content platforms. We are trusted to manage content for teams from over 50,000 organisations, like Dr. Oetker, Shure, Samsung, Ashley Furniture, Telenor, Philips, and Gamescom.</p><p class=\"p2\" style=\"text-align:start;min-height: 1.7em;\"></p><p class=\"p1\" style=\"text-align:start;\">You will be part of a remote-first, hybrid, and globally distributed team that is committed to working collaboratively, transparently, and passionately. We believe in a remote-first approach where everyone is encouraged to do their best from wherever they are and work together with transparency, accountability, and ownership. We learn continuously through feedback and have a yearly learning budget to attend training and conferences.</p><p style=\"text-align:start;min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>Note:</strong> We are fortunate to receive a large number of applications for our roles. To manage this effectively and give each application the attention it deserves, we use AI-assisted tools to help assess certain screening questions and handle application elements. This helps us ensure a consistent and timely review process. All final hiring decisions are made exclusively by our human recruitment team.</p><p style=\"text-align:start;\"><em><br>Acme is an equal opportunity employer committed to hiring people with diverse backgrounds. We believe that diversity, unique experiences, qualities, and different cultures enrich our workspace's productivity and promote innovation and creativity.</em></p>",
+     "sharing_image": null,
+     "sharing_title": "We are hiring a (Senior) Financial Accountant in Berlin",
+     "sharing_description": "How you will make an impactAs our\u00a0(Senior) Financial Accountant, you\u00a0will be part of the Finance Team and report to the VP of Finance &amp; Legal. You will be expected to proactively and continuously ",
+     "locations_question": "What is your preferred work location?"
+    }
+   },
+   "guid": "e4u78",
+   "slug": "senior-financial-accountant-fmd-berlinbrandenburg-region-germany",
+   "hybrid": true,
+   "options_photo": "off",
+   "department": "Finance",
+   "sharing_description": "How you will make an impactAs our\u00a0(Senior) Financial Accountant, you\u00a0will be part of the Finance Team and report to the VP of Finance &amp; Legal. You will be expected to proactively and continuously ",
+   "title": "(Senior) Financial Accountant (f/m/d) - Berlin/Brandenburg Region, Germany",
+   "education_code": "vocational",
+   "locations": [
+    {
+     "id": 29287,
+     "name": "Berlin",
+     "state": "Berlin",
+     "country": "Germany",
+     "city": "Berlin",
+     "translations": {
+      "en": {
+       "name": "Berlin",
+       "city": "Berlin",
+       "postal_code": "10178",
+       "street": "Dircksenstra\u00dfe 47",
+       "note": "We are ideally looking for someone in Berlin, Germany, but we are also open to hiring someone working remotely within the European Region. "
+      }
+     },
+     "country_code": "DE",
+     "state_code": "BE",
+     "postal_code": "10178",
+     "street": "Dircksenstra\u00dfe 47",
+     "note": "We are ideally looking for someone in Berlin, Germany, but we are also open to hiring someone working remotely within the European Region. "
+    }
+   ],
+   "postal_code": "10178",
+   "city": "Berlin",
+   "options_salutation": "off",
+   "published_at": "2026-08-05 10:10:39 UTC",
+   "sharing_image": null,
+   "on_site": false,
+   "updated_at": "2026-08-05 11:45:30 UTC",
+   "country": "Germany",
+   "careers_url": "https://jobs.acme.com/o/senior-financial-accountant-fmd-berlinbrandenburg-region-germany",
+   "dynamic_fields": [],
+   "description": "<p><strong>How you will make an impact</strong></p><p style=\"text-align:start;\">As our&nbsp;<strong>(Senior) Financial Accountant, </strong>you<strong>&nbsp;</strong>will be part of the Finance Team and report to the VP of Finance &amp; Legal. You will be expected to proactively and continuously develop existing accounting processes and participate in projects to automate our accounting processes and make them more efficient. You will be interacting closely with your teammates from various departments on topics such as invoice approvals, company expenses, and debt collection. The Finance team is responsible for the company\u2019s financial affairs and legal matters.</p><p style=\"min-height: 1.7em;\"></p><p><strong>Some of your tasks and responsibilities include</strong></p><ul><li><p>Record monthly journal entries based on German GAAP/HGB (accounts payable, accounts receivable, and general ledger accounts).</p></li><li><p>Maintenance of master data as well as reconciliation and management of AP and AR accounts.</p></li><li><p>Full ownership of the DATEV general ledger infrastructure, maximizing DATEV Unternehmen Online workflows/interfaces, and managing automated transaction pipelines.</p></li><li><p>Account monitoring and processing of open items lists and processing of provisions and accrual/deferral bookings.</p></li><li><p>Payment transactions, creation of payment runs, and operational liquidity management, working closely with our FP&amp;A / Financial Controlling department.</p></li><li><p>Independent execution of monthly closing activities.</p></li><li><p>Preparation of annual financial statements in coordination with our tax advisors, execution of year-end closing entries alongside the tax advisor, and preparation of corresponding documentation.</p></li><li><p>Accompanying the annual audit and main point of contact for all accounting-related inquiries.</p></li><li><p>Handles the preparation and submission of VAT, EC Sales List (ZM), and OSS tax returns.</p></li><li><p>Implementation of new processes and optimization of existing workflows in financial accounting, including execution of automation projects (e.g., using AI tools).</p></li><li><p>Works closely with our FP&amp;A / Financial Controlling team members for monthly reporting and ad-hoc financial projects.</p></li></ul>",
+   "locations_question": "What is your preferred work location?",
+   "country_code": "DE",
+   "requirements": "<p><strong>What we expect from you</strong></p><ul><li><p>5+ years of relevant professional experience in financial accounting, with a strong focus on monthly closing activities and German Commercial Code (HGB) accounting standards.</p></li><li><p>Expert knowledge of DATEV as well as a proven track record in optimizing and automating accounting processes (e.g., DATEV interfaces, document workflows).</p></li><li><p>Ability to independently design, implement, and monitor complex internal control systems (ICS / IKS).</p></li><li><p>Strong proficiency in Google Workspace applications and Microsoft Office, particularly Google Sheets and MS Excel.</p></li><li><p>Excellent command of German and proficient in English, with the ability to serve as a skilled main point of contact for FP&amp;A and external tax advisors.</p></li><li><p>Startup experience or background in a fast-paced environment preferred, alongside a genuine interest in new processes and modern ways of working. Ability to learn quickly and work effectively with others in a fast-moving setup.</p></li><li><p>A reliable, structured working style and a strong sense of ownership for your assigned areas of work.</p></li><li><p>Able to come into the office 2 days per week, or 3 when needed. We're centrally located, close to Hackescher Markt.</p></li></ul><p style=\"min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>The process</strong></p><ul><li><p>Intro call with our People Team</p></li><li><p>Hiring Manager Interview</p></li><li><p>Optional Case study or an accounting test</p></li><li><p>Team fit call</p></li><li><p>Job offer</p></li></ul><p style=\"text-align:start;\">The response time after application, screening applications, and setting up the first intro call is usually within 1-2 weeks. You could expect some alterations when necessary.</p><p style=\"min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>About us</strong></p><p class=\"p1\" style=\"text-align:start;\">Acme is a dynamic Berlin-based startup that empowers thousands of developers and content teams to create dynamic digital experiences that effortlessly engage their customers. Acme is on a mission to eliminate complexity for global teams and help them scale content without friction. Our platform empowers you to create, deliver, and distribute content faster and at scale. We\u2019re a team committed to shaping the future of AI-powered content platforms. We are trusted to manage content for teams from over 50,000 organisations, like Dr. Oetker, Shure, Samsung, Ashley Furniture, Telenor, Philips, and Gamescom.</p><p class=\"p2\" style=\"text-align:start;min-height: 1.7em;\"></p><p class=\"p1\" style=\"text-align:start;\">You will be part of a remote-first, hybrid, and globally distributed team that is committed to working collaboratively, transparently, and passionately. We believe in a remote-first approach where everyone is encouraged to do their best from wherever they are and work together with transparency, accountability, and ownership. We learn continuously through feedback and have a yearly learning budget to attend training and conferences.</p><p style=\"text-align:start;min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>Note:</strong> We are fortunate to receive a large number of applications for our roles. To manage this effectively and give each application the attention it deserves, we use AI-assisted tools to help assess certain screening questions and handle application elements. This helps us ensure a consistent and timely review process. All final hiring decisions are made exclusively by our human recruitment team.</p><p style=\"text-align:start;\"><em><br>Acme is an equal opportunity employer committed to hiring people with diverse backgrounds. We believe that diversity, unique experiences, qualities, and different cultures enrich our workspace's productivity and promote innovation and creativity.</em></p>",
+   "company_name": "Acme",
+   "tags": [],
+   "remote": false,
+   "state_code": "BE",
+   "id": 2700825,
+   "location": "Berlin, Berlin, Germany",
+   "open_questions": [
+    {
+     "id": 4288234,
+     "position": 1,
+     "options": {},
+     "required": true,
+     "body": "Are you fluent in German?",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Are you fluent in German?"
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4288235,
+     "position": 2,
+     "options": {},
+     "required": true,
+     "body": "Do you have 5+ years of experience in financial accounting with a strong focus on monthly closing activities according to HGB accounting standards?",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Do you have 5+ years of experience in financial accounting with a strong focus on monthly closing activities according to HGB accounting standards?"
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4288241,
+     "position": 3,
+     "options": {},
+     "required": true,
+     "body": "Are you experienced in implementing new processes and optimizing existing workflows?",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Are you experienced in implementing new processes and optimizing existing workflows?"
+      }
+     },
+     "open_question_options": []
+    }
+   ],
+   "cover_image": null,
+   "highlight": null,
+   "mailbox_email": "job.e4u78@acme.recruitee.com",
+   "sharing_title": "We are hiring a (Senior) Financial Accountant in Berlin",
+   "options_phone": "required",
+   "status": "published",
+   "options_title": "off",
+   "location_question_visible": false,
+   "min_hours_per_week": "40",
+   "close_at": null
+  },
+  {
+   "options_cv": "required",
+   "position": 207,
+   "max_hours_per_week": "40",
+   "employment_type_code": "fulltime_permanent",
+   "locations_question_required": true,
+   "min_hours": 40,
+   "category_code": "internet",
+   "locations_question_type": "multiple_choice",
+   "experience_code": "mid_level",
+   "state_name": "Berlin",
+   "careers_apply_url": "https://jobs.acme.com/o/partner-development-representative-fmd-berlin-germany/c/new",
+   "max_hours": 40,
+   "salary": {
+    "max": "90000",
+    "min": "75000",
+    "period": "year",
+    "currency": "EUR"
+   },
+   "created_at": "2026-07-31 14:40:34 UTC",
+   "options_cover_letter": "off",
+   "translations": {
+    "en": {
+     "description": "<p><strong>How you will make an impact</strong></p><p>Acme grows through its agency partners via the web development, AI transformation, and digital experience shops across Europe who build on us, recommend us, and bring us into deals with brands you know: Dr. Oetker, Samsung, LEGO, Paramount, and many more. One good agency partner is worth more than a thousand cold sequences. </p><p style=\"min-height: 1.7em;\"></p><p>And we're not looking for agencies that build brochure sites. We're focused on finding partners solving use cases beyond traditional CMS, co-developing solutions the market hasn't seen before. The real opportunity is empowering partners to deliver forward-thinking, future-proof outcomes for their clients, with Acme as the engine underneath. This role exists to find those partners, bring them on board, and turn them into a reliable pipeline. </p><p style=\"min-height: 1.7em;\"></p><p>You report directly to the Global Sales Director. You'll feed 3 Account Executives and a Solutions Engineer, and work alongside two others on the partnerships team who've been building this ecosystem and will share everything they know. Ideas and initiative to improve our partner acquisition processes are more than welcome and get rewarded here.</p><p style=\"min-height: 1.7em;\"></p><p><strong>Some of your tasks and responsibilities include</strong></p><ul><li><p><strong>Find and sign partners: </strong>You'll source (outbound) new agency partners across Europe and beyond; web development shops, digital agencies, CMS specialists. Calls, events, communities, referrals, whatever works. This is signals-based outreach, not list-blasting. You reach out because something tells you the timing is right: a tech stack change, a new client win, a hire, a talk someone gave. Every touch has a reason behind it. </p><p>You'll also build the systems that tell you whether it's working. Nobody here will hand you a dashboard, and nobody will accept \u201cI think it's going well\u201d either. When something works, you make it repeatable. When it doesn't, you stop it quickly and try the next thing. </p></li></ul><ul><li><p><strong>Convert inbound:</strong> Warm leads come in. Your job is making sure the good ones quickly become real opportunities for our AEs. You'll be rewarded for conversion.</p></li></ul><p><strong>What you will not do</strong>: Completely cold outbound to end buyers.</p><p style=\"min-height: 1.7em;\"></p><p><strong>What great looks like</strong></p><ul><li><p><strong>Month 1:</strong> You're booking and taking partner calls on your own (we hire people who ramp quickly). Your MQL response time is in minutes, not hours.&nbsp;</p></li><li><p><strong>Month 3:</strong> You've found at least one acquisition motion that works and made it repeatable. And, you've lifted lead conversion at least 10% above the baseline you inherited.</p></li><li><p><strong>Month 6:</strong> You're running partners end to end, from acquisition through to management. When your partners have a deal, a question, or a problem, you're the person they go to directly.</p></li></ul><p style=\"min-height: 1.7em;\"></p><p><strong>Three main outcomes:</strong></p><ul><li><p><strong>Partner-sourced pipeline:</strong> the deals your partners bring in.</p></li><li><p><strong>Partner-sourced revenue:</strong> signing partners means nothing on its own; revenue from the partners you work with means everything.</p></li><li><p><strong>Lead-to-opportunity conversion rate:</strong> the inbound and signals-based outbound you touch converts, or you have ideas on how to fix it.</p><p>Meet these and uncapped means uncapped!</p><p style=\"min-height: 1.7em;\"></p></li></ul><p><strong>Your path to promotion</strong></p><p>When you have so many partners producing pipeline that you no longer have time to prospect, you become Partner Manager, and we backfill your seat. That's the milestone. Not tenure, not a headcount cycle, not politics. You control how fast that happens by how well you build.</p>",
+     "title": "Partner Development Representative (f/m/d) - Berlin, Germany",
+     "highlight": null,
+     "requirements": "<p><strong>What we expect from you:</strong></p><p>We don't care how many years you've done this. We care whether you have the right attitude and technical acumen:</p><ul><li><p>You have resilience and follow-through. It's not always going to be easy, but you need the mindset to bounce back and keep going.</p></li><li><p>You act before anyone asks. If you spot a gap, you're already halfway through fixing it by the time you mention it.</p></li><li><p>When something doesn't work, your instinct is to redesign it, not to explain it.</p></li><li><p>You raise the point that needs raising, even when it's easier not to.</p></li><li><p>You do what you said you'd do, when you said you'd do it. Every time.</p></li><li><p>You've figured out something clever that nobody told you to figure out, and you can tell us a story about the impact it had.</p></li></ul><p style=\"min-height: 1.7em;\"></p><p><strong>Requirements that are actually requirements: </strong>fluent German and English (other languages a plus), based in or willing to be in Berlin weekly, and eligible to work in Germany. You know Clay, or you can show us you'll learn it quickly in your first weeks. We call people here (we run Nooks); comfort picking up the phone is essential to this role.</p><p style=\"min-height: 1.7em;\"></p><p><strong>The process and how to apply</strong></p><p>Skip the cover letter. Instead, send <a rel=\"noopener\" target=\"_blank\" href=\"mailto:dan@acme.com\">dan@acme.com</a> an email and one paragraph on something you figured out that nobody asked you to: a process you fixed, a motion you invented, or an outcome you delivered. That paragraph is the interview before the interview. Hint: AI-slop is not looked upon favorably.</p><p style=\"min-height: 1.7em;\"></p><p><strong>The process</strong></p><ol><li><p>Apply with the link, and send a paragraph to the hiring manager, Dan</p></li><li><p>Intro call with our People Team</p></li><li><p>Hiring Manager (Director of Sales) interview</p></li><li><p>Case study plus debriefing call with our Sales &amp; Partnerships teams</p></li><li><p>Team fit call &amp; reference check</p></li><li><p>Job offer</p></li></ol><p>The response time after application, screening applications, and setting up the first intro call is usually within 1-2 weeks. You could expect some alterations when necessary.</p><p style=\"min-height: 1.7em;\"></p><p><strong>Additional details about the Package</strong></p><ul><li><p>\u20ac75\u201390k OTE, uncapped (yes, uncapped)</p></li><li><p>Remote-first, Berlin office minimum once a week</p></li><li><p>Europe-focused territory, with occasional support for other non-Americas regions</p></li></ul><p style=\"text-align:start;min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>About us</strong></p><p class=\"p1\" style=\"text-align:start;\">Acme is a dynamic Berlin-based startup that empowers thousands of developers and content teams to create dynamic, agentic, digital experiences that effortlessly engage their customers. Acme is on a mission to eliminate complexity for global teams and help them scale content without friction. Our platform empowers you to create, deliver, and distribute content faster and at scale. We\u2019re a team committed to shaping the future of AI-powered content platforms. We are trusted to manage content for teams from over 50,000 organisations, like Dr. Oetker, Shure, Samsung, Ashley Furniture, Telenor, Philips, and Gamescom.</p><p class=\"p2\" style=\"text-align:start;min-height: 1.7em;\"></p><p class=\"p1\" style=\"text-align:start;\">You will be part of a remote-first and globally distributed team that is committed to working collaboratively, transparently, and passionately. We believe in a remote-first approach where everyone is encouraged to do their best from wherever they are and work together with transparency, accountability, and ownership. We learn continuously through feedback and have a yearly learning budget to attend training and conferences.</p><p style=\"text-align:start;min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>Note:</strong> We are fortunate to receive a large number of applications for our roles. To manage this effectively and give each application the attention it deserves, we use AI-assisted tools to help assess certain screening questions and handle application elements. This helps us ensure a consistent and timely review process. All final hiring decisions are made exclusively by our human recruitment team.</p><p style=\"text-align:start;\"><em><br>Acme is an equal opportunity employer committed to hiring people with diverse backgrounds. We believe that diversity, unique experiences, qualities, and different cultures enrich our workspace's productivity and promote innovation and creativity.</em></p>",
+     "sharing_image": null,
+     "sharing_title": "Partner Development Representative (f/m/d) - Berlin, Germany",
+     "sharing_description": "How you will make an impactAcme grows through its agency partners via the web development, AI transformation, and digital experience shops across Europe who build on us, recommend us, and bring us ",
+     "locations_question": "What is your preferred work location?"
+    }
+   },
+   "guid": "b5c95",
+   "slug": "partner-development-representative-fmd-berlin-germany",
+   "hybrid": true,
+   "options_photo": "off",
+   "department": "Sales",
+   "sharing_description": "How you will make an impactAcme grows through its agency partners via the web development, AI transformation, and digital experience shops across Europe who build on us, recommend us, and bring us ",
+   "title": "Partner Development Representative (f/m/d) - Berlin, Germany",
+   "education_code": "vocational",
+   "locations": [
+    {
+     "id": 29216,
+     "name": "Germany/Remote",
+     "state": "Berlin",
+     "country": "Germany",
+     "city": "Berlin",
+     "translations": {
+      "en": {
+       "name": "Germany/Remote",
+       "city": "Berlin",
+       "postal_code": "10178",
+       "street": "Dircksenstra\u00dfe 47",
+       "note": null
+      }
+     },
+     "country_code": "DE",
+     "state_code": "BE",
+     "postal_code": "10178",
+     "street": "Dircksenstra\u00dfe 47",
+     "note": null
+    }
+   ],
+   "postal_code": "10178",
+   "city": "Berlin",
+   "options_salutation": "off",
+   "published_at": "2026-07-31 22:26:40 UTC",
+   "sharing_image": null,
+   "on_site": false,
+   "updated_at": "2026-08-05 08:11:37 UTC",
+   "country": "Germany",
+   "careers_url": "https://jobs.acme.com/o/partner-development-representative-fmd-berlin-germany",
+   "dynamic_fields": [],
+   "description": "<p><strong>How you will make an impact</strong></p><p>Acme grows through its agency partners via the web development, AI transformation, and digital experience shops across Europe who build on us, recommend us, and bring us into deals with brands you know: Dr. Oetker, Samsung, LEGO, Paramount, and many more. One good agency partner is worth more than a thousand cold sequences. </p><p style=\"min-height: 1.7em;\"></p><p>And we're not looking for agencies that build brochure sites. We're focused on finding partners solving use cases beyond traditional CMS, co-developing solutions the market hasn't seen before. The real opportunity is empowering partners to deliver forward-thinking, future-proof outcomes for their clients, with Acme as the engine underneath. This role exists to find those partners, bring them on board, and turn them into a reliable pipeline. </p><p style=\"min-height: 1.7em;\"></p><p>You report directly to the Global Sales Director. You'll feed 3 Account Executives and a Solutions Engineer, and work alongside two others on the partnerships team who've been building this ecosystem and will share everything they know. Ideas and initiative to improve our partner acquisition processes are more than welcome and get rewarded here.</p><p style=\"min-height: 1.7em;\"></p><p><strong>Some of your tasks and responsibilities include</strong></p><ul><li><p><strong>Find and sign partners: </strong>You'll source (outbound) new agency partners across Europe and beyond; web development shops, digital agencies, CMS specialists. Calls, events, communities, referrals, whatever works. This is signals-based outreach, not list-blasting. You reach out because something tells you the timing is right: a tech stack change, a new client win, a hire, a talk someone gave. Every touch has a reason behind it. </p><p>You'll also build the systems that tell you whether it's working. Nobody here will hand you a dashboard, and nobody will accept \u201cI think it's going well\u201d either. When something works, you make it repeatable. When it doesn't, you stop it quickly and try the next thing. </p></li></ul><ul><li><p><strong>Convert inbound:</strong> Warm leads come in. Your job is making sure the good ones quickly become real opportunities for our AEs. You'll be rewarded for conversion.</p></li></ul><p><strong>What you will not do</strong>: Completely cold outbound to end buyers.</p><p style=\"min-height: 1.7em;\"></p><p><strong>What great looks like</strong></p><ul><li><p><strong>Month 1:</strong> You're booking and taking partner calls on your own (we hire people who ramp quickly). Your MQL response time is in minutes, not hours.&nbsp;</p></li><li><p><strong>Month 3:</strong> You've found at least one acquisition motion that works and made it repeatable. And, you've lifted lead conversion at least 10% above the baseline you inherited.</p></li><li><p><strong>Month 6:</strong> You're running partners end to end, from acquisition through to management. When your partners have a deal, a question, or a problem, you're the person they go to directly.</p></li></ul><p style=\"min-height: 1.7em;\"></p><p><strong>Three main outcomes:</strong></p><ul><li><p><strong>Partner-sourced pipeline:</strong> the deals your partners bring in.</p></li><li><p><strong>Partner-sourced revenue:</strong> signing partners means nothing on its own; revenue from the partners you work with means everything.</p></li><li><p><strong>Lead-to-opportunity conversion rate:</strong> the inbound and signals-based outbound you touch converts, or you have ideas on how to fix it.</p><p>Meet these and uncapped means uncapped!</p><p style=\"min-height: 1.7em;\"></p></li></ul><p><strong>Your path to promotion</strong></p><p>When you have so many partners producing pipeline that you no longer have time to prospect, you become Partner Manager, and we backfill your seat. That's the milestone. Not tenure, not a headcount cycle, not politics. You control how fast that happens by how well you build.</p>",
+   "locations_question": "What is your preferred work location?",
+   "country_code": "DE",
+   "requirements": "<p><strong>What we expect from you:</strong></p><p>We don't care how many years you've done this. We care whether you have the right attitude and technical acumen:</p><ul><li><p>You have resilience and follow-through. It's not always going to be easy, but you need the mindset to bounce back and keep going.</p></li><li><p>You act before anyone asks. If you spot a gap, you're already halfway through fixing it by the time you mention it.</p></li><li><p>When something doesn't work, your instinct is to redesign it, not to explain it.</p></li><li><p>You raise the point that needs raising, even when it's easier not to.</p></li><li><p>You do what you said you'd do, when you said you'd do it. Every time.</p></li><li><p>You've figured out something clever that nobody told you to figure out, and you can tell us a story about the impact it had.</p></li></ul><p style=\"min-height: 1.7em;\"></p><p><strong>Requirements that are actually requirements: </strong>fluent German and English (other languages a plus), based in or willing to be in Berlin weekly, and eligible to work in Germany. You know Clay, or you can show us you'll learn it quickly in your first weeks. We call people here (we run Nooks); comfort picking up the phone is essential to this role.</p><p style=\"min-height: 1.7em;\"></p><p><strong>The process and how to apply</strong></p><p>Skip the cover letter. Instead, send <a rel=\"noopener\" target=\"_blank\" href=\"mailto:dan@acme.com\">dan@acme.com</a> an email and one paragraph on something you figured out that nobody asked you to: a process you fixed, a motion you invented, or an outcome you delivered. That paragraph is the interview before the interview. Hint: AI-slop is not looked upon favorably.</p><p style=\"min-height: 1.7em;\"></p><p><strong>The process</strong></p><ol><li><p>Apply with the link, and send a paragraph to the hiring manager, Dan</p></li><li><p>Intro call with our People Team</p></li><li><p>Hiring Manager (Director of Sales) interview</p></li><li><p>Case study plus debriefing call with our Sales &amp; Partnerships teams</p></li><li><p>Team fit call &amp; reference check</p></li><li><p>Job offer</p></li></ol><p>The response time after application, screening applications, and setting up the first intro call is usually within 1-2 weeks. You could expect some alterations when necessary.</p><p style=\"min-height: 1.7em;\"></p><p><strong>Additional details about the Package</strong></p><ul><li><p>\u20ac75\u201390k OTE, uncapped (yes, uncapped)</p></li><li><p>Remote-first, Berlin office minimum once a week</p></li><li><p>Europe-focused territory, with occasional support for other non-Americas regions</p></li></ul><p style=\"text-align:start;min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>About us</strong></p><p class=\"p1\" style=\"text-align:start;\">Acme is a dynamic Berlin-based startup that empowers thousands of developers and content teams to create dynamic, agentic, digital experiences that effortlessly engage their customers. Acme is on a mission to eliminate complexity for global teams and help them scale content without friction. Our platform empowers you to create, deliver, and distribute content faster and at scale. We\u2019re a team committed to shaping the future of AI-powered content platforms. We are trusted to manage content for teams from over 50,000 organisations, like Dr. Oetker, Shure, Samsung, Ashley Furniture, Telenor, Philips, and Gamescom.</p><p class=\"p2\" style=\"text-align:start;min-height: 1.7em;\"></p><p class=\"p1\" style=\"text-align:start;\">You will be part of a remote-first and globally distributed team that is committed to working collaboratively, transparently, and passionately. We believe in a remote-first approach where everyone is encouraged to do their best from wherever they are and work together with transparency, accountability, and ownership. We learn continuously through feedback and have a yearly learning budget to attend training and conferences.</p><p style=\"text-align:start;min-height: 1.7em;\"></p><p style=\"text-align:start;\"><strong>Note:</strong> We are fortunate to receive a large number of applications for our roles. To manage this effectively and give each application the attention it deserves, we use AI-assisted tools to help assess certain screening questions and handle application elements. This helps us ensure a consistent and timely review process. All final hiring decisions are made exclusively by our human recruitment team.</p><p style=\"text-align:start;\"><em><br>Acme is an equal opportunity employer committed to hiring people with diverse backgrounds. We believe that diversity, unique experiences, qualities, and different cultures enrich our workspace's productivity and promote innovation and creativity.</em></p>",
+   "company_name": "Acme",
+   "tags": [],
+   "remote": false,
+   "state_code": "BE",
+   "id": 2697184,
+   "location": "Berlin, Berlin, Germany",
+   "open_questions": [
+    {
+     "id": 4281042,
+     "position": 1,
+     "options": {
+      "length": 120
+     },
+     "required": true,
+     "body": "When would you be able to start?\t",
+     "kind": "string",
+     "translations": {
+      "en": {
+       "body": "When would you be able to start?\t"
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4281046,
+     "position": 2,
+     "options": {},
+     "required": true,
+     "body": "Are you fluent in both German and English, spoken and written? ",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Are you fluent in both German and English, spoken and written? "
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4288528,
+     "position": 3,
+     "options": {},
+     "required": true,
+     "body": "Are you legally eligible to work in Germany without sponsorship?",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Are you legally eligible to work in Germany without sponsorship?"
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4288529,
+     "position": 4,
+     "options": {},
+     "required": true,
+     "body": "Are you based in Berlin, or willing to relocate and be in our Berlin office at least one day per week?",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "Are you based in Berlin, or willing to relocate and be in our Berlin office at least one day per week?"
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4288530,
+     "position": 5,
+     "options": {},
+     "required": true,
+     "body": "This role involves calling prospective partners daily, and the interview process includes a live call exercise. Are you comfortable with that?",
+     "kind": "boolean",
+     "translations": {
+      "en": {
+       "body": "This role involves calling prospective partners daily, and the interview process includes a live call exercise. Are you comfortable with that?"
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4288536,
+     "position": 6,
+     "options": {},
+     "required": true,
+     "body": "Which prospecting, enrichment, or outreach tools have you used, and what did you build inside them?",
+     "kind": "text",
+     "translations": {
+      "en": {
+       "body": "Which prospecting, enrichment, or outreach tools have you used, and what did you build inside them?"
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4282360,
+     "position": 7,
+     "options": {},
+     "required": true,
+     "body": "Paragraph on something you figured out that nobody asked you to (Limit it to 100 words only)",
+     "kind": "text",
+     "translations": {
+      "en": {
+       "body": "Paragraph on something you figured out that nobody asked you to (Limit it to 100 words only)"
+      }
+     },
+     "open_question_options": []
+    },
+    {
+     "id": 4281043,
+     "position": 8,
+     "options": {},
+     "required": true,
+     "body": "What is your salary expectation? (in OTE). The range mentioned in the job ad is the OTE. The base is between 50K Euros - 60K Euros per annum",
+     "kind": "string",
+     "translations": {
+      "en": {
+       "body": "What is your salary expectation? (in OTE). The range mentioned in the job ad is the OTE. The base is between 50K Euros - 60K Euros per annum"
+      }
+     },
+     "open_question_options": []
+    }
+   ],
+   "cover_image": null,
+   "highlight": null,
+   "mailbox_email": "job.b5c95@acme.recruitee.com",
+   "sharing_title": "Partner Development Representative (f/m/d) - Berlin, Germany",
+   "options_phone": "required",
+   "status": "published",
+   "options_title": "off",
+   "location_question_visible": false,
+   "min_hours_per_week": "40",
+   "close_at": null
+  }
+ ]
+}

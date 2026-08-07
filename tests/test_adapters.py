@@ -24,6 +24,9 @@ CASES = [
     ("lever", {"ats": "lever", "slug": "acme", "name": "Acme"}),
     ("ashby", {"ats": "ashby", "slug": "acme", "name": "Acme"}),
     ("smartrecruiters", {"ats": "smartrecruiters", "slug": "acme", "name": "Acme"}),
+    ("bamboohr", {"ats": "bamboohr", "slug": "acme", "name": "Acme"}),
+    ("rippling", {"ats": "rippling", "slug": "acme", "name": "Acme"}),
+    ("recruitee", {"ats": "recruitee", "slug": "acme", "name": "Acme"}),
 ]
 
 

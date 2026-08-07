@@ -1,0 +1,47 @@
+{
+ "meta": {
+  "totalCount": 3
+ },
+ "result": [
+  {
+   "id": "86",
+   "jobOpeningName": "Nurse Paralegal",
+   "departmentId": "18244",
+   "departmentLabel": "Legal",
+   "employmentStatusLabel": "Full Time",
+   "employmentType": null,
+   "location": {
+    "city": "Fort Lauderdale",
+    "state": "Florida"
+   },
+   "atsLocation": {
+    "country": null,
+    "state": null,
+    "province": null,
+    "city": null
+   },
+   "isRemote": null,
+   "locationType": "0"
+  },
+  {
+   "id": "87",
+   "jobOpeningName": "Marketing & Social Media Intern",
+   "departmentId": "18257",
+   "departmentLabel": "Marketing ",
+   "employmentStatusLabel": "Internship",
+   "employmentType": null,
+   "location": {
+    "city": "Fort Lauderdale",
+    "state": "Florida"
+   },
+   "atsLocation": {
+    "country": null,
+    "state": null,
+    "province": null,
+    "city": null
+   },
+   "isRemote": null,
+   "locationType": "0"
+  }
+ ]
+}
