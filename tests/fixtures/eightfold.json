@@ -1,0 +1,31 @@
+{
+  "domain": "albemarle.com",
+  "positions": [
+    {
+      "id": 1099555326551,
+      "name": "Supply Planner, Bromine S&OP",
+      "canonicalPositionUrl": "https://albemarle.eightfold.ai/careers/job/1099555326551",
+      "location": "Charlotte, North Carolina, United States of America",
+      "locations": [
+        "Charlotte, North Carolina, United States of America",
+        "Magnolia, Arkansas, United States of America"
+      ],
+      "job_description": "",
+      "t_create": 1785801600,
+      "department": "Supply Chain"
+    },
+    {
+      "id": 1099555208188,
+      "name": "Director, Media Relations and U.S. Public Affairs",
+      "canonicalPositionUrl": "https://albemarle.eightfold.ai/careers/job/1099555208188",
+      "location": "Charlotte, North Carolina, United States of America",
+      "locations": [
+        "Charlotte, North Carolina, United States of America",
+        "Kings Mountain, North Carolina, United States of America"
+      ],
+      "job_description": "",
+      "t_create": 1784851200,
+      "department": "Policy, Government, and Public Affairs"
+    }
+  ]
+}

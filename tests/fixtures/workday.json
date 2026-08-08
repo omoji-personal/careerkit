@@ -1,0 +1,21 @@
+{
+  "total": 2,
+  "jobPostings": [
+    {
+      "title": "Solution Architect / Senior Solution Architect - PubSec - SLED/NGO",
+      "externalPath": "/job/Virginia---Washington-DC-Metro---Remote/Solution-Architect---Senior-Solution-Architect---PubSec---SLED-NGO_JR354232",
+      "locationsText": "3 Locations",
+      "postedOn": "Posted Yesterday",
+      "bulletFields": ["JR354232"]
+    },
+    {
+      "title": "Customer Success Manager - Global Public Sector (State, Local Government and Education)",
+      "externalPath": "/job/Illinois---Chicago/Customer-Success-Manager---Global-Public-Sector--State---Local-Gov-_JR332446",
+      "locationsText": "5 Locations",
+      "postedOn": "Posted 3 Days Ago",
+      "bulletFields": ["JR332446"]
+    }
+  ],
+  "facets": [],
+  "userAuthenticated": false
+}

@@ -6,12 +6,15 @@
     ./careerkit.py pull --feeds        aggregator feeds only
     ./careerkit.py discover NAME [...] probe a company across every guessable ATS, register hits
     ./careerkit.py discover --file f   one company name per line
+    ./careerkit.py search              run the ATS-domain search matrix, register hits
+    ./careerkit.py queries             print that matrix for a better search tool
     ./careerkit.py verify              confirm each board belongs to the right company
     ./careerkit.py ingest-urls FILE    resolve pasted job URLs -> employers, register
     ./careerkit.py audit [--grep RX]   re-fetch + re-score, show every kill and why
     ./careerkit.py report [--format json|csv]   rebuild the report, or export rows
     ./careerkit.py rescore             re-judge stored postings after a criteria change
     ./careerkit.py doctor              one check: profile, sources, freshness, drift
+    ./careerkit.py tracker-sync        preview tracker/database differences; --apply writes
     ./careerkit.py status | mark UID STATUS
 """
 from __future__ import annotations
@@ -86,10 +89,26 @@ from engine.verify import verify_entry  # noqa: E402
 # REPO's profile. Silent, and exactly the wrong direction: the numbers looked
 # real because the postings were.
 ROOT = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent)
-PROFILE = ROOT / "profile" / "profile.yaml"
-EMPLOYERS = ROOT / "profile" / "employers.yaml"
-KEYS = ROOT / "profile" / "keys.yaml"
-TRACKER = ROOT / "profile" / "tracker.md"
+
+
+def _configured_path(name: str, default: Path) -> Path:
+    """One shared engine, without forcing every instance into one folder shape.
+
+    Public instances use profile/profile.yaml. The author's older personal
+    workspace predates that layout and keeps its profile, application evidence
+    and tracker in separate locations. Environment overrides let its launcher
+    delegate to this canonical CLI instead of maintaining a second, drifting
+    copy of every command.
+    """
+    return Path(os.environ.get(name) or default).expanduser()
+
+
+PROFILE = _configured_path("CAREERKIT_PROFILE", ROOT / "profile" / "profile.yaml")
+EMPLOYERS = _configured_path("CAREERKIT_EMPLOYERS", ROOT / "profile" / "employers.yaml")
+KEYS = _configured_path("CAREERKIT_KEYS", ROOT / "profile" / "keys.yaml")
+TRACKER = _configured_path("CAREERKIT_TRACKER", ROOT / "profile" / "tracker.md")
+APPLICATIONS = _configured_path("CAREERKIT_APPLICATIONS", PROFILE.parent / "applications.jsonl")
+CLAIMS = _configured_path("CAREERKIT_CLAIMS", PROFILE.parent / "claims.md")
 
 
 def load_yaml(p: Path, default):
@@ -102,12 +121,40 @@ def load_profile() -> Profile:
     if not PROFILE.exists():
         sys.exit("No profile yet. Run /setup in Claude Code first "
                  "(it interviews you and writes profile/profile.yaml).")
-    return Profile.load(PROFILE)
+    profile = Profile.load(PROFILE)
+    # Configure every user-dependent engine filter in one place. Commands used
+    # to remember different subsets, so `pull` had the right title terms while
+    # `search` reused module defaults and ignored the user's target metros.
+    aggregators.set_search_terms(profile.search_terms)
+    _adapters.set_relevance_terms(profile.relevance_terms)
+    _search.set_core_terms(profile.search_terms)
+    _search.set_geo_terms(profile.metros)
+    return profile
 
 
 def save_employers(data: dict) -> None:
     EMPLOYERS.parent.mkdir(parents=True, exist_ok=True)
-    EMPLOYERS.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+    rendered = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+    # Registry discovery is cumulative and expensive. A killed process between
+    # truncating employers.yaml and finishing write_text used to destroy it.
+    # Write beside the target, fsync, then atomically replace.
+    tmp = EMPLOYERS.with_name(f".{EMPLOYERS.name}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("w") as fh:
+            fh.write(rendered)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, EMPLOYERS)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _registry_key(entry: dict) -> str:
+    """Stable identity for one pollable board, including endpoint variants."""
+    return _adapters.board_id(entry)
 
 
 
@@ -118,9 +165,6 @@ def cmd_pull(args) -> None:
     while the loop was copied into both they drifted without a symptom."""
     _http.set_cache_enabled(not getattr(args, "no_cache", False))
     profile = load_profile()
-    aggregators.set_search_terms(profile.search_terms)
-    _adapters.set_relevance_terms(profile.relevance_terms)
-    _search.set_core_terms(profile.search_terms)
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     keys = load_yaml(KEYS, {})
     con = store.connect()
@@ -174,9 +218,6 @@ def cmd_audit(args) -> None:
     # expression statement rather than a docstring: --help showed nothing.
     _http.set_cache_enabled(not getattr(args, "no_cache", False))
     profile = load_profile()
-    aggregators.set_search_terms(profile.search_terms)
-    _adapters.set_relevance_terms(profile.relevance_terms)
-    _search.set_core_terms(profile.search_terms)
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     keys = load_yaml(KEYS, {})
     all_jobs = _pull.fetch_all(reg, keys, None, employers_only=args.employers,
@@ -208,7 +249,7 @@ def cmd_audit(args) -> None:
 
 def cmd_discover(args) -> None:
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
-    known = {(e.get("slug") or e.get("tenant"), e.get("ats")) for e in reg["employers"]}
+    known = {_registry_key(e) for e in reg["employers"]}
     known_names = {e["name"].lower() for e in reg["employers"]}
     names = list(args.names)
     if args.file:
@@ -229,8 +270,9 @@ def cmd_discover(args) -> None:
 
     for entry in discover_many(todo, lane=args.lane, tier=args.tier or "C",
                                on_result=on_result):
-        if (entry.get("slug") or entry.get("tenant"), entry["ats"]) not in known:
-            known.add((entry.get("slug") or entry.get("tenant"), entry["ats"]))
+        key = _registry_key(entry)
+        if key not in known:
+            known.add(key)
             reg["employers"].append(entry)
             found.append(entry)
     save_employers(reg)
@@ -249,6 +291,46 @@ def cmd_discover(args) -> None:
               f"(they use opaque tenant ids).\n"
               f"  If one of these is the employer's board, paste any posting URL:\n"
               f"    ./careerkit.py ingest-urls FILE")
+
+
+def cmd_search(args) -> None:
+    """Run the key-free ATS-domain matrix and retain every pollable board found.
+
+    Bing RSS is intentionally a shallow bootstrap, not the only discovery path.
+    The exact matrix is always written to out/search-queries.txt so a stronger
+    search tool can run it and feed URLs back through `ingest-urls`.
+    """
+    load_profile()  # sets title and metro terms used to construct the matrix
+    queries = _search.build_query_matrix(full=args.full)
+    if not queries:
+        sys.exit("No discovery queries can be built: add search_terms to your profile.")
+    print(f"Running {min(len(queries), args.limit or len(queries))} of "
+          f"{len(queries)} search queries...")
+    hits, stats = _search.run_matrix(queries, limit=args.limit)
+    live = sum(1 for n in stats.values() if n)
+    print(f"  {len(hits)} unique result(s) from {live}/{len(stats)} productive queries")
+
+    # Let _ingest construct each complete board config before deduplicating it.
+    # A Workday tenant can expose several sites; comparing only tenant + ATS
+    # silently dropped every site after the first.
+    urls = [h.url for h in hits if h.ats and h.slug]
+    added = _ingest(urls)
+
+    qpath = ROOT / "out" / "search-queries.txt"
+    qpath.parent.mkdir(parents=True, exist_ok=True)
+    qpath.write_text("\n".join(queries) + "\n")
+    print(f"Query matrix: {qpath}")
+    print(f"Search registered {len(added)} new employer(s). Bing RSS is shallow; "
+          "run the saved matrix through a stronger search tool for fuller coverage.")
+
+
+def cmd_queries(args) -> None:
+    """Print the current profile's ATS-domain discovery matrix."""
+    load_profile()
+    queries = _search.build_query_matrix(full=args.full)
+    if not queries:
+        sys.exit("No discovery queries can be built: add search_terms to your profile.")
+    print("\n".join(queries))
 
 
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
@@ -295,10 +377,10 @@ def cmd_ingest_urls(args) -> None:
     _ingest([l.strip() for l in path.read_text().splitlines() if l.strip()])
 
 
-def _ingest(raw_urls: list[str]) -> None:
+def _ingest(raw_urls: list[str]) -> list[dict]:
     reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
-    known = {(e.get("slug") or e.get("tenant"), e.get("ats")) for e in reg["employers"]}
-    added, skipped = 0, []
+    known = {_registry_key(e) for e in reg["employers"]}
+    added, skipped = [], []
     for raw in raw_urls:
         u, why = _safe_url(raw)
         if not u:
@@ -310,9 +392,6 @@ def _ingest(raw_urls: list[str]) -> None:
             # path dropped exactly the platforms resolve() cannot parse and the
             # user believed the employer had been registered.
             skipped.append((u, "no adapter recognises this URL shape"))
-            continue
-        if (h.slug, h.ats) in known:
-            skipped.append((u, f"already registered ({h.ats}:{h.slug})"))
             continue
         entry = {"name": h.company_guess or h.slug, "ats": h.ats, "slug": h.slug,
                  "lane": "url-ingested", "tier": "C", "active": True}
@@ -335,15 +414,21 @@ def _ingest(raw_urls: list[str]) -> None:
                                    f"{', '.join(missing)} added by hand in "
                                    f"profile/employers.yaml"))
                 continue
-        known.add((h.slug, h.ats))
+        key = _registry_key(entry)
+        if key in known:
+            skipped.append((u, f"already registered ({key})"))
+            continue
+        known.add(key)
         reg["employers"].append(entry)
-        added += 1
+        added.append(entry)
         print(f"  + {entry['name']:<34} {h.ats}:{h.slug}")
     save_employers(reg)
+    queue_discovered(added)
     for u, why in skipped:
         print(f"  - skipped: {why}\n      {u[:110]}")
-    print(f"\n{added} new employer(s) from {len(raw_urls)} URL(s); "
+    print(f"\n{len(added)} new employer(s) from {len(raw_urls)} URL(s); "
           f"{len(skipped)} skipped. Registry: {len(reg['employers'])}.")
+    return added
 
 
 def cmd_verify(args) -> None:
@@ -404,7 +489,7 @@ def cmd_claims_lint(args) -> None:
     not back. A cheap backstop for the truth rule, NOT a substitute for it."""
     from engine.claims import lint, format_report
     draft_p = Path(args.draft)
-    reg_p = Path(args.register) if args.register else PROFILE.parent / "claims.md"
+    reg_p = Path(args.register) if args.register else CLAIMS
     if not draft_p.exists():
         sys.exit(f"No such draft: {draft_p}")
     if not reg_p.exists():
@@ -501,7 +586,11 @@ def cmd_consistency(args) -> None:
         db_problems = _cons.check_db(con)
 
     if not db_problems and not rpt_problems:
-        print(f"Consistent. Database and {Path(rpt).name if rpt else 'report'} agree.")
+        if stale:
+            print("Database checks passed. The stale report was skipped; "
+                  "regenerate it before checking database-to-report agreement.")
+        else:
+            print(f"Consistent. Database and {Path(rpt).name if rpt else 'report'} agree.")
         return
     if db_problems:
         print(f"{len(db_problems)} problem(s) inside the database:")
@@ -530,7 +619,7 @@ def cmd_applied(args) -> None:
     openings that marks the wrong one."""
     from engine import applied as _applied
     con = store.connect()
-    path = Path(args.file) if args.file else (PROFILE.parent / "applications.jsonl")
+    path = Path(args.file) if args.file else APPLICATIONS
     ev = _applied.load_evidence(path)
     if not ev:
         print(f"No evidence file at {path}.")
@@ -540,9 +629,12 @@ def cmd_applied(args) -> None:
 
     res = _applied.reconcile(con, ev, apply=args.apply)
     for m in res["matched"]:
-        verb = "marked" if args.apply else "would mark"
+        verb = "recorded" if args.apply else "would record"
         print(f"  {verb} {m['status']:<13} {m['company'][:28]:<28} {m['matched_title'][:44]}")
         print(f"      ({m['confidence']})")
+        if m["db_status"] != m["status"]:
+            print(f"      database suppression status: {m['db_status']}; "
+                  f"full pipeline state remains in event history")
     for a in res["ambiguous"]:
         print(f"  ?  {a['company'][:28]:<28} {a.get('title') or '(role not named)'}")
         print(f"      {a['why']}; not written. Candidates:")
@@ -551,11 +643,15 @@ def cmd_applied(args) -> None:
     for u in res["unmatched"]:
         print(f"  -  {u['company'][:28]:<28} {u.get('title') or ''}")
         print(f"      {u['why']}")
+    for item in res["pending"]:
+        print(f"  ~  {item['status']:<13} {item.get('company', '')[:28]:<28} "
+              f"{item.get('title') or ''}")
+        print(f"      {item['why']}; not written")
     for pr in res["problems"]:
         print(f"  x  {pr}")
 
     print(f"\n{len(res['matched'])} matched, {len(res['ambiguous'])} ambiguous, "
-          f"{len(res['unmatched'])} unmatched.")
+          f"{len(res['unmatched'])} unmatched, {len(res['pending'])} pre-submission.")
     if res["matched"] and not args.apply:
         print("Nothing written. Re-run with --apply to record the matched ones.")
 
@@ -673,7 +769,11 @@ def cmd_doctor(args) -> None:
         problems.append(f"tracked as {sect} but still open in the database: "
                         f"{url[:60]} (mark {uid} applied)")
     for r in drift["missing_from_tracker"]:
-        notes.append(f"applied with no tracker entry: {r['company']} - {r['title']}")
+        notes.append(f"database application has no matching tracker URL: "
+                     f"{r['company']} - {r['title']}")
+    for item in drift["ambiguous_tracker_matches"]:
+        problems.append(f"tracker link matches {len(item['candidates'])} postings: "
+                        f"{item['tracker_url'][:60]} (run tracker-sync to review)")
 
     scrapers = [f["name"] for f in reg.get("feeds", [])
                 if f.get("active", True)
@@ -727,9 +827,17 @@ def cmd_status(args) -> None:
               f"since closed. Nothing to act on.)")
     if drift["missing_from_tracker"]:
         print(f"\n{len(drift['missing_from_tracker'])} application(s) in the database "
-              f"with no tracker.md entry (no date, contact, or resume version recorded):")
+              f"with no matching canonical URL in tracker.md (the narrative may already "
+              f"name them):")
         for r in drift["missing_from_tracker"][:15]:
             print(f"  {r['company']} - {r['title']}  ({r['status']})")
+    if drift["ambiguous_tracker_matches"]:
+        print(f"\n{len(drift['ambiguous_tracker_matches'])} broad tracker link(s) match "
+              "multiple postings; no automatic status change is safe:")
+        for item in drift["ambiguous_tracker_matches"][:15]:
+            print(f"  [{item['tracker_section']}] {item['tracker_url']} "
+                  f"({len(item['candidates'])} candidates)")
+        print("  Run ./careerkit.py tracker-sync for the candidate UIDs.")
 
     broken = _pull.broken_sources(con, reg)
     if broken:
@@ -806,7 +914,13 @@ def tracker_drift(con) -> dict:
         naming only the careers site still matches the full requisition URL."""
         if a[0] != b[0]:
             return False
-        return a[1].startswith(b[1]) or b[1].startswith(a[1])
+        if a[1] == b[1]:
+            return True
+        # A path prefix must end at a segment boundary. `/jobs/12` is not the
+        # same requisition as `/jobs/123`; the old string-prefix check could
+        # silently mark the wrong one applied.
+        shorter, longer = sorted((a[1], b[1]), key=len)
+        return bool(shorter) and longer.startswith(shorter + "/")
 
     # A line the user has already marked dead or rejected is not an open
     # application, so it must not demand a matching 'applied' row.
@@ -850,22 +964,189 @@ def tracker_drift(con) -> dict:
     # does not exist. Reporting those as drift produced six permanent warnings
     # that no action could ever clear, which is how a check trains you to ignore
     # it. They are counted, not listed.
-    missing_from_db, untracked_history = [], 0
+    missing_from_db, ambiguous_tracker_matches, untracked_history = [], [], 0
+    live_rows = list(con.execute(
+        "SELECT uid, url, company, title, status FROM jobs"))
     for key, (sect, closed, raw) in in_tracker.items():
         if sect not in ("APPLIED", "INTERVIEWING") or closed:
             continue
         if any(same(key, d) for d in db_applied):
             continue
-        row = next((r for r in con.execute("SELECT uid, url, status FROM jobs")
-                    if same(key, norm(r["url"]))), None)
-        if row is None:
+        matches = [r for r in live_rows if same(key, norm(r["url"]))]
+        if not matches:
             untracked_history += 1
+        elif len(matches) > 1:
+            ambiguous_tracker_matches.append({
+                "tracker_url": raw,
+                "tracker_section": sect,
+                "candidates": matches,
+            })
         else:
-            missing_from_db.append((raw, sect, row["uid"]))
+            missing_from_db.append((raw, sect, matches[0]["uid"]))
     return {"missing_from_tracker": missing_from_tracker,
             "missing_from_db": missing_from_db,
+            "ambiguous_tracker_matches": ambiguous_tracker_matches,
             "untracked_history": untracked_history,
             "tracker_exists": TRACKER.exists()}
+
+
+def _tracker_value(value: object, *, allow_url: bool = False) -> str:
+    """Render untrusted job-board text as one inert tracker line.
+
+    Company names and titles come from remote pages. Collapsing whitespace keeps
+    a malicious or merely malformed title from injecting headings or additional
+    tracker entries through an embedded newline.
+    """
+    text = " ".join(_CTRL.sub("", str(value or "")).split()).replace("<!--", "< !--")
+    if not allow_url:
+        # The drift reader extracts URLs from the entire line. A URL embedded in
+        # an untrusted title must not masquerade as a second application link.
+        text = re.sub(r"(?i)\b(https?)://", r"\1[:]//", text)
+        text = re.sub(
+            r"(?i)\b([a-z0-9.-]+\.(?:com|org|net|io|co|gov|us|ai))/",
+            lambda m: m.group(1) + " /", text)
+    return text
+
+
+def tracker_sync_plan(con) -> dict:
+    """Return exact, deterministic changes needed to reconcile both stores.
+
+    The plan contains no free-form tracker text and deliberately never copies
+    tracker prose into the database `notes` column. It is therefore safe to
+    print in a preview and safe to execute without overwriting either source's
+    narrative. Tracker-only applications with no database row remain history,
+    not invented rows.
+    """
+    drift = tracker_drift(con)
+    db_updates = []
+    for url, section, uid in drift["missing_from_db"]:
+        row = con.execute(
+            "SELECT uid, company, title, url, status FROM jobs WHERE uid=?", (uid,)
+        ).fetchone()
+        if row is None:  # defensive against a caller modifying the DB mid-preview
+            continue
+        db_updates.append({
+            "uid": row["uid"],
+            "company": row["company"],
+            "title": row["title"],
+            "url": row["url"],
+            "tracker_url": url,
+            "tracker_section": section,
+            "from_status": row["status"],
+            "to_status": "applied",
+        })
+
+    tracker_appends = []
+    for row in drift["missing_from_tracker"]:
+        status = str(row["status"] or "applied").lower()
+        line = (f"- [{status.upper()}] {_tracker_value(row['company'])} - "
+                f"{_tracker_value(row['title'])} - "
+                f"{_tracker_value(row['url'], allow_url=True)}")
+        tracker_appends.append({
+            "uid": row["uid"],
+            "company": row["company"],
+            "title": row["title"],
+            "url": row["url"],
+            "status": status,
+            "line": line,
+        })
+
+    db_updates.sort(key=lambda r: (str(r["company"]).lower(),
+                                   str(r["title"]).lower(), r["uid"]))
+    tracker_appends.sort(
+        key=lambda r: (str(r["company"]).lower(), str(r["title"]).lower(), r["uid"]))
+    return {
+        "db_updates": db_updates,
+        "tracker_appends": tracker_appends,
+        "ambiguous": drift["ambiguous_tracker_matches"],
+        "untracked_history": drift["untracked_history"],
+        "tracker_exists": drift["tracker_exists"],
+        "tracker_path": TRACKER,
+    }
+
+
+def _append_tracker_sync(entries: list[dict]) -> None:
+    """Append one sync block without rewriting a byte of existing narrative."""
+    if not entries:
+        return
+    TRACKER.parent.mkdir(parents=True, exist_ok=True)
+    needs_separator = TRACKER.exists() and TRACKER.stat().st_size > 0
+    stamp = datetime.now().isoformat(timespec="seconds")
+    block = (("\n\n" if needs_separator else "")
+             + f"<!-- careerkit tracker-sync append-only {stamp} -->\n"
+             + "## CAREERKIT SYNC (append-only)\n"
+             + "\n".join(e["line"] for e in entries)
+             + "\n<!-- /careerkit tracker-sync -->\n")
+    # Append mode is intentional: replacing the file atomically would still
+    # replace its inode and makes an implementation mistake capable of erasing
+    # the owner's prose. One buffered append plus fsync leaves existing bytes
+    # untouched even if the process is interrupted.
+    with TRACKER.open("a", encoding="utf-8") as fh:
+        fh.write(block)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def cmd_tracker_sync(args) -> None:
+    """Safely reconcile tracker.md and SQLite; preview is the default.
+
+    Tracker -> database changes only a matched row's status to `applied` and
+    passes an empty note so existing notes survive. Database -> tracker is an
+    append-only block. Nothing writes unless the caller explicitly passes
+    --apply.
+    """
+    con = store.connect()
+    plan = tracker_sync_plan(con)
+    print(f"Tracker: {plan['tracker_path']}"
+          + ("" if plan["tracker_exists"] else " (not created yet)"))
+
+    print(f"\nDatabase changes ({len(plan['db_updates'])}):")
+    for item in plan["db_updates"]:
+        print(f"  SET {item['uid']} status {item['from_status']!r} -> 'applied'")
+        print(f"      {_tracker_value(item['company'])} - {_tracker_value(item['title'])}")
+        print(f"      matched tracker [{item['tracker_section']}] {item['tracker_url']}")
+        print("      notes remain unchanged")
+
+    print(f"\nCanonical-link tracker additions ({len(plan['tracker_appends'])}):")
+    for item in plan["tracker_appends"]:
+        print(f"  APPEND {item['line']}")
+    if plan["tracker_appends"]:
+        print("  Existing tracker text remains byte-for-byte unchanged.")
+
+    if plan["untracked_history"]:
+        print(f"\nHistory only ({plan['untracked_history']}): tracker entries have no "
+              "database row; no row will be invented.")
+
+    if plan["ambiguous"]:
+        print(f"\nManual review ({len(plan['ambiguous'])}): broad tracker links match "
+              "multiple database rows; none will be changed.")
+        for item in plan["ambiguous"]:
+            print(f"  ? [{item['tracker_section']}] {item['tracker_url']}")
+            for row in item["candidates"]:
+                print(f"      {row['uid']}  {_tracker_value(row['company'])} - "
+                      f"{_tracker_value(row['title'])} "
+                      f"({row['status']})")
+
+    total = len(plan["db_updates"]) + len(plan["tracker_appends"])
+    if not total:
+        if plan["ambiguous"]:
+            print("\nNo unambiguous changes to write. Resolve the links above manually.")
+        else:
+            print("\nAlready synchronized. Nothing to write.")
+        return
+    if not args.apply:
+        print("\nDRY RUN: nothing written. Review every line, then re-run with "
+              "`tracker-sync --apply` to make only these changes.")
+        return
+
+    # Append first. If the filesystem write fails, database state remains
+    # untouched. Every DB update below names a row proven to exist in the plan.
+    _append_tracker_sync(plan["tracker_appends"])
+    for item in plan["db_updates"]:
+        store.set_status(con, item["uid"], "applied", "")
+    print(f"\nApplied {len(plan['db_updates'])} database status change(s) and "
+          f"{len(plan['tracker_appends'])} tracker addition(s).")
+    print("Existing database notes and tracker narrative were not changed.")
 
 
 def cmd_db(args) -> None:
@@ -934,6 +1215,15 @@ def main() -> None:
                     choices=["A", "B", "C"],
                     help="tier to record for newly registered employers")
 
+    sp = sub.add_parser("search"); sp.set_defaults(fn=cmd_search)
+    sp.add_argument("--full", action="store_true",
+                    help="use every configured title and ATS domain")
+    sp.add_argument("--limit", type=int, default=60,
+                    help="maximum RSS queries to run (default: 60; 0 means all)")
+
+    sp = sub.add_parser("queries"); sp.set_defaults(fn=cmd_queries)
+    sp.add_argument("--full", action="store_true")
+
     sp = sub.add_parser("ingest-urls"); sp.set_defaults(fn=cmd_ingest_urls)
     sp.add_argument("file")
 
@@ -958,6 +1248,12 @@ def main() -> None:
     sp.add_argument("--min-score", type=int, default=0)
 
     sp = sub.add_parser("doctor"); sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("tracker-sync", help="preview tracker/database drift; "
+                        "append and mark only with --apply")
+    sp.set_defaults(fn=cmd_tracker_sync)
+    sp.add_argument("--apply", action="store_true",
+                    help="perform the exact previewed changes (default: no writes)")
 
     sp = sub.add_parser("enrich"); sp.set_defaults(fn=cmd_enrich)
     sp.add_argument("--limit", type=int, help="stop after N fetches")
@@ -993,10 +1289,11 @@ def main() -> None:
     args = p.parse_args()
     # Commands that write are serialized against each other; read-only ones stay
     # usable while a long pull is running.
-    MUTATING = {"pull", "audit", "discover", "ingest-url", "ingest-urls",
+    MUTATING = {"pull", "audit", "discover", "search", "ingest-url", "ingest-urls",
                 "verify", "mark", "applied", "enrich"}
+    mutating = args.cmd in MUTATING or (args.cmd == "tracker-sync" and args.apply)
     try:
-        if args.cmd in MUTATING:
+        if mutating:
             with store.RunLock():
                 args.fn(args)
         else:

@@ -341,6 +341,7 @@ class Profile:
     accept_floor: int = 0
     remote_ok: bool = True
     relocation: bool = False
+    metros: list[str] = field(default_factory=list)
     metro_re: re.Pattern | None = None
     lanes: list[tuple[int, re.Pattern, str]] = field(default_factory=list)
     dream_lanes: list[tuple[int, re.Pattern, str]] = field(default_factory=list)
@@ -373,14 +374,14 @@ class Profile:
             accept_floor=int(comp.get("accept_floor") or comp.get("screen_floor") or 0),
             remote_ok=bool(loc.get("remote_us", True)),
             relocation=bool(loc.get("relocation", False)),
+            metros=[str(m) for m in (loc.get("metros") or []) if m],
             block_clearance=bool(exc.get("clearance", True)),
             block_quota=bool(exc.get("quota", True)),
             dream_companies={c.lower() for c in (cfg.get("dream_companies") or [])},
             search_terms=list(cfg.get("search_terms") or []),
             lane_title_context=dict(cfg.get("lane_title_context") or {}),
         )
-        metros = loc.get("metros") or []
-        p.metro_re = _compile_alt(metros) if metros else None
+        p.metro_re = _compile_alt(p.metros) if p.metros else None
         # Raw lane titles, kept for the adapters' detail pre-filter. Compiled
         # patterns cannot be reused there: the pre-filter needs the terms
         # themselves so it can say what THIS user is looking for.
@@ -704,6 +705,7 @@ def score(job: Job, p: Profile) -> Job:
 
     # --- title fit -------------------------------------------------------
     base, lane_key = 0, ""
+    body_only_fit = False
     tiers = (p.dream_lanes + p.lanes) if exempt else p.lanes
     for weight, pat, key in tiers:
         if pat.search(title):
@@ -713,6 +715,7 @@ def score(job: Job, p: Profile) -> Job:
         for weight, pat, key in p.lanes:   # was [:12]; lanes 13+ silently lost the body fallback
             if pat.search(text[:1500]):
                 base, lane_key = max(10, weight - 22), key
+                body_only_fit = True
                 reasons.append("fit only in body, not title")
                 break
     if not base:
@@ -892,6 +895,14 @@ def score(job: Job, p: Profile) -> Job:
         unknowns.append("comp unstated")
     if comp_state == "thin":
         unknowns.append("comp below accept floor")
+    # A product name buried in an unrelated description is not enough evidence
+    # that the role itself belongs to the requested family. Seen live in an IAM
+    # Architect listing whose title was wholly outside the profile: one mention
+    # of Salesforce in a list of enterprise applications promoted it all the
+    # way to QUALIFIED. Keep body fallback useful for sparse aggregator titles,
+    # but make the uncertainty visible and require human verification.
+    if body_only_fit:
+        unknowns.append("role family matched only in body, not title")
 
     job.gate = "VERIFY" if unknowns else "QUALIFIED"
     job.score = total

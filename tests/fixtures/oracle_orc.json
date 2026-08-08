@@ -1,0 +1,31 @@
+{
+  "items": [
+    {
+      "requisitionList": [
+        {
+          "Id": "25587",
+          "Title": "Bridge Inspector",
+          "PostedDate": "2026-08-07",
+          "PrimaryLocation": "PERTH, WESTERN AUSTRALIA, Australia",
+          "ShortDescriptionStr": "",
+          "secondaryLocations": []
+        },
+        {
+          "Id": "26876",
+          "Title": "Technology and Communications Sector Leader",
+          "PostedDate": "2026-08-07",
+          "PrimaryLocation": "SAN FRANCISCO, CA, United States",
+          "ShortDescriptionStr": "",
+          "secondaryLocations": [
+            {"Name": "HOUSTON, TX, United States", "CountryCode": "US"},
+            {"Name": "ATLANTA, GA, United States", "CountryCode": "US"},
+            {"Name": "MIAMI, FL, United States", "CountryCode": "US"},
+            {"Name": "IRVINE, CA, United States", "CountryCode": "US"}
+          ]
+        }
+      ]
+    }
+  ],
+  "count": 1,
+  "hasMore": false
+}

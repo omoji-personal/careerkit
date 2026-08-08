@@ -252,6 +252,97 @@ class RunLock:
         return False
 
 
+_STATUS_RANK = {"new": 0, "reviewed": 1, "ignored": 2, "applied": 3, "rejected": 4}
+
+
+def _merge_duplicate_job_row(cur: sqlite3.Cursor, target_uid: str,
+                             old: sqlite3.Row) -> None:
+    """Merge one exact duplicate into an existing canonical job row."""
+    cur.execute("SELECT * FROM jobs WHERE uid=?", (target_uid,))
+    current = cur.fetchone()
+    if current is None:
+        return
+    current_rank = _STATUS_RANK.get(current["status"] or "new", 0)
+    old_rank = _STATUS_RANK.get(old["status"] or "new", 0)
+    status = old["status"] if old_rank > current_rank else current["status"]
+    notes = []
+    for value in (current["notes"], old["notes"]):
+        value = (value or "").strip()
+        if value and value not in notes:
+            notes.append(value)
+    first_runs = [v for v in (current["first_seen_run"], old["first_seen_run"])
+                  if v is not None]
+    last_runs = [v for v in (current["last_seen_run"], old["last_seen_run"])
+                 if v is not None]
+    cur.execute(
+        "UPDATE jobs SET status=?, notes=?, first_seen=MIN(first_seen,?), "
+        "last_seen=MAX(last_seen,?), seen_count=COALESCE(seen_count,0)+?, "
+        "first_seen_run=?, last_seen_run=? WHERE uid=?",
+        (status, " | ".join(notes), old["first_seen"], old["last_seen"],
+         old["seen_count"] or 0,
+         min(first_runs) if first_runs else None,
+         max(last_runs) if last_runs else None,
+         target_uid),
+    )
+    for sighting in cur.execute(
+            "SELECT source,url,seen_on FROM sightings WHERE uid=?", (old["uid"],)).fetchall():
+        cur.execute(
+            "INSERT INTO sightings (uid,source,url,seen_on) VALUES (?,?,?,?) "
+            "ON CONFLICT(uid,source) DO UPDATE SET url=excluded.url, "
+            "seen_on=MAX(sightings.seen_on,excluded.seen_on)",
+            (target_uid, sighting["source"], sighting["url"], sighting["seen_on"]),
+        )
+    cur.execute("DELETE FROM sightings WHERE uid=?", (old["uid"],))
+    cur.execute("UPDATE events SET uid=? WHERE uid=?", (target_uid, old["uid"]))
+    cur.execute("DELETE FROM jobs WHERE uid=?", (old["uid"],))
+
+
+def _repair_same_url_identity(cur: sqlite3.Cursor, job: Job) -> None:
+    """Collapse rows stranded by an earlier ATS UID algorithm.
+
+    The 2026-08-06 identity fix deliberately started preserving meaningful
+    parenthesized title text. A requisition first seen under the older title
+    normalizer therefore got a new UID even though its employer, source,
+    group, and exact posting URL were unchanged. If the old row carried an
+    applied/rejected status, the fresh duplicate resurfaced as NEW.
+
+    Exact URL + source + group is a much stronger identity statement than a
+    title comparison. Adopt the old row when the new UID does not exist; if
+    both already exist, merge history into the current UID without losing the
+    strongest human-set status or either row's notes.
+    """
+    # Do not merge merely because two rows share a URL: some ATS platforms use
+    # one generic apply URL for several real requisitions with the same title.
+    # The historical UID is deterministic from the current job's requisition
+    # id, so repair only that exact transition row.
+    legacy_uid = job.legacy_external_uid
+    if not job.external_id or legacy_uid == job.uid:
+        return
+    cur.execute(
+        "SELECT * FROM jobs WHERE uid=? AND group_key=? AND source=? AND url=?",
+        (legacy_uid, job.group_key, job.source, job.url),
+    )
+    duplicates = cur.fetchall()
+    for old in duplicates:
+        cur.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,))
+        current = cur.fetchone()
+        if current is None:
+            try:
+                cur.execute("UPDATE jobs SET uid=?, schema_v=2 WHERE uid=?",
+                            (job.uid, old["uid"]))
+                cur.execute("UPDATE sightings SET uid=? WHERE uid=?",
+                            (job.uid, old["uid"]))
+                cur.execute("UPDATE events SET uid=? WHERE uid=?",
+                            (job.uid, old["uid"]))
+                continue
+            except sqlite3.IntegrityError:
+                # Another duplicate may already have claimed the new UID in
+                # this loop. Fall through to the explicit merge path.
+                cur.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,))
+                current = cur.fetchone()
+
+        if current is not None:
+            _merge_duplicate_job_row(cur, job.uid, old)
 def upsert(con: sqlite3.Connection, jobs: list[Job],
            run_id: int | None = None) -> tuple[list[Job], list[Job]]:
     """Insert or refresh. Returns (new_jobs, seen_again)."""
@@ -267,6 +358,7 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
         jobs = sorted(jobs, key=lambda j: 0 if legacy_urls.get(j.group_key) == j.url else 1)
     with closing(con.cursor()) as cur:
         for j in jobs:
+            _repair_same_url_identity(cur, j)
             cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
             row = cur.fetchone()
             if row is None and j.uid != j.group_key:

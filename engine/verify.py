@@ -96,6 +96,12 @@ def _name_teamtailor(slug: str) -> str | None:
     return _name_from_title(f"https://{slug}.teamtailor.com/jobs")
 
 
+def _name_hrmdirect(slug: str) -> str | None:
+    title = _name_from_title(
+        f"https://{slug}.hrmdirect.com/employment/job-openings.php?search=true")
+    return re.sub(r"^Careers At\s+", "", title or "", flags=re.I) or None
+
+
 def _name_lever(slug: str) -> str | None:
     d = fetch_json(f"https://api.lever.co/v0/postings/{slug}?mode=json")
     if not isinstance(d, list) or not d:
@@ -113,6 +119,7 @@ NAMERS = {
     "jobvite": _name_jobvite,
     "teamtailor": _name_teamtailor,
     "lever": _name_lever,
+    "hrmdirect": _name_hrmdirect,
 }
 # bamboohr, rippling, personio expose no company name field -> always "review".
 

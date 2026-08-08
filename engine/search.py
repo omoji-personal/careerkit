@@ -33,13 +33,13 @@ def set_core_terms(terms):
 
     CORE_TERMS below was a hardcoded list of one person's Salesforce
     searches until 2026-08-05, so `careerkit.py search` found nothing for anyone
-    whose field was different. The list survives only as a fallback for a
-    profile that supplies none."""
+    whose field was different. Empty input clears the list: keeping the previous
+    profile's terms leaks one person's search into another instance when the
+    module is reused in a long-lived process."""
     global CORE_TERMS
     clean = [f'"{t}"' if not str(t).startswith('"') else str(t)
              for t in (terms or []) if t and str(t).strip()]
-    if clean:
-        CORE_TERMS = clean
+    CORE_TERMS = clean
 
 
 # Discovery queries. EMPTY by default and filled from the user's profile by
@@ -60,6 +60,7 @@ ATS_DOMAINS = [
     "icims.com",
     "recruiting.paylocity.com",
     "bamboohr.com/careers",
+    "hrmdirect.com/employment",
     "recruitee.com",
     "applytojob.com",
     "breezy.hr",
@@ -78,7 +79,15 @@ GEO_TERMS = ["remote", '"united states"']
 
 def set_geo_terms(metros):
     global GEO_TERMS
-    clean = [str(m).strip() for m in (metros or []) if m and str(m).strip()]
+    clean = []
+    for metro in metros or []:
+        value = str(metro or "").strip()
+        # Scoring accepts /raw regex/ metros, but sending regex syntax to a web
+        # search engine produces junk queries such as '"/,\\s?ga\\b/"'. The
+        # profile's ordinary city/state entries already carry the useful intent.
+        if not value or (value.startswith("/") and value.endswith("/")):
+            continue
+        clean.append(value)
     GEO_TERMS = ["remote", '"united states"'] + [f'"{m}"' for m in clean]
 
 
@@ -91,7 +100,7 @@ def build_query_matrix(*, full: bool = False) -> list[str]:
         for t in terms:
             out.append(f"site:{d} {t}")
     for t in CORE_TERMS[:10]:
-        for g in GEO_TERMS[:2]:
+        for g in GEO_TERMS:
             out.append(f"{t} {g} jobs")
     return out
 
@@ -118,6 +127,7 @@ _URL_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("jobvite", re.compile(r"jobs\.jobvite\.com/([a-z0-9_-]+)", re.I)),
     ("recruitee", re.compile(r"https?://([a-z0-9_-]+)\.recruitee\.com", re.I)),
     ("bamboohr", re.compile(r"https?://([a-z0-9_-]+)\.bamboohr\.com", re.I)),
+    ("hrmdirect", re.compile(r"https?://([a-z0-9_-]+)\.hrmdirect\.com", re.I)),
     ("jazzhr", re.compile(r"https?://([a-z0-9_-]+)\.applytojob\.com", re.I)),
     ("breezy", re.compile(r"https?://([a-z0-9_-]+)\.breezy\.hr", re.I)),
     ("rippling", re.compile(r"ats\.rippling\.com/([a-z0-9_-]+)", re.I)),

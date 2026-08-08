@@ -16,7 +16,10 @@ way a new user does, and from an old schema, the way an existing user does.
 from __future__ import annotations
 
 import importlib
+import os
+import pathlib
 import sqlite3
+import subprocess
 import sys
 
 import pytest
@@ -30,6 +33,65 @@ def _fresh(tmp_path, monkeypatch):
         importlib.reload(sys.modules[name])
     from engine import store
     return store
+
+
+def test_one_cli_supports_a_legacy_instance_layout(tmp_path):
+    """The personal app predates profile/. It used to copy the CLI, then miss
+    every new command and safety fix. Explicit path overrides let a tiny launcher
+    use the canonical CLI without moving private state."""
+    root = pathlib.Path(__file__).parent.parent
+    paths = {
+        "CAREERKIT_HOME": tmp_path / "state",
+        "CAREERKIT_PROFILE": tmp_path / "profile-omid.yaml",
+        "CAREERKIT_EMPLOYERS": tmp_path / "employers.yaml",
+        "CAREERKIT_KEYS": tmp_path / "keys.yaml",
+        "CAREERKIT_TRACKER": tmp_path / "job-search-tracker.md",
+        "CAREERKIT_APPLICATIONS": tmp_path / "applications.jsonl",
+        "CAREERKIT_CLAIMS": tmp_path / "VERIFIED_CLAIMS.md",
+    }
+    env = dict(os.environ, **{k: str(v) for k, v in paths.items()})
+    code = ("import careerkit; print('\\n'.join(str(getattr(careerkit, n)) for n in "
+            "('ROOT','PROFILE','EMPLOYERS','KEYS','TRACKER','APPLICATIONS','CLAIMS')))" )
+    got = subprocess.run([sys.executable, "-c", code], cwd=root, env=env,
+                         capture_output=True, text=True, check=True).stdout.splitlines()
+    assert got == [str(p) for p in paths.values()]
+
+
+def test_tracker_sync_cli_honors_the_legacy_tracker_override(tmp_path):
+    """Importing the override is insufficient: the real command must preview
+    against that path and leave it untouched without --apply."""
+    root = pathlib.Path(__file__).parent.parent
+    home = tmp_path / "state"
+    tracker = tmp_path / "legacy" / "job-search-tracker.md"
+    tracker.parent.mkdir()
+    original = "# Existing narrative\nThis must not be rewritten.\n"
+    tracker.write_text(original)
+    env = dict(os.environ, CAREERKIT_HOME=str(home), CAREERKIT_TRACKER=str(tracker),
+               CAREERKIT_VENV="1")
+    setup = (
+        "from engine import store; from engine.models import Job; "
+        "j=Job(company='Acme',title='Architect',url='https://jobs.example.test/1',"
+        "source='greenhouse'); j.gate='QUALIFIED'; j.score=70; "
+        "store.upsert(store.connect(),[j]); "
+        "c=store.connect(); store.set_status(c,j.uid,'applied')"
+    )
+    subprocess.run([sys.executable, "-c", setup], cwd=root, env=env,
+                   capture_output=True, text=True, check=True)
+    got = subprocess.run([sys.executable, str(root / "careerkit.py"), "tracker-sync"],
+                         cwd=root, env=env, capture_output=True, text=True, check=True)
+    assert f"Tracker: {tracker}" in got.stdout
+    assert "Canonical-link tracker additions (1)" in got.stdout
+    assert "DRY RUN: nothing written" in got.stdout
+    assert tracker.read_text() == original
+
+
+def test_registry_save_is_atomic(tmp_path, monkeypatch):
+    import careerkit
+    target = tmp_path / "employers.yaml"
+    monkeypatch.setattr(careerkit, "EMPLOYERS", target)
+    careerkit.save_employers({"employers": [{"name": "Acme"}], "feeds": []})
+    assert yaml.safe_load(target.read_text())["employers"][0]["name"] == "Acme"
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 def test_a_brand_new_database_says_nothing_alarming(tmp_path, monkeypatch, capsys):
