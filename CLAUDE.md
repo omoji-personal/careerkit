@@ -47,6 +47,9 @@ If `profile/profile.yaml` does not exist, the only correct first move is the
 - `./careerkit.py pull` — poll boards + feeds, score against the profile,
   write `out/` report. `status`, `report`, `verify`, `discover`,
   `ingest-urls`, `audit` as documented in its header.
+- `./careerkit.py tracker-sync` — preview exact tracker/database drift. It is
+  read-only unless the human explicitly approves `--apply`; writes are limited
+  to append-only tracker URL entries and unambiguous database status changes.
 - `profile/profile.yaml` is the ONLY place scoring rules live. To change what
   surfaces, change the profile (usually via `/criteria` re-interview or after
   an `/audit` review), never by hand-editing engine code.

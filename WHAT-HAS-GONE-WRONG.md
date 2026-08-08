@@ -79,6 +79,25 @@ left no trace anywhere at all. It now reads an evidence file of what you have
 applied to, and warns when a live posting sits at an employer that already
 declined you.
 
+**Application history had two writers and no safe repair path.**
+SQLite suppressed jobs that `tracker.md` did not link, while tracker-only
+applications remained `new` and resurfaced. The warning described useful
+free-form narratives as missing merely because they lacked the canonical job
+URL, then told the operator to run individual writes. `tracker-sync` now prints
+the exact bidirectional changes without writing by default. With explicit
+`--apply`, it appends canonical-link lines without rewriting tracker prose and
+changes only unambiguous database rows without replacing notes. Board-level
+links that match several openings are refused.
+
+**A prepared draft was treated as bad application evidence.**
+`applications.jsonl` describes work before and after submission, but `prepared`
+was reported as an unknown state. Worse, valid later-stage states such as
+`interviewing` were written directly into a database whose query layer did not
+understand them, and generated evidence text replaced the user's notes. Prepared
+records are now an explicit no-write preflight state; submitted pipeline states
+remain suppressed while their richer state is retained in the event history,
+and existing notes survive.
+
 **Two different jobs at one company became one row, again.**
 Anything in brackets was deleted from a title before comparing, so "Success
 Architect (Agentforce)" and "Success Architect (Data Cloud)" were treated as the
@@ -159,13 +178,13 @@ deliberately breaking the code to watch the test fail.
 - **US locations only.** Roles outside the US are screened out unless you
   change that. If you are searching outside the US, that is the first thing to
   fix, and help is welcome.
-- **It is new, and one person wrote it.** There are 259 automated tests and
+- **It is new, and one person wrote it.** There are 280+ automated tests and
   nearly all of them exist because something on this page broke first. That is
   not the same as being battle-tested.
-- **Job boards change without warning.** Four of the seventeen boards are
-  checked against saved real responses, so if those change shape a test fails.
-  The other thirteen are not, which is the most useful thing anyone could
-  contribute.
+- **Job boards change without warning.** All eighteen employer adapters are
+  checked against sanitized responses saved from real public boards, so a
+  known schema change now fails a test. That catches shape drift; it does not
+  make a saved response a live availability check.
 - **It cannot spot a fake job posting.** A listing that was never a real
   opening still looks like a real opening to it.
 

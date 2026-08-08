@@ -3,7 +3,7 @@
 **A job search engine you operate by talking to it.** Against one set of
 criteria it read 19,550 postings and surfaced 161.
 
-It watches the job boards employers actually post on, 17 applicant tracking
+It watches the job boards employers actually post on, 18 applicant tracking
 platforms plus 14 public feeds (8 of them live immediately; 4 want an API key
 you register for, 2 are scrapers and off by default), and scores every posting
 against rules you wrote yourself. Then it helps you evaluate roles, build applications, prepare for
@@ -141,11 +141,13 @@ one says so in the report. Every feed declares what it is in
 `engine/aggregators.py` under `SOURCE_POLICY`: official API, needs-your-own-key,
 or scraper.
 
-Two employer platforms are also read from HTML rather than an API, because they
-publish no JSON: **iCIMS** parses its server-rendered search page, and
-**Jobvite** parses its careers page. Unlike the two feeds above, these are active
-whenever you have an employer registered on that platform. If that matters to
-you, deactivate those entries in `profile/employers.yaml`.
+Five employer platforms may also be read from public HTML rather than an API:
+**iCIMS**, **Jobvite**, **HRMDirect/ClearCompany**, **Paylocity**, and **Phenom**
+(when its widgets endpoint is unavailable). Paylocity and Phenom expose public
+JSON models inside those pages; the other three parse server-rendered job
+markup. Unlike the two feeds above, these are active whenever you have an
+employer registered on that platform. If that matters to you, deactivate those
+entries in `profile/employers.yaml`.
 
 ## Rules the copilot lives by
 
@@ -177,8 +179,12 @@ Claude does this for you, but it is a normal CLI:
 
 ```
 ./careerkit.py pull          # poll every board + feed, score, write a report
+./careerkit.py search        # key-free ATS-domain discovery; registers new boards
+./careerkit.py queries --full  # print the matrix for a stronger search tool
 ./careerkit.py rescore       # re-judge stored postings after a criteria change
 ./careerkit.py doctor        # one check: profile, sources, freshness, drift
+./careerkit.py tracker-sync  # exact dry-run of tracker/database reconciliation
+./careerkit.py tracker-sync --apply  # append links + mark matched rows after review
 ./careerkit.py consistency   # does the report agree with the database it came from?
 ./careerkit.py consistency --repair   # clear compensation that cannot be true
 ./careerkit.py applied       # reconcile what you have applied to (see below)
@@ -213,8 +219,12 @@ JSON per application to `profile/applications.jsonl`:
 {"company": "Acme", "title": "Salesforce Admin", "status": "rejected", "on": "2026-08-05"}
 ```
 
-`status` is applied, rejected, interviewing, offer or withdrawn, and `title` may
-be omitted when the confirmation email does not name the role. It never writes a
+`status` is prepared, applied, rejected, interviewing, offer or withdrawn, and
+`title` may be omitted when the confirmation email does not name the role.
+`prepared` is explicitly pre-submission: it is reported but never written to the
+database. Interviewing, offer, and withdrawn evidence is retained in event
+history while the database row uses `applied` as its report-suppression status.
+It never writes a
 status from a company match alone, because at an employer with several openings
 that marks the wrong one; those go to a review list instead. Once it knows, the
 report warns you when a live posting sits at an employer that already declined
@@ -234,6 +244,15 @@ and quoted a salary band on the line below.
 parses, that no source has been failing repeatedly, that the last run finished and was recent, and that your database
 and `tracker.md` agree about what you have applied to.
 
+`tracker-sync` turns that drift warning into a safe, reviewable action. Its
+default is a dry run that prints each proposed SQLite status change and the exact
+canonical-URL line it would append to the tracker. Existing tracker prose and
+database notes are never replaced. Broad links that match multiple postings are
+listed for manual review and never chosen automatically. Only an explicit
+`tracker-sync --apply` writes the unambiguous preview; a second run is
+idempotent. The tracker path honors `CAREERKIT_TRACKER`, including legacy
+instances that keep it outside `profile/`.
+
 `claims-lint` is a mechanical backstop for the truth rule: it flags numbers and
 proper names in a draft that do not appear in `profile/claims.md`. It reads
 tokens, not meaning, so a clean result is not a certification that a document is
@@ -241,18 +260,17 @@ accurate. It catches the careless cases. Keep reading the draft.
 
 `./run-tests.sh` runs the regression suite. Nearly every test in it locks down a
 bug that actually shipped, so it is worth keeping green if you change the engine.
-It also runs eight adapters (Greenhouse, Lever, Ashby, SmartRecruiters,
-BambooHR, Rippling, Recruitee, Personio) against saved real payloads, so those
-boards changing their JSON shape fails a test rather than quietly returning
-nothing. The other nine have no fixture, because no live public board could be
-found to capture one from. Capturing any of them is the most useful
-contribution anyone could make, and a fixture invented from a guessed shape is
-worse than none.
+It runs all eighteen employer adapters against sanitized responses saved from
+real public boards, so a board changing its JSON or HTML shape fails a test
+rather than quietly returning nothing. Fixture origins are recorded in
+`tests/fixtures/README.md`; a fixture invented from a guessed shape would be
+worse than no fixture at all.
 
-`./careerkit.py status` additionally reports where the database and your
-`tracker.md` disagree: an application recorded in one but not the other. Those
-two do drift, and a role missing from the database resurfaces later as a fresh
-find you have already acted on.
+`./careerkit.py status` additionally reports where the database and canonical
+URLs in your `tracker.md` disagree. The surrounding narrative may already name
+the application; the machine needs the matching URL to connect it safely. A
+role missing from the database resurfaces later as a fresh find you have already
+acted on.
 
 To install it as an ordinary command instead (`careerkit pull`), run
 `pip install -e .`.

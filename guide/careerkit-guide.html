@@ -129,11 +129,11 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
   <div class="plate">
     <div class="plate-h">Specification</div>
     <div class="spec">
-      <div><b>ATS platforms polled</b><span>17</span></div>
+      <div><b>ATS platforms polled</b><span>18</span></div>
       <div><b>Public job feeds</b><span>14</span></div>
-      <div><b>Auto-discoverable</b><span>13 platforms</span></div>
+      <div><b>Auto-discoverable</b><span>14 platforms</span></div>
       <div><b>One run</b><span>19,550 read, <em class="sig">161</em> passed</span></div>
-      <div><b>Regression suite</b><span>160+ cases</span></div>
+      <div><b>Regression suite</b><span>280+ cases</span></div>
       <div><b>Continuous integration</b><span>3.10 / 3.12 / 3.13</span></div>
       <div><b>Engine</b><span>Python, SQLite</span></div>
       <div><b>Licence</b><span>MIT</span></div>
@@ -296,17 +296,20 @@ claude              # open Claude Code in this folder
   <h3>Running the engine directly</h3>
   <p>Claude does this for you, but it is an ordinary command line tool.</p>
 <pre>./careerkit.py pull            # poll everything, score, write a report
-./careerkit.py rescore         # re-judge stored postings after a criteria change
-./careerkit.py doctor          # profile, sources, freshness, drift: one check
-./careerkit.py status          # what is in the database, which sources are broken
+./careerkit.py search          # discover postings across the open web
+./careerkit.py queries --full  # print the complete query matrix
+./careerkit.py rescore         # re-judge stored postings
+./careerkit.py doctor          # profile, source and drift health check
+./careerkit.py status          # database and source health
 ./careerkit.py audit           # what the gates killed, and why
-./careerkit.py report          # rebuild the report ( --format json|csv to export )
+./careerkit.py report          # rebuild or export the report
 ./careerkit.py history         # every status change, in order
+./careerkit.py tracker-sync    # preview drift; --apply writes it
 ./careerkit.py claims-lint out/cover.md
 ./careerkit.py mark UID applied
-./careerkit.py ingest-url -- URL     # register one posting you found elsewhere
+./careerkit.py ingest-url -- URL     # register one posting
 ./careerkit.py ingest-urls FILE      # ... or a file of them
-./careerkit.py discover NAME         # find a company's board and register it
+./careerkit.py discover NAME         # find and register a company board
 ./careerkit.py verify                # confirm each board belongs to the right company
 ./careerkit.py db check|backup       # integrity check, manual backup</pre>
 </section>
