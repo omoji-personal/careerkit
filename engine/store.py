@@ -15,7 +15,7 @@ from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 
-from .models import Job, ATS_SOURCES
+from .models import Job, ATS_SOURCES, _norm_company
 
 DB_PATH = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "data" / "jobs.db"
 
@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS events (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT,
   uid TEXT, at TEXT, kind TEXT, detail TEXT
 );
+CREATE TABLE IF NOT EXISTS employer_history (
+  history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company TEXT, company_key TEXT, at TEXT, kind TEXT,
+  contact TEXT DEFAULT '', contact_email TEXT DEFAULT '', detail TEXT DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS source_health (
   source TEXT PRIMARY KEY, last_ok TEXT, last_count INTEGER,
   last_error TEXT, consecutive_failures INTEGER DEFAULT 0
@@ -61,6 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_gate ON jobs(gate, score DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_first ON jobs(first_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_group ON jobs(group_key);
 CREATE INDEX IF NOT EXISTS idx_events_uid ON events(uid, at);
+CREATE INDEX IF NOT EXISTS idx_employer_history_key ON employer_history(company_key, at);
 """
 
 # Columns added after v1. CREATE TABLE IF NOT EXISTS does nothing to a table
@@ -623,7 +629,21 @@ def is_new_this_run(row, run_id: int | None) -> bool:
     return row["first_seen"] == row["last_seen"]      # pre-run-id rows
 
 
-def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "") -> None:
+def _event_time(value: str | None = None) -> str:
+    """Normalise a user-supplied ISO day/datetime for the event trail."""
+    if not value:
+        return datetime.now().isoformat(timespec="seconds")
+    text = str(value).strip()
+    try:
+        if len(text) == 10:
+            return datetime.fromisoformat(text).replace(hour=12).isoformat(timespec="seconds")
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat(timespec="seconds")
+    except ValueError:
+        raise ValueError(f"invalid event date {value!r}; use YYYY-MM-DD or an ISO datetime")
+
+
+def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "", *,
+               at: str | None = None) -> None:
     """Validated on purpose. Any string used to be accepted, but query() only
     understands five, so a typo ('apllied') silently left the job in the active
     list and the user believed it was filed."""
@@ -642,9 +662,49 @@ def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "") 
     # the interesting questions are all about its history.
     if prev is None or prev["status"] != status:
         con.execute("INSERT INTO events (uid, at, kind, detail) VALUES (?,?,?,?)",
-                    (uid, datetime.now().isoformat(timespec="seconds"),
+                    (uid, _event_time(at),
                      f"status:{status}", notes or ""))
     con.commit()
+
+
+APPLICATION_STAGES = ("applied", "interviewing", "offer", "rejected", "withdrawn")
+_APPLICATION_DB_STATUS = {
+    "applied": "applied",
+    "interviewing": "applied",
+    "offer": "applied",
+    "rejected": "rejected",
+    # A withdrawn application must stay suppressed. `applied` is the durable
+    # "submitted pipeline" state; the richer current stage lives in events.
+    "withdrawn": "applied",
+}
+
+
+def record_application_stage(con: sqlite3.Connection, uid: str, stage: str, *,
+                             on: str | None = None, notes: str = "",
+                             detail: str | None = None) -> bool:
+    """Record a dated pipeline transition and suppress the posting safely.
+
+    Returns True when a new application event was written. Repeating the exact
+    command is idempotent, which matters when evidence reconciliation is run on
+    the same append-only file every week.
+    """
+    stage = (stage or "").lower()
+    if stage not in APPLICATION_STAGES:
+        raise ValueError(f"unknown application stage {stage!r}. Use one of: "
+                         f"{', '.join(APPLICATION_STAGES)}")
+    event_at = _event_time(on)
+    set_status(con, uid, _APPLICATION_DB_STATUS[stage], notes, at=event_at)
+    kind = f"application:{stage}"
+    event_detail = notes if detail is None else detail
+    exists = con.execute(
+        "SELECT 1 FROM events WHERE uid=? AND kind=? AND substr(at,1,10)=substr(?,1,10) "
+        "AND detail=? LIMIT 1", (uid, kind, event_at, event_detail or "")).fetchone()
+    if exists:
+        return False
+    con.execute("INSERT INTO events (uid, at, kind, detail) VALUES (?,?,?,?)",
+                (uid, event_at, kind, event_detail or ""))
+    con.commit()
+    return True
 
 
 def stats(con: sqlite3.Connection) -> dict:
@@ -671,3 +731,67 @@ def history(con: sqlite3.Connection, uid: str | None = None, limit: int = 200) -
     if uid:
         return list(con.execute(q + "WHERE e.uid=? ORDER BY e.at DESC LIMIT ?", (uid, limit)))
     return list(con.execute(q + "ORDER BY e.at DESC LIMIT ?", (limit,)))
+
+
+RELATIONSHIP_KINDS = ("recruiter", "referral", "contact", "interview",
+                      "invitation", "rejection", "note")
+
+
+def _canonical_history_company(con: sqlite3.Connection, company: str) -> tuple[str, str]:
+    """Adopt one unambiguous stored employer name, including common acronyms."""
+    key = _norm_company(company)
+    stored = [r[0] for r in con.execute("SELECT DISTINCT company FROM jobs WHERE company<>''")]
+    exact = [name for name in stored if _norm_company(name) == key]
+    if len(exact) == 1:
+        return exact[0], key
+    compact = "".join(c for c in key if c.isalnum())
+    if " " not in key and 3 <= len(compact) <= 8:
+        def acronym(name: str) -> str:
+            words = [w for w in _norm_company(name).split() if w]
+            return "".join(w[0] for w in words)
+        aliases = [name for name in stored if acronym(name) == compact]
+        if len(aliases) == 1:
+            return aliases[0], _norm_company(aliases[0])
+    return company, key
+
+
+def add_relationship(con: sqlite3.Connection, company: str, kind: str, *,
+                     on: str | None = None, contact: str = "",
+                     contact_email: str = "", detail: str = "") -> bool:
+    """Remember employer-level context that is not tied to one requisition."""
+    company = (company or "").strip()
+    kind = (kind or "").lower()
+    if not company:
+        raise ValueError("company is required")
+    if kind not in RELATIONSHIP_KINDS:
+        raise ValueError(f"unknown relationship kind {kind!r}. Use one of: "
+                         f"{', '.join(RELATIONSHIP_KINDS)}")
+    at = _event_time(on)
+    company, key = _canonical_history_company(con, company)
+    values = (key, kind, at, contact or "", contact_email or "", detail or "")
+    exists = con.execute(
+        "SELECT 1 FROM employer_history WHERE company_key=? AND kind=? "
+        "AND substr(at,1,10)=substr(?,1,10) AND contact=? AND contact_email=? "
+        "AND detail=? LIMIT 1", values).fetchone()
+    if exists:
+        return False
+    con.execute(
+        "INSERT INTO employer_history "
+        "(company,company_key,at,kind,contact,contact_email,detail) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (company, key, at, kind, contact or "", contact_email or "", detail or ""))
+    con.commit()
+    return True
+
+
+def relationships(con: sqlite3.Connection, company: str | None = None,
+                  limit: int = 200) -> list[sqlite3.Row]:
+    if company:
+        _, key = _canonical_history_company(con, company)
+        return list(con.execute(
+            "SELECT * FROM employer_history WHERE company_key=? "
+            "ORDER BY at DESC, history_id DESC LIMIT ?",
+            (key, limit)))
+    return list(con.execute(
+        "SELECT * FROM employer_history ORDER BY at DESC, history_id DESC LIMIT ?",
+        (limit,)))

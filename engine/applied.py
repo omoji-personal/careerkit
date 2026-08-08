@@ -36,20 +36,17 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 VALID = ("applied", "rejected", "interviewing", "offer", "withdrawn")
 PREFLIGHT = ("prepared",)
 # SQLite's status is a report-suppression state, not the full application
-# pipeline. Anything that proves submission must suppress resurfacing; the
-# richer current state remains in applications.jsonl and the event trail.
+# pipeline. `store.record_application_stage` owns that mapping so manual
+# progress and evidence reconciliation cannot drift apart.
 DB_STATUS = {
-    "applied": "applied",
-    "rejected": "rejected",
-    "interviewing": "applied",
-    "offer": "applied",
-    "withdrawn": "applied",
+    "applied": "applied", "rejected": "rejected", "interviewing": "applied",
+    "offer": "applied", "withdrawn": "applied",
 }
 
 
@@ -166,20 +163,13 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
             # Empty notes are deliberate: store.set_status preserves whatever
             # free-form note is already on the row. The former direct UPDATE
             # replaced it with generated evidence text.
-            store.set_status(con, m["uid"], m["db_status"], "")
             detail = (f"{m.get('on') or ''} from "
                       f"{m.get('source') or 'applications.jsonl'}").strip()
-            kind = f"application:{m['status']}"
-            exists = con.execute(
-                "SELECT 1 FROM events WHERE uid=? AND kind=? AND detail=? LIMIT 1",
-                (m["uid"], kind, detail)).fetchone()
-            if not exists:
-                con.execute(
-                    "INSERT INTO events (uid, at, kind, detail) VALUES "
-                    "(?, ?, ?, ?)",
-                    (m["uid"], datetime.now().isoformat(timespec="seconds"),
-                     kind, detail))
-                con.commit()
+            try:
+                store.record_application_stage(
+                    con, m["uid"], m["status"], on=m.get("on"), detail=detail)
+            except ValueError as e:
+                problems.append(f"line {m.get('_line')}: {e}")
 
     return {"matched": matched, "ambiguous": ambiguous,
             "unmatched": unmatched, "pending": pending, "problems": problems}

@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -146,6 +147,38 @@ _MONEY = re.compile(r"\$\s?(\d{1,3})(?:,(\d{3}))?(?:\s?[kK])?(?:\.\d+)?")
 _RANGE_CTX = re.compile(
     r"(base (salary|pay|compensation)|salary range|pay range|compensation range|"
     r"hiring range|target salary|annual (salary|base))", re.I)
+
+# A listing can remain available through an aggregator after the employer's
+# explicit deadline.  Parse only sentences that unmistakably introduce an
+# application deadline; a loose date search would turn benefit dates, start
+# dates, and copyright years into false closures.
+_DEADLINE = re.compile(
+    r"\b(?:apply(?:\s+no\s+later\s+than)?\s+by|application\s+deadline(?:\s+is)?|"
+    r"posting\s+closes?(?:\s+on)?|position\s+closes?(?:\s+on)?|"
+    r"accept(?:ing)?\s+(?:applications|applicants)\s+until|"
+    r"applications?\s+(?:will\s+be\s+)?accepted\s+(?:until|through))\s*"
+    r"[:\-]?\s*("
+    r"[A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*|\s+)\d{4}|"
+    r"\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", re.I)
+
+
+def posting_deadline(text: str, *, today: date | None = None) -> tuple[date, str] | None:
+    """Return the earliest explicit application deadline and its evidence."""
+    found = []
+    for m in _DEADLINE.finditer(text or ""):
+        raw = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", m.group(1), flags=re.I)
+        parsed = None
+        for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y",
+                    "%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y"):
+            try:
+                parsed = datetime.strptime(raw, fmt).date()
+                break
+            except ValueError:
+                pass
+        if parsed:
+            evidence = re.sub(r"\s+", " ", m.group(0)).strip()
+            found.append((parsed, evidence))
+    return min(found, key=lambda x: x[0]) if found else None
 
 
 # --------------------------------------------------------------------------
@@ -690,6 +723,11 @@ def score(job: Job, p: Profile) -> Job:
     if not title.strip() and not (job.description or "").strip():
         job.gate, job.score = "EXCLUDED", 0
         job.reasons = ["malformed posting: no title and no body"]
+        return job
+    deadline = posting_deadline(job.description or "")
+    if deadline and deadline[0] < date.today():
+        job.gate, job.score = "EXCLUDED", 0
+        job.reasons = [f"posting closed {deadline[0].isoformat()}: {deadline[1]!r}"]
         return job
     ctx = p.lane_title_context.get(job.lane or "")
     # Only ever ENRICHES a real title. Applied to an empty one the prefix

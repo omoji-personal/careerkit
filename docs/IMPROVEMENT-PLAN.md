@@ -335,3 +335,19 @@ before believing any of it.
 **Left for next time**, in order: employer history (item 8), expiry parsing
 (part of item 3), comp provenance and the below-floor warning (item 7), the lane
 lint (item 9), and any adapter fixture anyone can capture.
+
+## Status, 2026-08-08 — competitive benchmark follow-through
+
+- Employer history is done as local, employer-level `relationship` records and
+  appears beside later opportunities in the HTML dashboard.
+- Explicit posting expiry is done for unambiguous dated application-deadline
+  phrases. It does not infer closure from generic dates or “open until filled.”
+- The application event foundation now powers `analytics`: conversion, timing,
+  weekly cadence, lane outcomes, data-quality limits, and calculated follow-ups.
+- The private `report --format html` dashboard unifies pipeline, relationship
+  memory, current roles, and source health with no remote resources or telemetry.
+- All 18 adapters now have sanitized real-public-board fixtures.
+- Comp provenance and the lane lint remain open. The below-screen-floor gate was
+  already implemented; the older status note above understated it.
+- Broader findings and the ranked next roadmap live in
+  `docs/COMPETITIVE-AUDIT-2026-08-08.md`.

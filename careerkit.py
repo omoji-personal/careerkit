@@ -11,7 +11,9 @@
     ./careerkit.py verify              confirm each board belongs to the right company
     ./careerkit.py ingest-urls FILE    resolve pasted job URLs -> employers, register
     ./careerkit.py audit [--grep RX]   re-fetch + re-score, show every kill and why
-    ./careerkit.py report [--format json|csv]   rebuild the report, or export rows
+    ./careerkit.py report [--format md|json|csv|html]   report, export, or dashboard
+    ./careerkit.py analytics          conversion, timing, aging, follow-up queue
+    ./careerkit.py progress UID STAGE record applied/interview/offer/outcome dates
     ./careerkit.py rescore             re-judge stored postings after a criteria change
     ./careerkit.py doctor              one check: profile, sources, freshness, drift
     ./careerkit.py tracker-sync        preview tracker/database differences; --apply writes
@@ -454,6 +456,15 @@ def cmd_report(args) -> None:
     rows = store.query(con, min_score=args.min_score, limit=300)
 
     fmt = getattr(args, "format", "md")
+    if fmt == "html":
+        from engine import analytics as _analytics
+        from engine import applied as _applied
+        evidence = _applied.load_evidence(APPLICATIONS)
+        snapshot = _analytics.build_snapshot(
+            con, evidence, follow_up_days=getattr(args, "follow_up_days", 14))
+        path = _analytics.write_dashboard(con, snapshot, rows)
+        print(f"Dashboard: {path}")
+        return
     if fmt in ("json", "csv"):
         # The Markdown report is for reading. This is for everything else:
         # a spreadsheet, a diff between two runs, or your own analysis. The
@@ -477,6 +488,68 @@ def cmd_report(args) -> None:
         return
 
     _pull.rebuild_report(con, min_score=args.min_score)
+
+
+def cmd_analytics(args) -> None:
+    """Measure outcomes and surface stale threads from local evidence."""
+    from engine import analytics as _analytics
+    from engine import applied as _applied
+    try:
+        as_of = date.fromisoformat(args.as_of) if args.as_of else None
+    except ValueError:
+        sys.exit("--as-of must be YYYY-MM-DD")
+    con = store.connect()
+    snapshot = _analytics.build_snapshot(
+        con, _applied.load_evidence(APPLICATIONS), as_of=as_of,
+        follow_up_days=args.follow_up_days, weeks=args.weeks)
+    if args.format == "json":
+        payload = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
+        if args.output:
+            path = Path(args.output).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload)
+            print(f"Analytics: {path}")
+        else:
+            print(payload, end="")
+    else:
+        print(_analytics.format_text(snapshot))
+
+
+def cmd_progress(args) -> None:
+    """Record a real application stage without flattening it into DB status."""
+    con = store.connect()
+    try:
+        written = store.record_application_stage(
+            con, args.uid, args.stage, on=args.on, notes=args.notes or "")
+    except (ValueError, KeyError) as e:
+        sys.exit(e.args[0])
+    suffix = "recorded" if written else "already recorded"
+    print(f"{args.uid} -> {args.stage} on {args.on or date.today().isoformat()} ({suffix})")
+
+
+def cmd_relationship_add(args) -> None:
+    """Record context about an employer even when no current posting exists."""
+    con = store.connect()
+    try:
+        written = store.add_relationship(
+            con, args.company, args.kind, on=args.on, contact=args.contact or "",
+            contact_email=args.email or "", detail=args.notes or "")
+    except ValueError as e:
+        sys.exit(e.args[0])
+    print(f"{args.company}: {args.kind} " + ("recorded" if written else "already recorded"))
+
+
+def cmd_relationship_list(args) -> None:
+    con = store.connect()
+    rows = store.relationships(con, args.company)
+    if not rows:
+        print("No employer relationship history recorded yet.")
+        return
+    for r in rows:
+        person = r["contact"] or r["contact_email"]
+        who = f" | {person}" if person else ""
+        detail = f" | {r['detail']}" if r["detail"] else ""
+        print(f"{r['at'][:10]} | {r['company']} | {r['kind']}{who}{detail}")
 
 
 def OUT_DIR_FOR_EXPORT() -> Path:
@@ -1235,8 +1308,39 @@ def main() -> None:
 
     sp = sub.add_parser("report"); sp.set_defaults(fn=cmd_report)
     sp.add_argument("--min-score", type=int, default=0)
-    sp.add_argument("--format", choices=["md", "json", "csv"], default="md",
-                    help="md rebuilds the readable report; json/csv export the rows")
+    sp.add_argument("--format", choices=["md", "json", "csv", "html"], default="md",
+                    help="md rebuilds the report; json/csv export; html is a local dashboard")
+    sp.add_argument("--follow-up-days", type=int, default=14,
+                    help="stale-thread threshold in the HTML dashboard (default: 14)")
+
+    sp = sub.add_parser("analytics", help="pipeline conversion, timing, and follow-ups")
+    sp.set_defaults(fn=cmd_analytics)
+    sp.add_argument("--format", choices=["text", "json"], default="text")
+    sp.add_argument("--output", help="write JSON here instead of stdout")
+    sp.add_argument("--follow-up-days", type=int, default=14)
+    sp.add_argument("--weeks", type=int, default=8, help="cadence window (default: 8)")
+    sp.add_argument("--as-of", help=argparse.SUPPRESS)
+
+    sp = sub.add_parser("progress", help="record a dated application pipeline stage")
+    sp.set_defaults(fn=cmd_progress)
+    sp.add_argument("uid")
+    sp.add_argument("stage", choices=store.APPLICATION_STAGES)
+    sp.add_argument("--on", help="event date, YYYY-MM-DD (default: today)")
+    sp.add_argument("--notes")
+
+    sp = sub.add_parser("relationship", help="employer-level contacts and prior context")
+    rel = sp.add_subparsers(dest="relationship_action", required=True)
+    add = rel.add_parser("add", help="remember a recruiter, referral, or prior interaction")
+    add.set_defaults(fn=cmd_relationship_add)
+    add.add_argument("company")
+    add.add_argument("--kind", choices=store.RELATIONSHIP_KINDS, required=True)
+    add.add_argument("--on", help="event date, YYYY-MM-DD (default: today)")
+    add.add_argument("--contact")
+    add.add_argument("--email")
+    add.add_argument("--notes")
+    ls = rel.add_parser("list", help="show all context, optionally for one employer")
+    ls.set_defaults(fn=cmd_relationship_list)
+    ls.add_argument("company", nargs="?")
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
 
@@ -1290,8 +1394,10 @@ def main() -> None:
     # Commands that write are serialized against each other; read-only ones stay
     # usable while a long pull is running.
     MUTATING = {"pull", "audit", "discover", "search", "ingest-url", "ingest-urls",
-                "verify", "mark", "applied", "enrich"}
-    mutating = args.cmd in MUTATING or (args.cmd == "tracker-sync" and args.apply)
+                "verify", "mark", "progress", "applied", "enrich"}
+    mutating = (args.cmd in MUTATING or
+                (args.cmd == "tracker-sync" and args.apply) or
+                (args.cmd == "relationship" and args.relationship_action == "add"))
     try:
         if mutating:
             with store.RunLock():

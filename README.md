@@ -7,7 +7,9 @@ It watches the job boards employers actually post on, 18 applicant tracking
 platforms plus 14 public feeds (8 of them live immediately; 4 want an API key
 you register for, 2 are scrapers and off by default), and scores every posting
 against rules you wrote yourself. Then it helps you evaluate roles, build applications, prepare for
-interviews, and keep track of where everything stands.
+interviews, and keep track of where everything stands. Dated pipeline analytics,
+follow-up aging, employer relationship memory, and a private local dashboard
+close the loop: the search can learn which lanes actually produce interviews.
 
 It is built for people who are not programmers. You talk to Claude; Claude runs
 the machinery. Nothing personal lives in this repo: your profile, database and
@@ -194,6 +196,12 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py audit         # show what the gates killed, and why
 ./careerkit.py report        # regenerate the latest report
 ./careerkit.py report --format csv    # export the rows for a spreadsheet
+./careerkit.py report --format html   # private single-file command center
+./careerkit.py analytics     # conversions, timing, lane outcomes, stale threads
+./careerkit.py analytics --format json  # scheduler/notification-friendly output
+./careerkit.py progress UID interviewing --on 2026-08-08
+./careerkit.py relationship add "Acme" --kind recruiter --contact "Jane Smith"
+./careerkit.py relationship list "Acme"
 ./careerkit.py history       # every status change, in order
 ./careerkit.py claims-lint out/cover.md     # numbers and names not in your register
 ./careerkit.py mark UID applied
@@ -216,7 +224,7 @@ re-judge.
 JSON per application to `profile/applications.jsonl`:
 
 ```
-{"company": "Acme", "title": "Salesforce Admin", "status": "rejected", "on": "2026-08-05"}
+{"company": "Acme", "title": "Salesforce Admin", "status": "rejected", "applied_on": "2026-07-30", "on": "2026-08-05"}
 ```
 
 `status` is prepared, applied, rejected, interviewing, offer or withdrawn, and
@@ -224,12 +232,34 @@ JSON per application to `profile/applications.jsonl`:
 `prepared` is explicitly pre-submission: it is reported but never written to the
 database. Interviewing, offer, and withdrawn evidence is retained in event
 history while the database row uses `applied` as its report-suppression status.
+For a later stage, `applied_on` is optional but recommended: it lets analytics
+measure apply-to-interview and apply-to-outcome timing without pretending the
+later status date was the application date.
 It never writes a
 status from a company match alone, because at an employer with several openings
 that marks the wrong one; those go to a review list instead. Once it knows, the
 report warns you when a live posting sits at an employer that already declined
 you. Claude can populate the file from your mail if you ask it to; the engine
 itself never touches your mailbox.
+
+`progress` is the direct alternative to editing JSON when you know the exact
+posting. It records a dated applied, interviewing, offer, rejected, or withdrawn
+stage, preserves existing notes, and is safe to repeat. `analytics` combines
+those events with `applications.jsonl`, including real applications that cannot
+be safely matched to a stored posting. It reports the limitation instead of
+dropping them from the denominator. Active applied/interviewing threads become
+follow-ups after 14 silent days by default (`--follow-up-days` changes it).
+
+`relationship` remembers facts about the employer rather than only one
+requisition: recruiters, referrals, contacts, prior interviews, standing
+invitations, rejections, and notes. The context may be recorded before any job
+exists and appears beside later opportunities from that employer.
+
+`report --format html` writes a self-contained dashboard under `out/`: pipeline
+stages, lane conversion, follow-ups, relationship history, filterable active
+roles, and source health. It loads no remote scripts, fonts, images, analytics,
+or telemetry. Job links are the only outbound links and only HTTP(S) URLs are
+made clickable.
 
 `enrich` fetches the full posting for rows whose stored text has no requirements
 section. Aggregators carry a summary, and the part that decides whether you can
@@ -243,6 +273,11 @@ and quoted a salary band on the line below.
 `doctor` is the one to run if something feels off. It checks that your profile
 parses, that no source has been failing repeatedly, that the last run finished and was recent, and that your database
 and `tracker.md` agree about what you have applied to.
+
+The scorer also recognizes explicit, parseable application deadlines such as
+"Apply by July 30, 2026" or "posting closes on 2026-07-30" and stops presenting
+the role after that day. It does not guess from unrelated dates, and "open until
+filled" remains open.
 
 `tracker-sync` turns that drift warning into a safe, reviewable action. Its
 default is a dry run that prints each proposed SQLite status change and the exact
@@ -265,6 +300,11 @@ real public boards, so a board changing its JSON or HTML shape fails a test
 rather than quietly returning nothing. Fixture origins are recorded in
 `tests/fixtures/README.md`; a fixture invented from a guessed shape would be
 worse than no fixture at all.
+
+The full competitive review behind the pipeline/dashboard work is in
+[`docs/COMPETITIVE-AUDIT-2026-08-08.md`](docs/COMPETITIVE-AUDIT-2026-08-08.md).
+It benchmarks current open-source projects and commercial products, says where
+CareerKit is genuinely ahead, and keeps the remaining roadmap explicit.
 
 `./careerkit.py status` additionally reports where the database and canonical
 URLs in your `tracker.md` disagree. The surrounding narrative may already name
