@@ -146,8 +146,13 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
                if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.uid not in kept_uids}
     n_delisted, n_demoted = store.reconcile(
         con, demoted, fetched["healthy_boards"], fetched["healthy_feeds"],
+        # Deactivated boards are deliberately no longer known/live. Keeping them
+        # here stranded every row they had ever produced: the board was no longer
+        # polled, its non-empty stable board id matched no healthy source, and the
+        # orphan rule refused to retire it because the inactive registry entry
+        # still counted as known.
         known_boards={(e.get("ats"), e.get("name") or e.get("slug", ""))
-                      for e in reg.get("employers", [])})
+                      for e in reg.get("employers", []) if e.get("active", True)})
 
     rows = store.query(con, min_score=min_score, limit=300)
     health = list(con.execute(
@@ -166,23 +171,24 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
 
 
 def broken_sources(con, reg: dict, threshold: int = 2) -> list:
-    """Sources failing repeatedly, EXCLUDING ones the user already retired.
+    """Repeated failures for sources that are active in the current registry.
 
-    A deactivated board keeps its failure history in source_health forever, so
-    boards that were dealt with weeks ago kept appearing under "failing
-    repeatedly". A warning list containing things you have already handled is a
-    warning list you learn to skip, which is how a real outage goes unnoticed.
+    A deactivated, removed, or renamed board keeps its failure history in
+    source_health forever. Showing those orphaned rows under "failing
+    repeatedly" makes a repaired source look permanently broken. A warning
+    list containing things already handled is one users learn to skip, which is
+    how a real outage goes unnoticed.
 
     Lives here rather than in a CLI for the same reason the pull loop does:
     both front ends print this and one of them had already drifted."""
-    retired = {f"{e.get('ats')}:{e.get('name')}"
-               for e in reg.get("employers", []) if not e.get("active", True)}
-    retired |= {f"feed:{f.get('name')}"
-                for f in reg.get("feeds", []) if not f.get("active", True)}
+    active = {f"{e.get('ats')}:{e.get('name')}"
+              for e in reg.get("employers", []) if e.get("active", True)}
+    active |= {f"feed:{f.get('name')}"
+               for f in reg.get("feeds", []) if f.get("active", True)}
     return [b for b in con.execute(
         "SELECT * FROM source_health WHERE consecutive_failures >= ? "
         "ORDER BY consecutive_failures DESC", (threshold,))
-        if b["source"] not in retired]
+        if b["source"] in active]
 
 
 def rebuild_report(con, *, min_score: int = 0, echo=print):

@@ -15,7 +15,7 @@ from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 
-from .models import Job, ATS_SOURCES
+from .models import Job, ATS_SOURCES, _norm_company
 
 DB_PATH = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "data" / "jobs.db"
 
@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS events (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT,
   uid TEXT, at TEXT, kind TEXT, detail TEXT
 );
+CREATE TABLE IF NOT EXISTS employer_history (
+  history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  company TEXT, company_key TEXT, at TEXT, kind TEXT,
+  contact TEXT DEFAULT '', contact_email TEXT DEFAULT '', detail TEXT DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS source_health (
   source TEXT PRIMARY KEY, last_ok TEXT, last_count INTEGER,
   last_error TEXT, consecutive_failures INTEGER DEFAULT 0
@@ -61,6 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_gate ON jobs(gate, score DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_first ON jobs(first_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_group ON jobs(group_key);
 CREATE INDEX IF NOT EXISTS idx_events_uid ON events(uid, at);
+CREATE INDEX IF NOT EXISTS idx_employer_history_key ON employer_history(company_key, at);
 """
 
 # Columns added after v1. CREATE TABLE IF NOT EXISTS does nothing to a table
@@ -252,6 +258,97 @@ class RunLock:
         return False
 
 
+_STATUS_RANK = {"new": 0, "reviewed": 1, "ignored": 2, "applied": 3, "rejected": 4}
+
+
+def _merge_duplicate_job_row(cur: sqlite3.Cursor, target_uid: str,
+                             old: sqlite3.Row) -> None:
+    """Merge one exact duplicate into an existing canonical job row."""
+    cur.execute("SELECT * FROM jobs WHERE uid=?", (target_uid,))
+    current = cur.fetchone()
+    if current is None:
+        return
+    current_rank = _STATUS_RANK.get(current["status"] or "new", 0)
+    old_rank = _STATUS_RANK.get(old["status"] or "new", 0)
+    status = old["status"] if old_rank > current_rank else current["status"]
+    notes = []
+    for value in (current["notes"], old["notes"]):
+        value = (value or "").strip()
+        if value and value not in notes:
+            notes.append(value)
+    first_runs = [v for v in (current["first_seen_run"], old["first_seen_run"])
+                  if v is not None]
+    last_runs = [v for v in (current["last_seen_run"], old["last_seen_run"])
+                 if v is not None]
+    cur.execute(
+        "UPDATE jobs SET status=?, notes=?, first_seen=MIN(first_seen,?), "
+        "last_seen=MAX(last_seen,?), seen_count=COALESCE(seen_count,0)+?, "
+        "first_seen_run=?, last_seen_run=? WHERE uid=?",
+        (status, " | ".join(notes), old["first_seen"], old["last_seen"],
+         old["seen_count"] or 0,
+         min(first_runs) if first_runs else None,
+         max(last_runs) if last_runs else None,
+         target_uid),
+    )
+    for sighting in cur.execute(
+            "SELECT source,url,seen_on FROM sightings WHERE uid=?", (old["uid"],)).fetchall():
+        cur.execute(
+            "INSERT INTO sightings (uid,source,url,seen_on) VALUES (?,?,?,?) "
+            "ON CONFLICT(uid,source) DO UPDATE SET url=excluded.url, "
+            "seen_on=MAX(sightings.seen_on,excluded.seen_on)",
+            (target_uid, sighting["source"], sighting["url"], sighting["seen_on"]),
+        )
+    cur.execute("DELETE FROM sightings WHERE uid=?", (old["uid"],))
+    cur.execute("UPDATE events SET uid=? WHERE uid=?", (target_uid, old["uid"]))
+    cur.execute("DELETE FROM jobs WHERE uid=?", (old["uid"],))
+
+
+def _repair_same_url_identity(cur: sqlite3.Cursor, job: Job) -> None:
+    """Collapse rows stranded by an earlier ATS UID algorithm.
+
+    The 2026-08-06 identity fix deliberately started preserving meaningful
+    parenthesized title text. A requisition first seen under the older title
+    normalizer therefore got a new UID even though its employer, source,
+    group, and exact posting URL were unchanged. If the old row carried an
+    applied/rejected status, the fresh duplicate resurfaced as NEW.
+
+    Exact URL + source + group is a much stronger identity statement than a
+    title comparison. Adopt the old row when the new UID does not exist; if
+    both already exist, merge history into the current UID without losing the
+    strongest human-set status or either row's notes.
+    """
+    # Do not merge merely because two rows share a URL: some ATS platforms use
+    # one generic apply URL for several real requisitions with the same title.
+    # The historical UID is deterministic from the current job's requisition
+    # id, so repair only that exact transition row.
+    legacy_uid = job.legacy_external_uid
+    if not job.external_id or legacy_uid == job.uid:
+        return
+    cur.execute(
+        "SELECT * FROM jobs WHERE uid=? AND group_key=? AND source=? AND url=?",
+        (legacy_uid, job.group_key, job.source, job.url),
+    )
+    duplicates = cur.fetchall()
+    for old in duplicates:
+        cur.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,))
+        current = cur.fetchone()
+        if current is None:
+            try:
+                cur.execute("UPDATE jobs SET uid=?, schema_v=2 WHERE uid=?",
+                            (job.uid, old["uid"]))
+                cur.execute("UPDATE sightings SET uid=? WHERE uid=?",
+                            (job.uid, old["uid"]))
+                cur.execute("UPDATE events SET uid=? WHERE uid=?",
+                            (job.uid, old["uid"]))
+                continue
+            except sqlite3.IntegrityError:
+                # Another duplicate may already have claimed the new UID in
+                # this loop. Fall through to the explicit merge path.
+                cur.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,))
+                current = cur.fetchone()
+
+        if current is not None:
+            _merge_duplicate_job_row(cur, job.uid, old)
 def upsert(con: sqlite3.Connection, jobs: list[Job],
            run_id: int | None = None) -> tuple[list[Job], list[Job]]:
     """Insert or refresh. Returns (new_jobs, seen_again)."""
@@ -267,6 +364,7 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
         jobs = sorted(jobs, key=lambda j: 0 if legacy_urls.get(j.group_key) == j.url else 1)
     with closing(con.cursor()) as cur:
         for j in jobs:
+            _repair_same_url_identity(cur, j)
             cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
             row = cur.fetchone()
             if row is None and j.uid != j.group_key:
@@ -531,7 +629,21 @@ def is_new_this_run(row, run_id: int | None) -> bool:
     return row["first_seen"] == row["last_seen"]      # pre-run-id rows
 
 
-def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "") -> None:
+def _event_time(value: str | None = None) -> str:
+    """Normalise a user-supplied ISO day/datetime for the event trail."""
+    if not value:
+        return datetime.now().isoformat(timespec="seconds")
+    text = str(value).strip()
+    try:
+        if len(text) == 10:
+            return datetime.fromisoformat(text).replace(hour=12).isoformat(timespec="seconds")
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat(timespec="seconds")
+    except ValueError:
+        raise ValueError(f"invalid event date {value!r}; use YYYY-MM-DD or an ISO datetime")
+
+
+def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "", *,
+               at: str | None = None) -> None:
     """Validated on purpose. Any string used to be accepted, but query() only
     understands five, so a typo ('apllied') silently left the job in the active
     list and the user believed it was filed."""
@@ -550,9 +662,49 @@ def set_status(con: sqlite3.Connection, uid: str, status: str, notes: str = "") 
     # the interesting questions are all about its history.
     if prev is None or prev["status"] != status:
         con.execute("INSERT INTO events (uid, at, kind, detail) VALUES (?,?,?,?)",
-                    (uid, datetime.now().isoformat(timespec="seconds"),
+                    (uid, _event_time(at),
                      f"status:{status}", notes or ""))
     con.commit()
+
+
+APPLICATION_STAGES = ("applied", "interviewing", "offer", "rejected", "withdrawn")
+_APPLICATION_DB_STATUS = {
+    "applied": "applied",
+    "interviewing": "applied",
+    "offer": "applied",
+    "rejected": "rejected",
+    # A withdrawn application must stay suppressed. `applied` is the durable
+    # "submitted pipeline" state; the richer current stage lives in events.
+    "withdrawn": "applied",
+}
+
+
+def record_application_stage(con: sqlite3.Connection, uid: str, stage: str, *,
+                             on: str | None = None, notes: str = "",
+                             detail: str | None = None) -> bool:
+    """Record a dated pipeline transition and suppress the posting safely.
+
+    Returns True when a new application event was written. Repeating the exact
+    command is idempotent, which matters when evidence reconciliation is run on
+    the same append-only file every week.
+    """
+    stage = (stage or "").lower()
+    if stage not in APPLICATION_STAGES:
+        raise ValueError(f"unknown application stage {stage!r}. Use one of: "
+                         f"{', '.join(APPLICATION_STAGES)}")
+    event_at = _event_time(on)
+    set_status(con, uid, _APPLICATION_DB_STATUS[stage], notes, at=event_at)
+    kind = f"application:{stage}"
+    event_detail = notes if detail is None else detail
+    exists = con.execute(
+        "SELECT 1 FROM events WHERE uid=? AND kind=? AND substr(at,1,10)=substr(?,1,10) "
+        "AND detail=? LIMIT 1", (uid, kind, event_at, event_detail or "")).fetchone()
+    if exists:
+        return False
+    con.execute("INSERT INTO events (uid, at, kind, detail) VALUES (?,?,?,?)",
+                (uid, event_at, kind, event_detail or ""))
+    con.commit()
+    return True
 
 
 def stats(con: sqlite3.Connection) -> dict:
@@ -579,3 +731,67 @@ def history(con: sqlite3.Connection, uid: str | None = None, limit: int = 200) -
     if uid:
         return list(con.execute(q + "WHERE e.uid=? ORDER BY e.at DESC LIMIT ?", (uid, limit)))
     return list(con.execute(q + "ORDER BY e.at DESC LIMIT ?", (limit,)))
+
+
+RELATIONSHIP_KINDS = ("recruiter", "referral", "contact", "interview",
+                      "invitation", "rejection", "note")
+
+
+def _canonical_history_company(con: sqlite3.Connection, company: str) -> tuple[str, str]:
+    """Adopt one unambiguous stored employer name, including common acronyms."""
+    key = _norm_company(company)
+    stored = [r[0] for r in con.execute("SELECT DISTINCT company FROM jobs WHERE company<>''")]
+    exact = [name for name in stored if _norm_company(name) == key]
+    if len(exact) == 1:
+        return exact[0], key
+    compact = "".join(c for c in key if c.isalnum())
+    if " " not in key and 3 <= len(compact) <= 8:
+        def acronym(name: str) -> str:
+            words = [w for w in _norm_company(name).split() if w]
+            return "".join(w[0] for w in words)
+        aliases = [name for name in stored if acronym(name) == compact]
+        if len(aliases) == 1:
+            return aliases[0], _norm_company(aliases[0])
+    return company, key
+
+
+def add_relationship(con: sqlite3.Connection, company: str, kind: str, *,
+                     on: str | None = None, contact: str = "",
+                     contact_email: str = "", detail: str = "") -> bool:
+    """Remember employer-level context that is not tied to one requisition."""
+    company = (company or "").strip()
+    kind = (kind or "").lower()
+    if not company:
+        raise ValueError("company is required")
+    if kind not in RELATIONSHIP_KINDS:
+        raise ValueError(f"unknown relationship kind {kind!r}. Use one of: "
+                         f"{', '.join(RELATIONSHIP_KINDS)}")
+    at = _event_time(on)
+    company, key = _canonical_history_company(con, company)
+    values = (key, kind, at, contact or "", contact_email or "", detail or "")
+    exists = con.execute(
+        "SELECT 1 FROM employer_history WHERE company_key=? AND kind=? "
+        "AND substr(at,1,10)=substr(?,1,10) AND contact=? AND contact_email=? "
+        "AND detail=? LIMIT 1", values).fetchone()
+    if exists:
+        return False
+    con.execute(
+        "INSERT INTO employer_history "
+        "(company,company_key,at,kind,contact,contact_email,detail) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (company, key, at, kind, contact or "", contact_email or "", detail or ""))
+    con.commit()
+    return True
+
+
+def relationships(con: sqlite3.Connection, company: str | None = None,
+                  limit: int = 200) -> list[sqlite3.Row]:
+    if company:
+        _, key = _canonical_history_company(con, company)
+        return list(con.execute(
+            "SELECT * FROM employer_history WHERE company_key=? "
+            "ORDER BY at DESC, history_id DESC LIMIT ?",
+            (key, limit)))
+    return list(con.execute(
+        "SELECT * FROM employer_history ORDER BY at DESC, history_id DESC LIMIT ?",
+        (limit,)))

@@ -14,7 +14,7 @@ from typing import Any
 ATS_SOURCES = frozenset({
     "greenhouse", "lever", "ashby", "smartrecruiters", "workable", "recruitee",
     "bamboohr", "rippling", "teamtailor", "workday", "oracle_orc", "eightfold",
-    "phenom", "icims", "jobvite", "paylocity", "personio",
+    "phenom", "icims", "jobvite", "paylocity", "personio", "hrmdirect",
 })
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -112,6 +112,20 @@ class Job:
         return hashlib.sha256(basis.encode()).hexdigest()[:20]
 
     @property
+    def legacy_external_uid(self) -> str:
+        """UID emitted by the short-lived external-ID scheme before strict
+        title identity preserved meaningful parenthesized text.
+
+        Kept only for in-place adoption of rows written by that build. It uses
+        the board requisition id for every source because aggregators were also
+        briefly affected during the transition.
+        """
+        basis = self._basis
+        if self.external_id:
+            basis = f"{basis}|{self.external_id}"
+        return hashlib.sha256(basis.encode()).hexdigest()[:20]
+
+    @property
     def text(self) -> str:
         return f"{self.title}\n{self.location}\n{self.department}\n{self.description}"
 
@@ -201,4 +215,3 @@ def _norm_title_strict(t: str) -> str:
     t = re.sub(r"[^a-z0-9 ]", " ", t)
     t = re.sub(r"\b(remote|us|usa|united states|hybrid|onsite|full time|fulltime|ft)\b", " ", t)
     return _WS_RE.sub(" ", t).strip()
-

@@ -1,6 +1,6 @@
 # CareerKit, the guide
 
-**A job search engine you operate by talking to it.** It polls 17 employer
+**A job search engine you operate by talking to it.** It polls 18 employer
 applicant tracking platforms directly plus 14 public job feeds, scores every
 posting against rules you wrote yourself, and helps you evaluate, apply, prepare
 and track from there.

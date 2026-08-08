@@ -1,0 +1,71 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Teamtailor",
+  "home_page_url": "https://career.teamtailor.com/jobs",
+  "feed_url": "https://career.teamtailor.com/jobs.json",
+  "items": [
+    {
+      "id": "20fafb7d-f013-4061-b6de-2894b3e0838b",
+      "title": "Account Executive - Italy (Madrid based)",
+      "url": "https://career.teamtailor.com/jobs/7167985-account-executive-italy-madrid-based",
+      "date_published": "2026-02-04T09:26:20+01:00",
+      "_jobposting": {
+        "@context": "http://schema.org/",
+        "@type": "JobPosting",
+        "title": "Account Executive - Italy (Madrid based)",
+        "identifier": {"@type": "PropertyValue", "name": "Teamtailor", "value": 7167985},
+        "datePosted": "2026-02-04T09:26:20+01:00",
+        "jobLocation": [
+          {
+            "@type": "Place",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": "Monday Chamberi",
+              "addressLocality": "Madrid",
+              "postalCode": "28010",
+              "addressCountry": "ES",
+              "addressRegion": "Europe"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "a52c9a45-1132-44c9-9696-76974817ae6e",
+      "title": "Mid-Market Account Executive - Copenhagen",
+      "url": "https://career.teamtailor.com/jobs/7069633-mid-market-account-executive-copenhagen",
+      "date_published": "2026-01-18T19:35:57+01:00",
+      "_jobposting": {
+        "@context": "http://schema.org/",
+        "@type": "JobPosting",
+        "title": "Mid-Market Account Executive - Copenhagen",
+        "identifier": {"@type": "PropertyValue", "name": "Teamtailor", "value": 7069633},
+        "datePosted": "2026-01-18T19:35:57+01:00",
+        "jobLocation": [
+          {
+            "@type": "Place",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": "Östgötagatan 16",
+              "addressLocality": "Stockholm",
+              "postalCode": "116 21",
+              "addressCountry": "SE",
+              "addressRegion": "Sweden"
+            }
+          },
+          {
+            "@type": "Place",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": "Matrikel1",
+              "addressLocality": "København",
+              "postalCode": "1200",
+              "addressCountry": "DK",
+              "addressRegion": "Europe"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

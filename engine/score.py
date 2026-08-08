@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -146,6 +147,38 @@ _MONEY = re.compile(r"\$\s?(\d{1,3})(?:,(\d{3}))?(?:\s?[kK])?(?:\.\d+)?")
 _RANGE_CTX = re.compile(
     r"(base (salary|pay|compensation)|salary range|pay range|compensation range|"
     r"hiring range|target salary|annual (salary|base))", re.I)
+
+# A listing can remain available through an aggregator after the employer's
+# explicit deadline.  Parse only sentences that unmistakably introduce an
+# application deadline; a loose date search would turn benefit dates, start
+# dates, and copyright years into false closures.
+_DEADLINE = re.compile(
+    r"\b(?:apply(?:\s+no\s+later\s+than)?\s+by|application\s+deadline(?:\s+is)?|"
+    r"posting\s+closes?(?:\s+on)?|position\s+closes?(?:\s+on)?|"
+    r"accept(?:ing)?\s+(?:applications|applicants)\s+until|"
+    r"applications?\s+(?:will\s+be\s+)?accepted\s+(?:until|through))\s*"
+    r"[:\-]?\s*("
+    r"[A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s*|\s+)\d{4}|"
+    r"\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b", re.I)
+
+
+def posting_deadline(text: str, *, today: date | None = None) -> tuple[date, str] | None:
+    """Return the earliest explicit application deadline and its evidence."""
+    found = []
+    for m in _DEADLINE.finditer(text or ""):
+        raw = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", m.group(1), flags=re.I)
+        parsed = None
+        for fmt in ("%B %d, %Y", "%B %d %Y", "%b %d, %Y", "%b %d %Y",
+                    "%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%m/%d/%y"):
+            try:
+                parsed = datetime.strptime(raw, fmt).date()
+                break
+            except ValueError:
+                pass
+        if parsed:
+            evidence = re.sub(r"\s+", " ", m.group(0)).strip()
+            found.append((parsed, evidence))
+    return min(found, key=lambda x: x[0]) if found else None
 
 
 # --------------------------------------------------------------------------
@@ -341,6 +374,7 @@ class Profile:
     accept_floor: int = 0
     remote_ok: bool = True
     relocation: bool = False
+    metros: list[str] = field(default_factory=list)
     metro_re: re.Pattern | None = None
     lanes: list[tuple[int, re.Pattern, str]] = field(default_factory=list)
     dream_lanes: list[tuple[int, re.Pattern, str]] = field(default_factory=list)
@@ -373,14 +407,14 @@ class Profile:
             accept_floor=int(comp.get("accept_floor") or comp.get("screen_floor") or 0),
             remote_ok=bool(loc.get("remote_us", True)),
             relocation=bool(loc.get("relocation", False)),
+            metros=[str(m) for m in (loc.get("metros") or []) if m],
             block_clearance=bool(exc.get("clearance", True)),
             block_quota=bool(exc.get("quota", True)),
             dream_companies={c.lower() for c in (cfg.get("dream_companies") or [])},
             search_terms=list(cfg.get("search_terms") or []),
             lane_title_context=dict(cfg.get("lane_title_context") or {}),
         )
-        metros = loc.get("metros") or []
-        p.metro_re = _compile_alt(metros) if metros else None
+        p.metro_re = _compile_alt(p.metros) if p.metros else None
         # Raw lane titles, kept for the adapters' detail pre-filter. Compiled
         # patterns cannot be reused there: the pre-filter needs the terms
         # themselves so it can say what THIS user is looking for.
@@ -690,6 +724,11 @@ def score(job: Job, p: Profile) -> Job:
         job.gate, job.score = "EXCLUDED", 0
         job.reasons = ["malformed posting: no title and no body"]
         return job
+    deadline = posting_deadline(job.description or "")
+    if deadline and deadline[0] < date.today():
+        job.gate, job.score = "EXCLUDED", 0
+        job.reasons = [f"posting closed {deadline[0].isoformat()}: {deadline[1]!r}"]
+        return job
     ctx = p.lane_title_context.get(job.lane or "")
     # Only ever ENRICHES a real title. Applied to an empty one the prefix
     # becomes the whole string, so a malformed posting matched the lane on the
@@ -704,6 +743,7 @@ def score(job: Job, p: Profile) -> Job:
 
     # --- title fit -------------------------------------------------------
     base, lane_key = 0, ""
+    body_only_fit = False
     tiers = (p.dream_lanes + p.lanes) if exempt else p.lanes
     for weight, pat, key in tiers:
         if pat.search(title):
@@ -713,6 +753,7 @@ def score(job: Job, p: Profile) -> Job:
         for weight, pat, key in p.lanes:   # was [:12]; lanes 13+ silently lost the body fallback
             if pat.search(text[:1500]):
                 base, lane_key = max(10, weight - 22), key
+                body_only_fit = True
                 reasons.append("fit only in body, not title")
                 break
     if not base:
@@ -892,6 +933,14 @@ def score(job: Job, p: Profile) -> Job:
         unknowns.append("comp unstated")
     if comp_state == "thin":
         unknowns.append("comp below accept floor")
+    # A product name buried in an unrelated description is not enough evidence
+    # that the role itself belongs to the requested family. Seen live in an IAM
+    # Architect listing whose title was wholly outside the profile: one mention
+    # of Salesforce in a list of enterprise applications promoted it all the
+    # way to QUALIFIED. Keep body fallback useful for sparse aggregator titles,
+    # but make the uncertainty visible and require human verification.
+    if body_only_fit:
+        unknowns.append("role family matched only in body, not title")
 
     job.gate = "VERIFY" if unknowns else "QUALIFIED"
     job.score = total

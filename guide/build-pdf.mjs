@@ -24,7 +24,28 @@ if (!existsSync(src)) {
   process.exit(1);
 }
 
-const browser = await chromium.launch();
+// `npm install` installs the Playwright library but, depending on npm settings,
+// may not download its bundled Chromium. CareerKit already documents Chrome as
+// a prerequisite, so use it when available instead of failing with Playwright's
+// opaque "executable doesn't exist" message. PLAYWRIGHT_CHROMIUM_PATH supports
+// nonstandard installations and CI images.
+const browserCandidates = [
+  process.env.PLAYWRIGHT_CHROMIUM_PATH,
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium',
+].filter(Boolean);
+const systemBrowser = browserCandidates.find(existsSync);
+let browser;
+try {
+  browser = await chromium.launch(systemBrowser ? { executablePath: systemBrowser } : {});
+} catch (error) {
+  console.error('Could not launch Chromium to build the guide.');
+  console.error('Run `npx playwright install chromium`, or set PLAYWRIGHT_CHROMIUM_PATH.');
+  console.error(error.message);
+  process.exit(1);
+}
 const page = await browser.newPage();
 
 const failed = [];

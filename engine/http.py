@@ -103,7 +103,7 @@ def set_cache_enabled(on: bool) -> None:
     """Process-wide cache switch.
 
     `audit` documents itself as re-fetching live boards but, inside the 6h TTL,
-    re-scored the same cached payloads. Threading use_cache through 17 adapter
+    re-scored the same cached payloads. Threading use_cache through every adapter
     signatures would be worse than a process flag."""
     global _cache_enabled
     _cache_enabled = bool(on)

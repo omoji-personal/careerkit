@@ -146,6 +146,13 @@ def _p_personio(s: str):
     return tx.count("<position>") if st == 200 and "<position>" in tx else None
 
 
+def _p_hrmdirect(s: str):
+    st, tx = fetch(f"https://{s}.hrmdirect.com/employment/job-openings.php?search=true")
+    if st != 200 or not re.search(r"<title[^>]*>\s*Careers At\b", tx, re.I):
+        return None
+    return len(set(re.findall(r'\bdata-req-id=["\']([^"\']+)', tx, re.I)))
+
+
 def _p_teamtailor(s: str):
     st, tx = fetch(f"https://{s}.teamtailor.com/jobs.json")
     if st != 200:
@@ -169,6 +176,7 @@ PROBES = {
     "jobvite": _p_jobvite,
     "icims": _p_icims,
     "personio": _p_personio,
+    "hrmdirect": _p_hrmdirect,
     "teamtailor": _p_teamtailor,
 }
 
@@ -177,7 +185,7 @@ PROBES = {
 PROBE_ORDER = [
     "greenhouse", "lever", "ashby", "smartrecruiters", "workable",
     "bamboohr", "rippling", "recruitee", "jobvite", "icims",
-    "teamtailor", "personio",
+    "teamtailor", "personio", "hrmdirect",
 ]
 
 # Probed platforms, plus Workday, which is searched after these miss.

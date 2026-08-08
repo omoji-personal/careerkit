@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Callable
+from urllib.parse import urljoin
 
 from . import http
 from .http import fetch, fetch_json
@@ -36,7 +37,15 @@ def board_id(cfg: dict) -> str:
     Health used to key on the registry DISPLAY NAME, so renaming an employer in
     employers.yaml stranded every row written under the old name; they matched
     no healthy board and could never be retired."""
-    key = cfg.get("slug") or cfg.get("tenant") or cfg.get("domain") or cfg.get("guid") or ""
+    ats = cfg.get("ats", "")
+    if ats == "workday":
+        key = "/".join(str(cfg.get(k) or "") for k in ("tenant", "dc", "site"))
+    elif ats == "oracle_orc":
+        key = "/".join(str(cfg.get(k) or "") for k in ("host", "site"))
+    elif ats == "phenom":
+        key = str(cfg.get("host") or "")
+    else:
+        key = cfg.get("slug") or cfg.get("tenant") or cfg.get("domain") or cfg.get("guid") or ""
     return f"{cfg.get('ats', '')}:{key}".lower()
 
 
@@ -217,13 +226,36 @@ def workable(cfg: dict) -> list[Job]:
             except Exception:
                 jobs = []
     out = []
+    by_id: dict[str, Job] = {}
     for j in jobs or []:
         loc = j.get("location") or {}
         if isinstance(loc, dict):
             loc_s = ", ".join(x for x in [loc.get("city"), loc.get("region"), loc.get("country")] if x)
         else:
             loc_s = str(loc)
-        out.append(Job(
+        # The current widget returns one row per advertised country and puts
+        # the place in `locations` (plus top-level city/state/country), not in
+        # the older singular `location`.  Ignoring both silently reduced every
+        # multi-country opening to a generic "Remote" row.  Rows for those
+        # countries share a shortcode, so merge them into the one requisition
+        # rather than sending duplicates downstream.
+        if not loc_s:
+            places = j.get("locations") or []
+            rendered = []
+            for place in places if isinstance(places, list) else []:
+                if not isinstance(place, dict):
+                    continue
+                value = ", ".join(x for x in
+                                  [place.get("city"), place.get("region"), place.get("country")]
+                                  if x)
+                if value and value not in rendered:
+                    rendered.append(value)
+            loc_s = "; ".join(rendered)
+        if not loc_s:
+            loc_s = ", ".join(x for x in
+                              [j.get("city"), j.get("state"), j.get("country")] if x)
+        ext = str(j.get("shortcode") or j.get("id") or "")
+        job = Job(
             title=j.get("title", ""),
             url=j.get("url") or j.get("shortlink") or
                 f"https://apply.workable.com/{slug}/j/{j.get('shortcode','')}/",
@@ -233,9 +265,19 @@ def workable(cfg: dict) -> list[Job]:
             posted_at=(j.get("published_on") or j.get("created_at") or "")[:10],
             department=j.get("department", "") or "",
             remote_flag=bool(j.get("remote") or j.get("telecommuting")),
-            external_id=str(j.get("shortcode") or j.get("id") or ""),
+            external_id=ext,
             source="workable", raw=j, **_base(cfg),
-        ))
+        )
+        if ext and ext in by_id:
+            prior = by_id[ext]
+            locations = [x for x in (prior.location, job.location) if x]
+            prior.location = "; ".join(dict.fromkeys(
+                part for value in locations for part in value.split("; ") if part
+            ))
+            continue
+        out.append(job)
+        if ext:
+            by_id[ext] = job
     return out
 
 
@@ -319,12 +361,41 @@ def teamtailor(cfg: dict) -> list[Job]:
         data = json.loads(text)
     except Exception:
         return []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        # Teamtailor's public jobs.json changed from a private `jobs` shape to
+        # JSON Feed 1.1.  The schema.org JobPosting nested in each feed item is
+        # the current public contract and carries the useful location/body.
+        items = data.get("jobs") or data.get("items") or []
+    else:
+        return []
     out = []
-    for j in data if isinstance(data, list) else data.get("jobs", []):
+    for j in items:
+        posting = j.get("_jobposting") or {}
+        locs = posting.get("jobLocation") or []
+        if isinstance(locs, dict):
+            locs = [locs]
+        rendered = []
+        for place in locs:
+            address = (place or {}).get("address") or {}
+            value = ", ".join(x for x in
+                              [address.get("addressLocality"), address.get("addressRegion"),
+                               address.get("addressCountry")] if x)
+            if value and value not in rendered:
+                rendered.append(value)
+        identifier = posting.get("identifier") or ""
+        if isinstance(identifier, dict):
+            identifier = identifier.get("value") or identifier.get("name") or ""
         out.append(Job(
-            title=j.get("title", ""), url=j.get("careersite-job-url", "") or j.get("url", ""),
-            location=j.get("location", "") or "", description=strip_html(j.get("body", "")),
-            external_id=str(j.get("id", "")), source="teamtailor", raw=j, **_base(cfg),
+            title=j.get("title", "") or posting.get("title", ""),
+            url=j.get("careersite-job-url", "") or j.get("url", ""),
+            location=j.get("location", "") or "; ".join(rendered),
+            description=strip_html(j.get("body", "") or j.get("content_html", "")
+                                   or posting.get("description", "")),
+            posted_at=(j.get("date_published") or posting.get("datePosted") or "")[:10],
+            remote_flag=True if posting.get("jobLocationType") == "TELECOMMUTE" else None,
+            external_id=str(j.get("id") or identifier), source="teamtailor", raw=j, **_base(cfg),
         ))
     return out
 
@@ -477,17 +548,41 @@ def phenom(cfg: dict) -> list[Job]:
     """Phenom People career sites - very common at large US enterprises."""
     host = cfg["host"].rstrip("/")
     out = []
+    seen = set()
+    html_fallback = False
     for page in range(20):   # was capped at 150 postings
-        data = fetch_json(
-            f"{host}/widgets?ddoKey=refineSearch&sortBy=&subsearch=&from={page*50}&size=50"
-            f"&jobs=true&counts=true&all_fields=true"
-        )
+        data = None
+        if not html_fallback:
+            data = fetch_json(
+                f"{host}/widgets?ddoKey=refineSearch&sortBy=&subsearch=&from={page*50}&size=50"
+                f"&jobs=true&counts=true&all_fields=true"
+            )
+            html_fallback = not isinstance(data, dict)
+        if html_fallback:
+            status, text = fetch(f"{host}/search-results?from={page*10}")
+            if status != 200:
+                break
+            match = re.search(
+                r'phApp\.ddo\s*=\s*(\{.*?\});\s*phApp\.experimentData', text, re.S
+            )
+            try:
+                data = json.loads(match.group(1)) if match else None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                data = None
         if not isinstance(data, dict):
             break
-        ref = (data.get("refineSearch") or {}).get("data", {}).get("jobs") or []
+        block = data.get("refineSearch") or data.get("eagerLoadRefineSearch") or {}
+        ref = (block.get("data") or {}).get("jobs") or []
         if not ref:
             break
+        added = 0
         for j in ref:
+            external_id = str(j.get("jobId") or j.get("jobSeqNo") or "")
+            if external_id and external_id in seen:
+                continue
+            if external_id:
+                seen.add(external_id)
+            added += 1
             out.append(Job(
                 title=j.get("title", ""),
                 url=j.get("applyUrl", "") or f"{host}/job/{j.get('jobSeqNo','')}",
@@ -495,9 +590,11 @@ def phenom(cfg: dict) -> list[Job]:
                 description=strip_html(j.get("descriptionTeaser", "")),
                 posted_at=(j.get("postedDate") or "")[:10],
                 department=j.get("category", "") or "",
-                external_id=str(j.get("jobId") or j.get("jobSeqNo") or ""),
+                external_id=external_id,
                 source="phenom", raw=j, **_base(cfg),
             ))
+        if not added:
+            break
     return out
 
 
@@ -591,25 +688,116 @@ def jobvite(cfg: dict) -> list[Job]:
     return uniq
 
 
+_HRM_ROW = re.compile(r'<tr[^>]*\bdata-req-id=["\']([^"\']+)["\'][^>]*>(.*?)</tr>',
+                      re.S | re.I)
+_HRM_LINK = re.compile(r'href=["\']([^"\']*job-opening\.php\?[^"\']+)["\']', re.I)
+_HRM_TITLE = re.compile(r'<td[^>]*\bid=["\']posTitle[^"\']*["\'][^>]*>\s*'
+                        r'(?:<a[^>]*>)?\s*(.*?)(?:</a>)?\s*</td>', re.S | re.I)
+_HRM_DEPT = re.compile(r'<td[^>]*\bid=["\']departments[^"\']*["\'][^>]*>(.*?)</td>',
+                       re.S | re.I)
+_HRM_DATE = re.compile(r'</td>\s*<td[^>]*class=["\'][^"\']*reqitem[^"\']*["\'][^>]*>'
+                       r'\s*(\d{1,2}/\d{1,2}/\d{4})', re.S | re.I)
+
+
+def _hrm_date(value: str) -> str:
+    try:
+        from datetime import datetime
+        return datetime.strptime(value, "%m/%d/%Y").date().isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+@adapter("hrmdirect")
+def hrmdirect(cfg: dict) -> list[Job]:
+    """HRMDirect / ClearCompany legacy career pages.
+
+    Some nonprofits still publish a server-rendered list here. The list carries
+    stable requisition ids, titles, departments and dates; plausible titles get
+    a detail fetch for location, compensation and requirements before scoring.
+    """
+    slug = cfg["slug"]
+    base = (cfg.get("host") or f"https://{slug}.hrmdirect.com/employment/").rstrip("/") + "/"
+    status, text = fetch(urljoin(base, "job-openings.php?search=true"))
+    if status != 200 or "data-req-id" not in text:
+        return []
+    out = []
+    for req, row in _HRM_ROW.findall(text):
+        link, title = _HRM_LINK.search(row), _HRM_TITLE.search(row)
+        if not (link and title):
+            continue
+        dept, posted = _HRM_DEPT.search(row), _HRM_DATE.search(row)
+        out.append(Job(
+            title=strip_html(title.group(1)),
+            url=urljoin(base, link.group(1).replace("&amp;", "&")),
+            department=strip_html(dept.group(1)) if dept else "",
+            posted_at=_hrm_date(posted.group(1)) if posted else "",
+            external_id=req, source="hrmdirect", raw={}, **_base(cfg),
+        ))
+    for job in out:
+        if not _looks_relevant(job.title):
+            continue
+        st, tx = fetch(job.url)
+        if st != 200:
+            continue
+        loc = re.search(r'Location:</b>\s*</td>\s*<td[^>]*class=["\']viewFieldValue["\'][^>]*>'
+                        r'(.*?)</td>', tx, re.S | re.I)
+        desc = re.search(r'<div[^>]*class=["\']jobDesc["\'][^>]*>(.*?)</div>',
+                         tx, re.S | re.I)
+        if loc:
+            job.location = strip_html(loc.group(1))
+        if desc:
+            job.description = strip_html(desc.group(1))[:20000]
+    return out
+
+
 @adapter("paylocity")
 def paylocity(cfg: dict) -> list[Job]:
     """Paylocity Recruiting - common at US mid-market and nonprofits."""
     guid = cfg["guid"]
-    data = fetch_json(f"https://recruiting.paylocity.com/recruiting/v2/api/jobs?companyId={guid}")
-    if not isinstance(data, (list, dict)):
+    # The former /recruiting/v2/api/jobs endpoint now routes to JobNotFound
+    # HTML with HTTP 200.  The public All page contains the board's real JSON
+    # model in window.pageData; use that stable requisition list instead.
+    status, text = fetch(f"https://recruiting.paylocity.com/recruiting/jobs/All/{guid}")
+    if status != 200:
         return []
-    items = data if isinstance(data, list) else data.get("data", [])
+    match = re.search(r'window\.pageData\s*=\s*(\{.*?\})\s*;', text, re.S)
+    try:
+        data = json.loads(match.group(1)) if match else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        data = None
+    if not isinstance(data, dict):
+        return []
     out = []
-    for j in items or []:
+    for j in data.get("Jobs") or []:
+        loc = j.get("JobLocation") or {}
+        jid = str(j.get("JobId") or "")
         out.append(Job(
-            title=j.get("jobTitle") or j.get("title", ""),
-            url=j.get("jobUrl") or f"https://recruiting.paylocity.com/recruiting/jobs/Details/{j.get('jobId','')}",
-            location=", ".join(x for x in [j.get("city"), j.get("state")] if x),
-            description=strip_html(j.get("jobDescription", "") or j.get("description", "")),
-            posted_at=(j.get("publishedDate") or "")[:10],
-            external_id=str(j.get("jobId") or j.get("id") or ""),
+            title=j.get("JobTitle", ""),
+            url=f"https://recruiting.paylocity.com/recruiting/jobs/Details/{jid}",
+            location=", ".join(x for x in [loc.get("City"), loc.get("State"),
+                                            loc.get("Country")] if x)
+                     or j.get("LocationName", ""),
+            description=strip_html(j.get("Description", "")),
+            posted_at=(j.get("PublishedDate") or "")[:10],
+            remote_flag=bool(j.get("IsRemote")),
+            external_id=jid,
             source="paylocity", raw=j, **_base(cfg),
         ))
+    # Current list records intentionally omit the full description.  Fetch it
+    # only for in-family titles, matching the traffic policy of other large
+    # HTML boards.
+    for job in out:
+        if job.description or not _looks_relevant(job.title):
+            continue
+        st, tx = fetch(job.url)
+        if st != 200:
+            continue
+        body = re.search(
+            r'<div[^>]*class=["\']job-listing-header["\'][^>]*>\s*Description\s*</div>'
+            r'\s*<div>(.*?)</div>', tx, re.S | re.I
+        )
+        if body:
+            job.description = strip_html(body.group(1))[:20000]
     return out
 
 

@@ -27,6 +27,11 @@ CASES = [
     ("bamboohr", {"ats": "bamboohr", "slug": "acme", "name": "Acme"}),
     ("rippling", {"ats": "rippling", "slug": "acme", "name": "Acme"}),
     ("recruitee", {"ats": "recruitee", "slug": "acme", "name": "Acme"}),
+    ("workable", {"ats": "workable", "slug": "acme", "name": "Acme"}),
+    ("oracle_orc", {"ats": "oracle_orc", "host": "ejov.fa.ca2.oraclecloud.com",
+                    "site": "CX", "name": "Acme"}),
+    ("eightfold", {"ats": "eightfold", "domain": "albemarle.com",
+                   "host": "https://albemarle.eightfold.ai", "name": "Acme"}),
 ]
 
 
@@ -60,7 +65,7 @@ def test_adapter_maps_its_real_payload(name, cfg, stub_fetch):
         assert j.url.startswith("http"), f"{name}: bad url {j.url!r}"
         assert j.source == name
         assert j.company == "Acme"
-        assert j.board == f"{name}:acme"
+        assert j.board == adapters.board_id(cfg)
         # external_id is what splits two distinct requisitions at the same
         # employer into two rows. Losing it silently re-collapses them.
         assert j.external_id, f"{name}: no external_id, uid collapses siblings"
@@ -87,6 +92,18 @@ def test_adapter_survives_an_empty_or_wrong_shaped_payload(name, cfg, stub_fetch
 
 TEXT_CASES = [
     ("personio", "personio.xml", {"ats": "personio", "slug": "acme", "name": "Acme"}),
+    ("hrmdirect", "hrmdirect.html", {"ats": "hrmdirect", "slug": "acme", "name": "Acme"}),
+    ("teamtailor", "teamtailor.json",
+     {"ats": "teamtailor", "slug": "career", "name": "Acme"}),
+    ("icims", "icims.html", {"ats": "icims", "slug": "wipfli", "name": "Acme"}),
+    ("jobvite", "jobvite.html",
+     {"ats": "jobvite", "slug": "feedingamerica", "name": "Acme"}),
+    ("paylocity", "paylocity.html",
+     {"ats": "paylocity", "guid": "211e692d-c45a-4e3a-ae01-3e497af97929",
+      "name": "Acme"}),
+    ("phenom", "phenom.html",
+     {"ats": "phenom", "host": "https://careers.phenom.com/global/en",
+      "name": "Acme"}),
 ]
 
 
@@ -94,6 +111,9 @@ TEXT_CASES = [
 def stub_text(monkeypatch):
     def make(body, status=200):
         monkeypatch.setattr(adapters, "fetch", lambda url, *a, **k: (status, body))
+        # Phenom's current public board uses HTML fallback only after its old
+        # widgets JSON endpoint is absent.  Keep this suite entirely offline.
+        monkeypatch.setattr(adapters, "fetch_json", lambda url, *a, **k: None)
     return make
 
 
@@ -122,6 +142,78 @@ def test_text_adapter_survives_junk(name, fixture, cfg, stub_text):
     for body, status in (("", 200), ("<html>nope</html>", 200), ("", 404), ("x" * 50, 500)):
         stub_text(body, status)
         assert getattr(adapters, name)(cfg) == []
+
+
+def test_hrmdirect_fetches_detail_for_a_relevant_title(monkeypatch):
+    listing = (FIXTURES / "hrmdirect.html").read_text()
+    detail = """
+      <td class="viewFieldName"><b>Location:</b></td>
+      <td class="viewFieldValue">Remote, United States<br></td>
+      <div class="jobDesc"><p>Minimum Qualifications</p>
+      <p>Five years of CRM delivery. Salary range $140,000 - $170,000.</p></div>
+    """
+    monkeypatch.setattr(adapters, "_looks_relevant", lambda title: "CRM" in title)
+    monkeypatch.setattr(adapters, "fetch", lambda url, *a, **k:
+                        (200, detail if "job-opening.php" in url else listing))
+    jobs = adapters.hrmdirect({"ats": "hrmdirect", "slug": "acme", "name": "Acme"})
+    crm = next(j for j in jobs if "CRM" in j.title)
+    assert crm.location == "Remote, United States"
+    assert "Minimum Qualifications" in crm.description
+    assert crm.posted_at == "2026-07-15"
+
+
+def test_workday_maps_its_real_payload(monkeypatch):
+    payload = (FIXTURES / "workday.json").read_text()
+    calls = {"n": 0}
+
+    def fake(url, *a, **k):
+        calls["n"] += 1
+        return (200, payload) if calls["n"] == 1 else (200, '{"total":0,"jobPostings":[]}')
+
+    monkeypatch.setattr(adapters, "fetch", fake)
+    monkeypatch.setattr(adapters, "_looks_relevant", lambda title: False)
+    cfg = {"ats": "workday", "tenant": "salesforce", "dc": "wd12",
+           "site": "External_Career_Site", "name": "Acme"}
+    jobs = adapters.workday(cfg)
+
+    assert len(jobs) == 2
+    assert {j.external_id for j in jobs} == {"JR354232", "JR332446"}
+    assert all(j.board == "workday:salesforce/wd12/external_career_site" for j in jobs)
+    assert all(j.url.startswith("https://salesforce.wd12.myworkdayjobs.com/") for j in jobs)
+
+
+def test_workday_survives_junk(monkeypatch):
+    cfg = {"ats": "workday", "tenant": "acme", "dc": "wd1",
+           "site": "External", "name": "Acme"}
+    for status, body in ((200, ""), (200, "not json"), (404, ""), (500, "x")):
+        monkeypatch.setattr(adapters, "fetch", lambda *a, _s=status, _b=body, **k: (_s, _b))
+        assert adapters.workday(cfg) == []
+
+
+def test_workable_merges_current_multi_country_rows(stub_fetch):
+    stub_fetch(json.loads((FIXTURES / "workable.json").read_text()))
+    jobs = adapters.workable({"ats": "workable", "slug": "acme", "name": "Acme"})
+    assert len(jobs) == 1
+    assert jobs[0].location == "Spain; Portugal"
+
+
+def test_teamtailor_maps_json_feed_location_and_date(stub_text):
+    stub_text((FIXTURES / "teamtailor.json").read_text())
+    jobs = adapters.teamtailor({"ats": "teamtailor", "slug": "career", "name": "Acme"})
+    assert jobs[0].location == "Madrid, Europe, ES"
+    assert jobs[0].posted_at == "2026-02-04"
+
+
+def test_paylocity_maps_current_public_page_model(stub_text, monkeypatch):
+    stub_text((FIXTURES / "paylocity.html").read_text())
+    monkeypatch.setattr(adapters, "_looks_relevant", lambda title: False)
+    jobs = adapters.paylocity({
+        "ats": "paylocity", "guid": "211e692d-c45a-4e3a-ae01-3e497af97929",
+        "name": "Acme",
+    })
+    assert len(jobs) == 2
+    assert jobs[0].location == "Raleigh, NC, USA"
+    assert jobs[0].url.endswith("/Details/4141169")
 
 
 # --------------------------------------------------------------------------
@@ -212,26 +304,22 @@ def test_the_whole_chain_from_payload_to_report(tmp_path, monkeypatch):
 def test_adapter_fixture_coverage_does_not_regress():
     """Which adapters are covered by a real payload, and which are not.
 
-    Nine of seventeen still have no fixture, so nine boards can change their
-    JSON and this suite stays green while a live search quietly loses data.
-    They are absent for one reason: no live public board could be located to
-    capture from. Writing a fixture from an assumed shape would be worse than
-    none, because it would test the assumption rather than the board and read as
-    coverage in this file.
+    All eighteen adapters now have a sanitized fixture captured from a real
+    public board. Writing a fixture from an assumed shape would be worse than
+    none, because it would test the assumption rather than the board.
 
     Asserting the current count stops the gap being forgotten, and fails loudly
     if somebody adds an adapter without one.
     """
-    covered = {p.stem for p in FIXTURES.glob("*.json")} | {p.stem for p in FIXTURES.glob("*.xml")}
+    covered = ({p.stem for p in FIXTURES.glob("*.json")} |
+               {p.stem for p in FIXTURES.glob("*.xml")} |
+               {p.stem for p in FIXTURES.glob("*.html")})
     known = {"greenhouse", "lever", "ashby", "smartrecruiters", "workable", "recruitee",
              "bamboohr", "rippling", "teamtailor", "workday", "oracle_orc", "eightfold",
-             "phenom", "icims", "jobvite", "paylocity", "personio"}
+             "phenom", "icims", "jobvite", "paylocity", "personio", "hrmdirect"}
     have = covered & known
     missing = known - covered
-    assert len(have) >= 8, (
-        f"adapter fixture coverage regressed to {len(have)}/17: {sorted(have)}")
-    # Documented, not silent. Capturing any of these is the single most useful
-    # contribution to this repository.
-    assert missing == {"workable", "teamtailor", "workday", "oracle_orc", "eightfold",
-                       "phenom", "icims", "jobvite", "paylocity"}, (
+    assert len(have) >= 18, (
+        f"adapter fixture coverage regressed to {len(have)}/18: {sorted(have)}")
+    assert missing == set(), (
         f"the uncovered set changed; update this list deliberately: {sorted(missing)}")

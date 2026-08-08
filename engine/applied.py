@@ -40,6 +40,14 @@ from datetime import date
 from pathlib import Path
 
 VALID = ("applied", "rejected", "interviewing", "offer", "withdrawn")
+PREFLIGHT = ("prepared",)
+# SQLite's status is a report-suppression state, not the full application
+# pipeline. `store.record_application_stage` owns that mapping so manual
+# progress and evidence reconciliation cannot drift apart.
+DB_STATUS = {
+    "applied": "applied", "rejected": "rejected", "interviewing": "applied",
+    "offer": "applied", "withdrawn": "applied",
+}
 
 
 def _norm(s: str) -> str:
@@ -96,7 +104,7 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
     that is not in the database at all, which is itself a finding: it means the
     user applied somewhere the tool never surfaced.
     """
-    matched, ambiguous, unmatched, problems = [], [], [], []
+    matched, ambiguous, unmatched, pending, problems = [], [], [], [], []
     rows = con.execute("SELECT uid, company, title, status FROM jobs").fetchall()
     by_company: dict[str, list] = {}
     for r in rows:
@@ -107,6 +115,9 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
             problems.append(f"line {rec['_line']}: not valid JSON: {rec['_raw']}")
             continue
         status = (rec.get("status") or "").lower()
+        if status in PREFLIGHT:
+            pending.append({**rec, "why": "prepared is pre-submission; database unchanged"})
+            continue
         if status not in VALID:
             problems.append(f"line {rec.get('_line')}: unknown status {status!r}")
             continue
@@ -143,17 +154,25 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
             unmatched.append({**rec, "why": f"best stored title only {best_score:.0%} similar "
                                             f"({best['title'][:60]!r})"})
 
+    for item in matched:
+        item["db_status"] = DB_STATUS[item["status"]]
+
     if apply and matched:
+        from engine import store
         for m in matched:
-            con.execute(
-                "UPDATE jobs SET status=?, notes=? WHERE uid=?",
-                (m["status"],
-                 f"{m['status']} {m.get('on') or ''} (from {m.get('source') or 'evidence'})".strip(),
-                 m["uid"]))
-        con.commit()
+            # Empty notes are deliberate: store.set_status preserves whatever
+            # free-form note is already on the row. The former direct UPDATE
+            # replaced it with generated evidence text.
+            detail = (f"{m.get('on') or ''} from "
+                      f"{m.get('source') or 'applications.jsonl'}").strip()
+            try:
+                store.record_application_stage(
+                    con, m["uid"], m["status"], on=m.get("on"), detail=detail)
+            except ValueError as e:
+                problems.append(f"line {m.get('_line')}: {e}")
 
     return {"matched": matched, "ambiguous": ambiguous,
-            "unmatched": unmatched, "problems": problems}
+            "unmatched": unmatched, "pending": pending, "problems": problems}
 
 
 def surfacing_a_closed_door(con: sqlite3.Connection) -> list[str]:

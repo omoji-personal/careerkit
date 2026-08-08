@@ -373,6 +373,23 @@ def test_profile_with_no_usable_lanes_does_not_match_everything():
     assert j.gate == "EXCLUDED"
 
 
+def test_a_body_only_product_mention_cannot_be_fully_qualified():
+    """Seen live 2026-08-08: an IAM Architect listing mentioned Salesforce once
+    in a list with SAP and Workday. The generic body fallback treated that as a
+    role-family match and promoted the unrelated posting to QUALIFIED."""
+    import re
+    from engine.score import Profile, score
+    p = Profile()
+    p.lanes = [(32, re.compile(r"salesforce", re.I), "sf-any")]
+    p.domain_terms = re.compile(r"salesforce", re.I)
+    j = J(title="IAM Architect", location="Remote, US",
+          description=("Design identity governance and integrations. Enterprise "
+                       "applications include SAP, Salesforce, and Workday. " + "d" * 400))
+    out = score(j, p)
+    assert out.gate == "VERIFY", out.reasons
+    assert any("role family matched only in body" in r for r in out.reasons)
+
+
 # --------------------------------------------------------------------------
 # Legacy adoption
 # The uid formula changed on 2026-08-05. A pre-change row's uid is exactly the
@@ -715,6 +732,25 @@ def test_aggregator_rows_are_not_treated_as_orphans(db):
     assert store.query(db), "an aggregator row was retired as an orphan"
 
 
+def test_a_deactivated_board_does_not_strand_its_old_rows(db):
+    """Once a board is deactivated it will never re-sight its rows. Treating its
+    registry entry as active knowledge left those rows live forever."""
+    from engine import store
+    j = J(company="Wrong Board", external_id="1")
+    j.board = "greenhouse:wrong"
+    store.upsert(db, [j])
+    db.execute("UPDATE jobs SET last_seen='2000-01-01'")
+    db.commit()
+    # Another healthy source makes this a real reconciliation run; the inactive
+    # board is intentionally absent from known_boards.
+    for day in ("2000-01-02", "2000-01-03"):
+        db.execute("UPDATE jobs SET miss_on=?", (day,))
+        db.commit()
+        store.reconcile(db, {}, {("greenhouse", "Still Active", "greenhouse:on")},
+                        set(), known_boards={("greenhouse", "Still Active")})
+    assert not store.query(db), "deactivating a source left its old jobs live forever"
+
+
 def test_repair_does_not_stamp_a_fresh_install_row(db):
     """The one-time legacy repair ran on every connect. On a fresh install an
     ATS row with an empty external_id has uid == group_key, and stamping it
@@ -817,9 +853,22 @@ def test_discovery_queries_follow_the_profile():
     search.set_core_terms(["marketing operations", "revenue operations"])
     assert any("marketing operations" in t for t in search.CORE_TERMS)
     assert not any("salesforce" in t.lower() for t in search.CORE_TERMS)
-    search.set_core_terms([])                      # empty keeps the fallback
-    assert search.CORE_TERMS
+    search.set_core_terms([])
+    assert search.CORE_TERMS == [], "one profile's terms leaked into the next profile"
     search.CORE_TERMS = before
+
+
+def test_discovery_queries_include_the_profiles_metros():
+    from engine import search
+    before_core, before_geo = list(search.CORE_TERMS), list(search.GEO_TERMS)
+    try:
+        search.set_core_terms(["revenue operations"])
+        search.set_geo_terms(["Atlanta", "New York", r"/,\s?ga\b/"])
+        queries = search.build_query_matrix()
+        assert any('"Atlanta"' in q for q in queries)
+        assert not any(r"\s?" in q for q in queries), "score regex leaked into web search"
+    finally:
+        search.CORE_TERMS, search.GEO_TERMS = before_core, before_geo
 
 
 def test_no_hardcoded_city_or_employer_in_the_engine():
@@ -920,6 +969,17 @@ def test_company_name_variants_collapse_to_one_role():
             ("Acme", "Acme Inc.", "ACME, Inc", "Acme Technologies", "The Acme Company")}
     assert len(keys) == 1, "same employer produced several group_keys"
     assert J(company="Acme").group_key != J(company="Acmen").group_key
+
+
+def test_board_identity_includes_the_full_endpoint():
+    """A tenant can expose several Workday sites, and Phenom uses host rather
+    than slug. Collapsing either to `workday:tenant` / `phenom:` lets one board's
+    successful poll retire another board's postings."""
+    from engine.adapters import board_id
+    a = board_id({"ats": "workday", "tenant": "acme", "dc": "wd1", "site": "External"})
+    b = board_id({"ats": "workday", "tenant": "acme", "dc": "wd1", "site": "Internal"})
+    assert a != b and a.endswith("acme/wd1/external")
+    assert board_id({"ats": "phenom", "host": "https://jobs.acme.test"}) != "phenom:"
 
 
 @pytest.mark.parametrize("asked,declared,want", [
@@ -1219,6 +1279,136 @@ def test_tracker_drift_survives_a_missing_tracker(db, tmp_path, monkeypatch):
     assert ck.tracker_drift(db)["tracker_exists"] is False
 
 
+def test_tracker_sync_preview_is_exact_and_never_writes(db, tmp_path, monkeypatch, capsys):
+    """A reconciliation command that writes during preview is worse than no
+    command: the user must be able to inspect every status and appended line."""
+    import importlib
+    from types import SimpleNamespace
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    tracker = tmp_path / "personal-tracker.md"
+    original = ("# My narrative\nKeep this wording exactly.\n\n## APPLIED\n"
+                "- Acme PM https://boards.greenhouse.io/acme/jobs/1\n")
+    tracker.write_text(original)
+    monkeypatch.setattr(ck, "TRACKER", tracker)
+
+    from_tracker = J(company="Acme", title="PM",
+                     url="https://boards.greenhouse.io/acme/jobs/1")
+    from_db = J(company="Gamma", title="Architect",
+                url="https://jobs.lever.co/gamma/2")
+    store.upsert(db, [from_tracker, from_db])
+    store.set_status(db, from_tracker.uid, "reviewed", "private Acme note")
+    store.set_status(db, from_db.uid, "applied", "private Gamma note")
+
+    ck.cmd_tracker_sync(SimpleNamespace(apply=False))
+    out = capsys.readouterr().out
+    assert f"SET {from_tracker.uid} status 'reviewed' -> 'applied'" in out
+    assert "APPEND - [APPLIED] Gamma - Architect - https://jobs.lever.co/gamma/2" in out
+    assert "DRY RUN: nothing written" in out
+    assert tracker.read_text() == original
+    rows = {r["uid"]: r for r in db.execute(
+        "SELECT uid, status, notes FROM jobs WHERE uid IN (?, ?)",
+        (from_tracker.uid, from_db.uid))}
+    assert rows[from_tracker.uid]["status"] == "reviewed"
+    assert rows[from_tracker.uid]["notes"] == "private Acme note"
+    assert rows[from_db.uid]["notes"] == "private Gamma note"
+
+
+def test_tracker_sync_apply_is_append_only_preserves_notes_and_is_idempotent(
+        db, tmp_path, monkeypatch, capsys):
+    """--apply may fill both missing halves, but must not rewrite free-form
+    tracker prose, copy private DB notes into Markdown, or duplicate its block."""
+    import importlib
+    from types import SimpleNamespace
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    tracker = tmp_path / "legacy" / "job-search-tracker.md"
+    tracker.parent.mkdir()
+    original = ("User-written intro with deliberate spacing.  \n\n## APPLIED\n"
+                "- Acme PM https://boards.greenhouse.io/acme/jobs/1\n")
+    tracker.write_text(original)
+    monkeypatch.setattr(ck, "TRACKER", tracker)
+
+    from_tracker = J(company="Acme", title="PM",
+                     url="https://boards.greenhouse.io/acme/jobs/1")
+    from_db = J(company="Gamma", title="Architect",
+                url="https://jobs.lever.co/gamma/2")
+    store.upsert(db, [from_tracker, from_db])
+    store.set_status(db, from_tracker.uid, "reviewed", "keep Acme notes")
+    store.set_status(db, from_db.uid, "applied", "keep Gamma notes")
+
+    ck.cmd_tracker_sync(SimpleNamespace(apply=True))
+    after = tracker.read_text()
+    assert after.startswith(original), "existing tracker bytes were rewritten"
+    assert after.count("https://jobs.lever.co/gamma/2") == 1
+    assert "keep Gamma notes" not in after, "database notes leaked into the tracker"
+    rows = {r["uid"]: r for r in db.execute(
+        "SELECT uid, status, notes FROM jobs WHERE uid IN (?, ?)",
+        (from_tracker.uid, from_db.uid))}
+    assert rows[from_tracker.uid]["status"] == "applied"
+    assert rows[from_tracker.uid]["notes"] == "keep Acme notes"
+    assert rows[from_db.uid]["notes"] == "keep Gamma notes"
+
+    capsys.readouterr()
+    ck.cmd_tracker_sync(SimpleNamespace(apply=True))
+    assert "Already synchronized" in capsys.readouterr().out
+    assert tracker.read_text() == after, "a second sync appended duplicates"
+
+
+def test_tracker_sync_refuses_a_broad_link_with_multiple_candidates(
+        db, tmp_path, monkeypatch):
+    """A board-level tracker link is useful evidence only when it identifies
+    one row. Choosing the first of several openings can suppress the wrong job."""
+    import importlib
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    tracker = tmp_path / "tracker.md"
+    tracker.write_text("## APPLIED\n- Acme https://acme.example.com/External_Careers\n")
+    monkeypatch.setattr(ck, "TRACKER", tracker)
+    one = J(company="Acme", title="Architect",
+            url="https://acme.example.com/External_Careers/job/one")
+    two = J(company="Acme", title="Consultant",
+            url="https://acme.example.com/External_Careers/job/two")
+    store.upsert(db, [one, two])
+
+    plan = ck.tracker_sync_plan(db)
+    assert not plan["db_updates"]
+    assert len(plan["ambiguous"]) == 1
+    assert {r["uid"] for r in plan["ambiguous"][0]["candidates"]} == {one.uid, two.uid}
+    assert {r["status"] for r in db.execute("SELECT status FROM jobs")} == {"new"}
+
+
+def test_tracker_url_prefix_must_end_at_a_path_boundary(db, tmp_path, monkeypatch):
+    """`/jobs/12` must never be treated as the same posting as `/jobs/123`."""
+    import importlib
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    tracker = tmp_path / "tracker.md"
+    tracker.write_text("## APPLIED\n- Acme https://acme.example.com/jobs/12\n")
+    monkeypatch.setattr(ck, "TRACKER", tracker)
+    store.upsert(db, [J(company="Acme", url="https://acme.example.com/jobs/123")])
+    plan = ck.tracker_sync_plan(db)
+    assert not plan["db_updates"]
+    assert plan["untracked_history"] == 1
+
+
+def test_tracker_sync_sanitizes_remote_text_to_one_line(db, tmp_path, monkeypatch):
+    """Titles are untrusted remote content and cannot inject tracker headings."""
+    import importlib
+    from engine import store
+    ck = importlib.import_module("careerkit")
+    monkeypatch.setattr(ck, "TRACKER", tmp_path / "tracker.md")
+    job = J(company="Acme\n## INTERVIEWING",
+            title="Architect <!-- surprise -->\n- second entry https://evil.example.com/jobs/9",
+            url="https://jobs.example.com/1")
+    store.upsert(db, [job])
+    store.set_status(db, job.uid, "applied")
+    line = ck.tracker_sync_plan(db)["tracker_appends"][0]["line"]
+    assert "\n" not in line
+    assert "<!--" not in line
+    assert line.count("https://") == 1, "a title injected a second application URL"
+
+
 # --------------------------------------------------------------------------
 # run-based "new" (CK-010) and run locking (CK-011)
 # --------------------------------------------------------------------------
@@ -1252,6 +1442,23 @@ def test_run_lock_refuses_a_concurrent_writer(tmp_path):
                 pass
     with store.RunLock(lock):        # released, so the next run proceeds
         pass
+
+
+def test_broken_sources_only_reports_the_current_active_registry(db):
+    """A repaired source changed adapter/name but its historical failure row
+    stayed in SQLite, so doctor claimed the old source was broken forever."""
+    from engine import pull, store
+    for source in ("bamboohr:Old Name", "greenhouse:Active", "feed:Retired"):
+        store.record_health(db, source, 0, "broken")
+        store.record_health(db, source, 0, "still broken")
+    reg = {
+        "employers": [
+            {"name": "Active", "ats": "greenhouse", "active": True},
+            {"name": "Retired Employer", "ats": "lever", "active": False},
+        ],
+        "feeds": [{"name": "Retired", "active": False}],
+    }
+    assert [r["source"] for r in pull.broken_sources(db, reg)] == ["greenhouse:Active"]
 
 
 # --------------------------------------------------------------------------
@@ -2035,6 +2242,25 @@ def test_consistency_is_quiet_when_report_and_row_agree(db, tmp_path):
     assert consistency.check_report(db, rpt) == []
 
 
+def test_consistency_never_claims_a_stale_report_agrees(db, tmp_path, capsys):
+    """The command correctly skipped a stale report, then its success branch
+    still claimed that report agreed with the database."""
+    import os
+    from types import SimpleNamespace
+    import careerkit
+
+    rpt = tmp_path / "sourcing-stale.md"
+    rpt.write_text("# old report\n")
+    db_path = Path(db.execute("PRAGMA database_list").fetchone()[2])
+    future = rpt.stat().st_mtime + 5
+    os.utime(db_path, (future, future))
+
+    careerkit.cmd_consistency(SimpleNamespace(report=str(rpt), repair=False))
+    out = capsys.readouterr().out
+    assert "stale report was skipped" in out
+    assert "Consistent." not in out
+
+
 def test_consistency_catches_an_impossible_comp_spread(db):
     """Seen live: an Indeed band of "$1.00 - $250,000.00 per year" was read as
     hourly and annualised to $2,080 - $520,000,000. The parse is fixed, but a row
@@ -2280,6 +2506,43 @@ def test_a_malformed_evidence_line_does_not_stop_the_run(tmp_path):
     ev = applied.load_evidence(p)
     assert len([e for e in ev if not e.get("_bad")]) == 2
     assert len([e for e in ev if e.get("_bad")]) == 1
+
+
+def test_prepared_evidence_is_preflight_and_never_marks_a_posting(db):
+    """A prepared application is not a submitted application. Treating it as
+    applied suppresses a role the user may still need to finish."""
+    from engine import applied, store
+    job = J(company="Acme", title="Architect", url="https://example.test/prepared")
+    store.upsert(db, [job])
+    res = applied.reconcile(db, [{"company": "Acme", "title": "Architect",
+                                  "status": "prepared", "_line": 1}], apply=True)
+    assert len(res["pending"]) == 1
+    assert not res["matched"] and not res["problems"]
+    assert db.execute("SELECT status FROM jobs WHERE uid=?", (job.uid,)).fetchone()[0] == "new"
+
+
+def test_application_evidence_preserves_notes_and_maps_pipeline_states(db):
+    """The evidence reconciler directly replaced notes and wrote statuses the
+    query engine did not understand, so interviewing roles resurfaced as new."""
+    from engine import applied, store
+    job = J(company="Acme", title="Architect", url="https://example.test/interview")
+    store.upsert(db, [job])
+    store.set_status(db, job.uid, "reviewed", "recruiter and resume details")
+    evidence = [{"company": "Acme", "title": "Architect", "status": "interviewing",
+                 "on": "2026-08-08", "source": "manual", "_line": 1}]
+    res = applied.reconcile(db, evidence, apply=True)
+    assert len(res["matched"]) == 1
+    assert res["matched"][0]["db_status"] == "applied"
+    row = db.execute("SELECT status, notes FROM jobs WHERE uid=?", (job.uid,)).fetchone()
+    assert row["status"] == "applied", "submitted pipeline states must stay suppressed"
+    assert row["notes"] == "recruiter and resume details"
+    events = store.history(db, job.uid)
+    assert any(e["kind"] == "application:interviewing" for e in events)
+
+    # Re-running the same evidence must not duplicate its event.
+    applied.reconcile(db, evidence, apply=True)
+    events = store.history(db, job.uid)
+    assert len([e for e in events if e["kind"] == "application:interviewing"]) == 1
 
 
 def test_careerkit_home_moves_the_profile_too(tmp_path, monkeypatch):
