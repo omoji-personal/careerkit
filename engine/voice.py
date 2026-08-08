@@ -188,12 +188,27 @@ def check_draft(text: str, name: str = "draft") -> list[Finding]:
     # transactional writing legitimately has no contractions in it, so below the
     # threshold this is advisory only.
     n = len(_CONTRACTION.findall(text))
-    if len(words) >= 120 and n == 0:
+    rate = n / (len(words) / 100) if words else 0.0
+    # Not just zero. A 426-word draft with a single contraction (0.2 per 100
+    # words) passed this check while its author's own post on the same subject
+    # ran 4.0, a twentyfold gap on the most reliable marker in the set. Testing
+    # for exactly zero misses the near-miss, which is the common case in
+    # generated long-form.
+    if len(words) >= 120 and rate < 1.0:
+        # MEDIUM, not high, and the reason is a measurement. Four cover letters
+        # for one user clustered at 0.3-0.5 per 100 words, two of which were
+        # sent and are fine, and his own formal email register runs 0.0. His
+        # public long-form runs 4.0. Contraction rate tracks REGISTER, and this
+        # check cannot see register from the text. It is decisive for a post or
+        # a note to a person; it is close to meaningless for a cover letter.
+        # Raising it to high flagged every piece of formal correspondence, which
+        # is how a check gets ignored.
         out.append(Finding(
-            "contractions", "high",
-            f"No contractions in {len(words)} words. Over a piece this long most "
-            f"people reach for one; their total absence is a consistent machine "
-            f"tell.", "", name))
+            "contractions", "medium",
+            f"{n} contraction(s) in {len(words)} words ({rate:.1f} per 100). "
+            f"Decisive for a post or a message to a person. Formal application "
+            f"prose legitimately runs this low, so weigh it by register.",
+            "", name))
     elif len(words) >= 40 and n == 0:
         out.append(Finding(
             "contractions", "low",
