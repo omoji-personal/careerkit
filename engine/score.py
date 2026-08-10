@@ -645,6 +645,36 @@ THIN_BODY = 200
 # A requirement the posting itself downgrades. "3+ years with Marketing Cloud
 # preferred, not required" tripped the product rail on the "3+ years" context
 # alone, discarding a role the user could do.
+_REQUIREMENT = re.compile(
+    r"\d\+? ?years?|require[sd]?|must have|deep (knowledge|expertise)|"
+    r"speciali[sz]|expert(ise)? in|proficien|"
+    # Experience stated as a COUNT of deliveries rather than in years, which is
+    # how senior architecture reqs phrase it: "Led at least two large-scale
+    # Product-to-Cash (CPQ/RCA) implementations".
+    r"\b(led|delivered|implemented|owned|shipped)\b.{0,40}?"
+    r"\b(at least|a minimum of|minimum of|\d+\+?)\b|"
+    r"\bat least \d+\b|\ba minimum of \d+\b", re.I)
+
+# An enumeration between the requirement and the product means the requirement
+# attaches to the LIST, not to this item. "hands-on experience across our
+# environment, including Sales Cloud, ARM/RCA/CPQ" is a description of their
+# stack; it does not demand CPQ expertise. Without this guard, widening the
+# context window to the whole clause turned eight live postings into false
+# blocks in one run (2026-08-10) -- among them a $125-140K Salesforce
+# Administrator and a NeuraFlash req the user had already applied to, killed on
+# "Field Service" appearing third in a list of clouds. Discarding a role he can
+# do is the more expensive error, so the rail yields here.
+_ENUMERATION = re.compile(
+    r"\b(including|include[sd]?|such as|like|e\.?g\.?|for example|ranging from)\b", re.I)
+
+# The other shape a list takes: no introducer, just peers. "Salesforce Service
+# Cloud, Experience Cloud, Field Service" demands none of the three
+# individually. Checked against the few characters immediately before the match,
+# because a separator further back belongs to a different pair of items.
+# Deliberately NOT triggered by "(", so a parenthetical gloss of the thing being
+# required -- "Product-to-Cash (CPQ/RCA) implementations" -- still blocks.
+_LIST_ITEM = re.compile(r"(,|;|/|&|\band\b|\bor\b)\s*$", re.I)
+
 _PREFERENCE = re.compile(
     r"\b(preferred|preferable|nice[ -]to[ -]have|a plus|bonus|desirable|"
     r"not required|but not required|advantageous|ideally|would be great)\b", re.I)
@@ -827,13 +857,10 @@ def score(job: Job, p: Profile) -> Job:
             ctx = _clause_before(text, m)
             if _PREFERENCE.search(_sentence_around(text, m)):
                 continue          # the posting says this one is optional
-            if re.search(r"(\d\+? ?years?|require[sd]?|must have|deep (knowledge|expertise)|"
-                         r"speciali[sz]|expert(ise)? in|proficien|"
-                         # experience stated as a COUNT of deliveries rather than
-                         # years, which is how senior architecture reqs phrase it
-                         r"\b(led|delivered|implemented|owned|shipped)\b.{0,40}?"
-                         r"\b(at least|a minimum of|minimum of|\d+\+?)\b|"
-                         r"\bat least \d+\b|\ba minimum of \d+\b)", ctx, re.I):
+            frames = list(_REQUIREMENT.finditer(ctx))
+            between = ctx[frames[-1].end():] if frames else ""
+            if (frames and not _ENUMERATION.search(between)
+                    and not _LIST_ITEM.search(ctx[-24:])):
                 job.gate, job.score = "SLOT-BLOCKED", base
                 job.reasons = [f"body requires unheld product: '{text[max(0, m.start()-40):m.end()][-60:]}'"]
                 return job

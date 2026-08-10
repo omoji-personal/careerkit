@@ -2968,6 +2968,19 @@ def test_a_requirement_counted_in_deliveries_blocks_like_one_counted_in_years(tm
     # Framing from a PREVIOUS bullet must not leak across the boundary either.
     assert gate("Led at least two large-scale migrations.\nFamiliarity with CPQ.") != "SLOT-BLOCKED"
 
+    # A requirement that governs a LIST does not govern each item in it. All four
+    # of these are verbatim shapes from live postings that the widened window
+    # turned into false blocks in one run before this guard existed (2026-08-10),
+    # including a $125-140K administrator role and a req already applied to.
+    assert gate("5+ years administering a complex Salesforce environment, "
+                "including Sales Cloud, ARM/RCA/CPQ.") != "SLOT-BLOCKED"
+    assert gate("Deep expertise across Salesforce Service Cloud, Experience Cloud, "
+                "Revenue Cloud.") != "SLOT-BLOCKED"
+    assert gate("10 years designing integration architecture using common "
+                "platforms like CPQ.") != "SLOT-BLOCKED"
+    # ...but the gloss in parentheses is the required thing itself, not a peer.
+    assert gate("Must have delivered at least 2 Product-to-Cash (CPQ) programs.") == "SLOT-BLOCKED"
+
 
 def test_latest_md_follows_every_report_write_not_just_a_pull(db, tmp_path, monkeypatch):
     """out/latest.md was copied by the pull command only. After a `rescore` the
