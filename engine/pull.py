@@ -231,6 +231,7 @@ def job_from_row(r):
                department=r["department"] or "", comp_min=r["comp_min"],
                comp_max=r["comp_max"], comp_text=r["comp_text"] or "",
                lane=r["lane"] or "", employer_tier=r["employer_tier"] or "",
+               registry_lane=(r["registry_lane"] or "") if "registry_lane" in keys else "",
                board=r["board"] if "board" in keys else "",
                remote_flag=None if rf is None else bool(rf),
                rails_exempt=bool(rx),

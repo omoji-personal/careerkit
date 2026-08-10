@@ -2326,9 +2326,14 @@ def test_pull_and_rescore_agree_on_every_field_the_scorer_reads(db, tmp_path):
     p = tmp_path / "profile.yaml"
     p.write_text(_yaml.safe_dump({
         "lanes": [{"key": "pm", "titles": ["/product manager/"]},
-                  {"key": "lifecycle", "titles": ["/lifecycle (marketing )?manager/"]}],
+                  {"key": "lifecycle", "titles": ["/lifecycle (marketing )?manager/"]},
+                  {"key": "ctx", "titles": ["/acme.{0,25}analyst/"]}],
         "location": {"remote_us": True, "metros": ["Atlanta"]},
         "comp": {"screen_floor": 100000},
+        # The employer that never repeats its own name in its own reqs. Only
+        # reachable through the registry lane, which is exactly the field that
+        # was not surviving the round trip.
+        "lane_title_context": {"acme-direct": "Acme"},
     }))
     profile = Profile.load(p)
 
@@ -2346,6 +2351,17 @@ def test_pull_and_rescore_agree_on_every_field_the_scorer_reads(db, tmp_path):
         j.comp_min = cmin
         j.comp_max = cmin * 2 if cmin else None
         fetched.append(j)
+
+    # A req from an employer whose own name is implicit in every title it posts.
+    # It reaches its lane only because lane_title_context injects the prefix, and
+    # that lookup is keyed on the registry lane -- which score() used to clobber
+    # with the matched lane key, making the context unrecoverable at rescore.
+    implicit = J(company="Acme", title="Systems Analyst",
+                 url="https://example.test/implicit", location="Remote, US",
+                 description="The salary range for this role is $150,000 - $208,000 "
+                             "per year. " + "d" * 400)
+    implicit.lane = implicit.registry_lane = "acme-direct"
+    fetched.append(implicit)
 
     for j in fetched:
         score(j, profile)
@@ -2915,6 +2931,90 @@ def test_a_product_the_posting_calls_optional_does_not_block(tmp_path):
     # and a genuine requirement must still block
     assert gate("Must have 5+ years of deep expertise in Marketing Cloud.") == "SLOT-BLOCKED"
     assert gate("Requires proficiency in Marketing Cloud administration.") == "SLOT-BLOCKED"
+
+
+def test_a_requirement_counted_in_deliveries_blocks_like_one_counted_in_years(tmp_path):
+    """PointClickCare, 2026-08-10: "Led at least two large-scale Product-to-Cash
+    (CPQ/RCA) implementations" sat under a literal "Required Experience & Skills"
+    heading and did NOT block, because the framing that makes it a requirement is
+    at the START of the bullet, outside the 70-character lookbehind. It reached
+    the report as VERIFY 47. Senior architecture reqs count deliveries, not years,
+    and the rail only understood years."""
+    import yaml as _yaml
+    from engine.models import Job
+    from engine.score import Profile, score
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "sf", "titles": ["/salesforce architect/"]}],
+        "location": {"remote_us": True},
+        "exclusions": {"products": ["cpq", "revenue cloud"]}}))
+    profile = Profile.load(p)
+
+    def gate(body):
+        j = Job(company="Acme", title="Salesforce Architect", url="u", source="greenhouse",
+                location="Remote, USA", description=body + " " + "d" * 300)
+        score(j, profile)
+        return j.gate
+
+    assert gate("Led at least two large-scale Product-to-Cash (CPQ/RCA) implementations "
+                "from design to go-live.") == "SLOT-BLOCKED"
+    assert gate("Delivered a minimum of 3 Revenue Cloud programs.") == "SLOT-BLOCKED"
+
+    # The window stays BEHIND the match on purpose. Requirement framing that
+    # FOLLOWS the product attaches to something else, and reading the whole
+    # sentence would discard roles the user can do.
+    assert gate("You will partner with the CPQ team; 5+ years of Salesforce "
+                "administration is required.") != "SLOT-BLOCKED"
+    # Framing from a PREVIOUS bullet must not leak across the boundary either.
+    assert gate("Led at least two large-scale migrations.\nFamiliarity with CPQ.") != "SLOT-BLOCKED"
+
+    # A requirement that governs a LIST does not govern each item in it. All four
+    # of these are verbatim shapes from live postings that the widened window
+    # turned into false blocks in one run before this guard existed (2026-08-10),
+    # including a $125-140K administrator role and a req already applied to.
+    assert gate("5+ years administering a complex Salesforce environment, "
+                "including Sales Cloud, ARM/RCA/CPQ.") != "SLOT-BLOCKED"
+    assert gate("Deep expertise across Salesforce Service Cloud, Experience Cloud, "
+                "Revenue Cloud.") != "SLOT-BLOCKED"
+    assert gate("10 years designing integration architecture using common "
+                "platforms like CPQ.") != "SLOT-BLOCKED"
+    # ...but the gloss in parentheses is the required thing itself, not a peer.
+    assert gate("Must have delivered at least 2 Product-to-Cash (CPQ) programs.") == "SLOT-BLOCKED"
+
+
+def test_latest_md_follows_every_report_write_not_just_a_pull(db, tmp_path, monkeypatch):
+    """out/latest.md was copied by the pull command only. After a `rescore` the
+    dated report held the new verdicts and latest.md still showed the old ones --
+    and `consistency` compares the DATED file, so it passed and the stale copy
+    survived. On 2026-08-10 latest.md advertised five postings as QUALIFIED that
+    the database had already excluded."""
+    import yaml as _yaml
+    from engine import pull as _pull, report as _report, store
+    from engine.score import Profile
+    monkeypatch.setattr(_report, "OUT_DIR", tmp_path)
+
+    j = J(company="Acme", title="Salesforce Administrator", url="https://example.test/lm",
+          location="Remote, United States", description="A real posting body. " + "d" * 400)
+    j.gate, j.score = "QUALIFIED", 70
+    store.upsert(db, [j])
+
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "sf", "titles": ["/salesforce administrator/"]}],
+        "location": {"remote_us": True}}))
+    dated = _pull.rebuild_report(db, echo=lambda *a: None)
+    latest = tmp_path / "latest.md"
+    assert latest.exists(), "rescore/rebuild_report left latest.md behind"
+    assert latest.read_text() == dated.read_text()
+
+    # And it keeps following: re-judge, regenerate, and the two must still agree.
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "nope", "titles": ["/chief listening officer/"]}],
+        "location": {"remote_us": True}}))
+    _pull.rescore(db, Profile.load(p), echo=lambda *a: None)
+    dated = _pull.rebuild_report(db, echo=lambda *a: None)
+    assert latest.read_text() == dated.read_text()
+    assert "Salesforce Administrator" not in latest.read_text()
 
 
 def test_rescore_writes_a_changed_reason_even_when_the_gate_is_unchanged(db, tmp_path):

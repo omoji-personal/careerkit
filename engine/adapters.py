@@ -54,6 +54,7 @@ def _base(cfg: dict) -> dict:
         "board": board_id(cfg),
         "company": cfg.get("name") or cfg.get("slug", ""),
         "lane": cfg.get("lane", ""),
+        "registry_lane": cfg.get("lane", ""),
         "employer_tier": cfg.get("tier", ""),
         "rails_exempt": bool(cfg.get("rails_exempt", False)),
     }

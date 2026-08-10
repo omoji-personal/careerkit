@@ -186,7 +186,8 @@ def cmd_pull(args) -> None:
         runs_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         shutil.copy2(path, runs_dir / f"{stamp}-run-{r['run_id']:04d}.md")
-        shutil.copy2(path, path.parent / "latest.md")
+        # latest.md is refreshed by write_report itself now, so that rescore and
+        # rebuild_report keep it current too. One writer, no drift.
     except Exception as e:
         print(f"  (could not write the run artifact: {e})")
 

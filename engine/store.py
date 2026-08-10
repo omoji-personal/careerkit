@@ -95,6 +95,14 @@ _MIGRATIONS = [
     # dream_companies, which hid the gap: an exemption that came from
     # employers.yaml was lost on rescore and the role went QUALIFIED to EXCLUDED.
     ("jobs", "rails_exempt", "INTEGER"),
+    # The employer's lane AS THE REGISTRY STATES IT. `lane` cannot serve this
+    # purpose: score() overwrites it with the lane key the title matched, so the
+    # registry value was gone after the first scoring pass. lane_title_context is
+    # keyed on it, which meant rescore stopped injecting the implicit company
+    # context and demoted every such posting to a body-only fit. Seen live
+    # 2026-08-10: five Salesforce reqs fell QUALIFIED 73 -> VERIFY 31 on a rescore
+    # with no profile change, all reading "fit only in body, not title".
+    ("jobs", "registry_lane", "TEXT"),
     # Evidence for the ghost-listing score. JobSpy resolves both and the feed
     # was discarding them, which left the check with no data source.
     ("jobs", "url_direct", "TEXT"),
@@ -410,10 +418,15 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     "description=COALESCE(NULLIF(?,''),description), "
                     "source=?, board=COALESCE(NULLIF(?,''),board), group_key=?, "
                     "last_seen_run=COALESCE(?,last_seen_run), "
+                    # Heal rows stored before this column existed, but never let a
+                    # later aggregator sighting (which carries no registry lane)
+                    # erase the one an ATS sighting established.
+                    "registry_lane=COALESCE(NULLIF(?,''),registry_lane), "
                     "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
-                     j.description[:20000], j.source, j.board, j.group_key, run_id, j.uid),
+                     j.description[:20000], j.source, j.board, j.group_key, run_id,
+                     j.registry_lane, j.uid),
                 )
                 again.append(j)
             else:
@@ -421,14 +434,15 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     "INSERT INTO jobs (uid,group_key,board,company,title,url,location,source,lane,"
                     "employer_tier,posted_at,department,comp_min,comp_max,comp_text,"
                     "score,gate,reasons,description,first_seen,last_seen,first_seen_run,last_seen_run,"
-                    "remote_flag,rails_exempt,url_direct,company_site) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "remote_flag,rails_exempt,url_direct,company_site,registry_lane) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (j.uid, j.group_key, j.board, j.company, j.title, j.url, j.location, j.source,
                      j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
                      j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
                      j.description[:20000], today, today, run_id, run_id,
                      None if j.remote_flag is None else int(j.remote_flag),
-                     int(bool(j.rails_exempt)), j.url_direct, j.company_site),
+                     int(bool(j.rails_exempt)), j.url_direct, j.company_site,
+                     j.registry_lane),
                 )
                 new.append(j)
             cur.execute(
