@@ -65,6 +65,11 @@ class Job:
     url_direct: str = ""
     company_site: str = ""
     lane: str = ""                   # which employer lane this company sits in
+    # The registry's lane, kept separate because `lane` does not survive scoring:
+    # score() overwrites it with the lane key the title matched. lane_title_context
+    # is keyed on the REGISTRY lane, so once `lane` was overwritten the context was
+    # unrecoverable and rescore re-judged those postings without it.
+    registry_lane: str = ""
     rails_exempt: bool = False       # owner carve-out: judge on fit, not mechanical rails
     employer_tier: str = ""          # A / B / C from the registry
     board: str = ""                  # stable board id, e.g. 'greenhouse:acme'

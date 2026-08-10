@@ -572,6 +572,20 @@ ONSITE_REQUIREMENT = re.compile(
     re.I)
 
 
+def _clause_before(text: str, m: "re.Match") -> str:
+    """The part of the match's own sentence that comes before it.
+
+    A fixed lookbehind cannot see requirement framing that opens a long bullet,
+    and bullets in senior reqs are long. Sentence-bounded, so framing from the
+    PREVIOUS bullet never leaks in."""
+    start = max(text.rfind(".", 0, m.start()) + 1,
+                text.rfind("\n", 0, m.start()) + 1,
+                text.rfind("!", 0, m.start()) + 1,
+                text.rfind("?", 0, m.start()) + 1,
+                text.rfind(";", 0, m.start()) + 1)
+    return " ".join(text[start:m.start()].split())
+
+
 def _sentence_around(text: str, m: "re.Match") -> str:
     """Quote the sentence a rail fired on, not a 40-character slice of it.
 
@@ -729,7 +743,10 @@ def score(job: Job, p: Profile) -> Job:
         job.gate, job.score = "EXCLUDED", 0
         job.reasons = [f"posting closed {deadline[0].isoformat()}: {deadline[1]!r}"]
         return job
-    ctx = p.lane_title_context.get(job.lane or "")
+    # Keyed on the registry lane. `job.lane` is only the same thing until the
+    # first score() call overwrites it with the matched lane key, so reading it
+    # here worked at pull and silently stopped working at rescore.
+    ctx = p.lane_title_context.get(job.registry_lane or job.lane or "")
     # Only ever ENRICHES a real title. Applied to an empty one the prefix
     # becomes the whole string, so a malformed posting matched the lane on the
     # injected word alone and scored as in-family. Seen live 2026-08-05: a
@@ -796,11 +813,27 @@ def score(job: Job, p: Profile) -> Job:
         # Body can REQUIRE an unheld product even when the title is clean
         # (e.g. "3 years specializing in B2B commerce" under a plain SA title).
         for m in p.products_block.finditer(text):
-            ctx = text[max(0, m.start() - 70):m.start()]
+            # Context is the match's own sentence UP TO the match. This replaced
+            # a fixed 70-character lookbehind, which was wrong in both directions:
+            # too short for a long bullet, and it reached back across sentence
+            # boundaries into the previous one. PointClickCare's "Led at least two
+            # large-scale Product-to-Cash (CPQ/RCA) implementations", under a
+            # literal "Required Experience & Skills" heading, survived as VERIFY
+            # 47 because the framing that makes it a requirement opens the bullet
+            # (2026-08-10). Deliberately only what comes BEFORE the match:
+            # scanning the whole sentence would block on "partner with the CPQ
+            # team; 5+ years of Salesforce required", where the requirement
+            # attaches to something else entirely.
+            ctx = _clause_before(text, m)
             if _PREFERENCE.search(_sentence_around(text, m)):
                 continue          # the posting says this one is optional
             if re.search(r"(\d\+? ?years?|require[sd]?|must have|deep (knowledge|expertise)|"
-                         r"speciali[sz]|expert(ise)? in|proficien)", ctx, re.I):
+                         r"speciali[sz]|expert(ise)? in|proficien|"
+                         # experience stated as a COUNT of deliveries rather than
+                         # years, which is how senior architecture reqs phrase it
+                         r"\b(led|delivered|implemented|owned|shipped)\b.{0,40}?"
+                         r"\b(at least|a minimum of|minimum of|\d+\+?)\b|"
+                         r"\bat least \d+\b|\ba minimum of \d+\b)", ctx, re.I):
                 job.gate, job.score = "SLOT-BLOCKED", base
                 job.reasons = [f"body requires unheld product: '{text[max(0, m.start()-40):m.end()][-60:]}'"]
                 return job

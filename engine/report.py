@@ -216,4 +216,15 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
         L.append("")
 
     path.write_text("\n".join(L))
+    # latest.md follows the report EVERY time one is written, not just on a pull.
+    # It used to be copied by the pull command only, so after a `rescore` the
+    # dated report held the new verdicts while latest.md still showed the old
+    # ones -- and `consistency` compares the DATED file, so it passed and the
+    # stale copy survived. Seen live 2026-08-10: latest.md advertised five
+    # postings as QUALIFIED that the database had already excluded.
+    if filename is None:
+        try:
+            (OUT_DIR / "latest.md").write_text("\n".join(L))
+        except OSError as e:
+            print(f"  (could not refresh latest.md: {e})")
     return path
