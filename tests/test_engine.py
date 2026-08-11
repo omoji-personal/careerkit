@@ -3762,3 +3762,34 @@ def test_a_demoted_but_still_present_row_has_its_miss_counter_cleared(db):
     assert row[0] == 0, (
         f"a row the board confirmed this run still carries {row[0]} miss(es); "
         "one more absence would delist a live posting after a single miss")
+
+
+def test_a_role_you_applied_to_keeps_the_verdict_it_had_when_you_applied(db):
+    """Surfaced by the kimi lens, 2026-08-11, and confirmed on the live database.
+
+    reconcile's two later statements both skip status IN
+    ('applied','rejected','ignored') - you do not retire a posting you acted on.
+    The demotion loop above them carries no such guard, so a criteria change
+    rewrites the gate, score and reasons of roles already applied to.
+
+    Measured, not hypothetical: pausing OpenAI/Anthropic left two real
+    submitted applications reading EXCLUDED with score 0, and a company floor
+    left a rejected Salesforce req reading SLOT-BLOCKED. The row no longer says
+    what it was when the user acted on it, and stats() counts by gate, so an
+    application is tallied as something that never qualified."""
+    from engine import store
+    j = J(url="https://b/800", location="Remote, US", external_id="800")
+    j.gate, j.score, j.reasons = "QUALIFIED", 73, ["target metro: Atlanta"]
+    store.upsert(db, [j])
+    store.set_status(db, j.uid, "applied")
+
+    # A later criteria change would demote it.
+    store.reconcile(db, {j.uid: (0, "EXCLUDED", "no role-family match")},
+                    {("greenhouse", "Acme")}, set())
+
+    row = db.execute("SELECT gate, score, status FROM jobs WHERE uid=?",
+                     (j.uid,)).fetchone()
+    assert (row[0], row[1]) == ("QUALIFIED", 73), (
+        f"the verdict on an applied role was rewritten to {row[0]}/{row[1]}; "
+        "the record of what it was when he applied is gone")
+    assert row[2] == "applied"

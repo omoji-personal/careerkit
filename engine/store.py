@@ -531,8 +531,16 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
             # a live posting. The company floor makes this the ordinary path
             # rather than a rare one - every floored row is re-sighted and
             # demoted on every pull.
+            # Same status guard as the two statements below, and for the same
+            # reason: you do not rewrite the record of a posting the user acted
+            # on. Without it a criteria change edits history - pausing two
+            # employers left two REAL submitted applications reading EXCLUDED
+            # with score 0, and a company floor left a rejected req reading
+            # SLOT-BLOCKED. stats() counts by gate, so an application the user
+            # made is then tallied as a role that never qualified.
             cur.execute("UPDATE jobs SET score=?, gate=?, reasons=?, last_seen=?, "
-                        "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
+                        "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=? "
+                        "AND status NOT IN ('applied','rejected','ignored')",
                         (score, gate, reasons, today, uid))
             dem += cur.rowcount
         if not healthy_boards and not healthy_feeds:
