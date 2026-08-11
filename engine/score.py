@@ -233,6 +233,28 @@ PROFILE_SCHEMA: dict = {
 _LANE_KEYS = {"key", "titles", "weight", "label", "note"}
 
 
+_WEB_SUFFIX = {"com"}
+
+
+def _company_key(name: str) -> str:
+    """Matching key for the per-employer rules. Wider than _norm_company.
+
+    _norm_company strips corporate suffixes but not the web-style one, so
+    "Salesforce.com, Inc." lands on "salesforce com" and misses a rule keyed on
+    "salesforce" completely - the row surfaces at full score as though no rule
+    had been configured.
+
+    Deliberately a SEPARATE key rather than a change to _norm_company:
+    models.py builds group_key and the uid basis from that function, so widening
+    it there would rewrite the dedupe identity of every stored row.
+
+    "org" is deliberately not stripped. salesforce.org is a different entity
+    from salesforce.com, and collapsing the two would block the wrong employer.
+    """
+    words = [w for w in _norm_company(name).split() if w not in _WEB_SUFFIX]
+    return " ".join(words) or _norm_company(name)
+
+
 def _company_floors(raw) -> dict:
     """{employer: minimum score}, normalised, with a readable error on garbage.
 
@@ -244,15 +266,19 @@ def _company_floors(raw) -> dict:
     """
     out = {}
     for name, value in (raw or {}).items():
-        key = _norm_company(str(name))
+        key = _company_key(str(name))
         if not key:
             continue
-        try:
-            out[key] = int(value)
-        except (TypeError, ValueError):
+        # Deliberately stricter than int(). int() truncates 75.9 to 75, so a
+        # score-75 row surfaces under a floor the user wrote as higher than 75;
+        # it turns YAML `true` into a floor of 1, which blocks nothing and says
+        # nothing; and it lets `.inf` escape as a raw OverflowError. A scoring
+        # rule that cannot be read exactly must be refused, not guessed at.
+        if isinstance(value, bool) or not isinstance(value, int):
             raise ProfileError(
-                f"exclusions.company_floors: {name!r} is set to {value!r}, "
-                f"which is not a score. Use a number, e.g. {{{name}: 75}}.")
+                f"exclusions.company_floors: {name!r} is set to {value!r}, which is "
+                f"not a whole-number score. Use an integer, e.g. {{{name}: 75}}.")
+        out[key] = value
     return out
 
 
@@ -452,7 +478,7 @@ class Profile:
             # unparseable company. Same failure _compile_alt already carries a
             # regression test for, in a different shape.
             excluded_companies={k for k in
-                                (_norm_company(str(c)) for c in (exc.get("companies") or []))
+                                (_company_key(str(c)) for c in (exc.get("companies") or []))
                                 if k},
             search_terms=list(cfg.get("search_terms") or []),
             lane_title_context=dict(cfg.get("lane_title_context") or {}),
@@ -814,7 +840,7 @@ def score(job: Job, p: Profile) -> Job:
     job = _score_uncapped(job, p)
     if not p.company_floors and not p.excluded_companies:
         return job
-    key = _norm_company(job.company)
+    key = _company_key(job.company)
     # Only ever demote something that would otherwise SURFACE. Re-gating a row
     # the rails already killed would relabel why it died, and promoting one is
     # not this rule's business.

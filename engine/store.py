@@ -444,13 +444,29 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     "remote_flag=CASE WHEN ? IS NULL THEN remote_flag "
                     "WHEN ? = 1 THEN 1 "
                     "WHEN remote_flag IS NULL THEN ? ELSE remote_flag END, "
+                    # The same omission, three more times over. Every one of
+                    # these is read by score(), so leaving it out of the UPDATE
+                    # makes `pull` and `rescore` disagree on a row nobody
+                    # touched: employer_tier is worth +6 (A) or +3 (B) and can
+                    # cross a company floor on its own; rails_exempt waives the
+                    # location rails entirely; department is part of Job.text and
+                    # so feeds the domain rail; comp_text is what the report
+                    # quotes back. NULLIF so a sighting that carries nothing
+                    # cannot blank what another one established.
+                    "employer_tier=COALESCE(NULLIF(?,''),employer_tier), "
+                    "department=COALESCE(NULLIF(?,''),department), "
+                    "comp_text=COALESCE(NULLIF(?,''),comp_text), "
+                    "rails_exempt=COALESCE(?,rails_exempt), "
                     "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
                      j.description[:20000], j.source, j.board, j.group_key, run_id,
                      j.registry_lane,
                      *( (None,) * 3 if j.remote_flag is None
-                        else (int(j.remote_flag),) * 3 ), j.uid),
+                        else (int(j.remote_flag),) * 3 ),
+                     j.employer_tier, j.department, j.comp_text,
+                     None if j.rails_exempt is None else int(j.rails_exempt),
+                     j.uid),
                 )
                 again.append(j)
             else:

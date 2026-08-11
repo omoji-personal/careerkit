@@ -3617,3 +3617,110 @@ def test_company_floors_written_as_a_list_is_refused_readably(tmp_path):
     with pytest.raises(ProfileError) as e:
         Profile.load(pf)
     assert "company_floors" in str(e.value), e.value
+
+
+def test_pull_and_rescore_agree_after_a_RE_SIGHTING_too(db, tmp_path):
+    """Found by an external review lens, 2026-08-11, and the gap is structural.
+
+    The equivalence property test above upserts each posting ONCE, so it only
+    ever exercises the INSERT path - which writes every column. The UPDATE path
+    writes a different, shorter list, and that is where scorer-read fields go
+    missing. remote_flag was one; rails_exempt, employer_tier and department are
+    the same omission, still open, and each one flips a real verdict:
+
+      * employer_tier adds +6 (A) or +3 (B), which can cross a company floor.
+      * rails_exempt waives the location rails entirely.
+      * department is part of Job.text, so it feeds the domain rail.
+
+    Same property, applied to the path that actually drifts: a posting scored as
+    fetched and the same posting rebuilt from the database after a re-sighting
+    must reach an identical verdict."""
+    import yaml as _yaml
+    from engine import pull as _pull, store
+    from engine.score import Profile, score
+
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "admin", "titles": ["/administrator/"]}],
+        "location": {"remote_us": True, "metros": ["Atlanta"]},
+        "domain_terms": ["salesforce"],
+    }))
+    profile = Profile.load(p)
+
+    body = "a salesforce role at our company " + "d" * 400
+    # First sighting must SURFACE, or the second one takes the INSERT path (which
+    # writes every column) and the drift this test exists for cannot appear.
+    thin = J(company="Acme", title="Administrator", url="https://ex.test/1",
+             location="Atlanta, GA", external_id="1", description=body)
+    thin.employer_tier = ""
+    score(thin, profile)
+    assert thin.gate in ("QUALIFIED", "VERIFY"), f"fixture must surface: {thin.gate}"
+    store.upsert(db, [thin])
+
+    # Second sighting of the SAME req, from a source that knows the employer is
+    # tier A. That is worth +6, enough to cross a company floor on its own.
+    rich = J(company="Acme", title="Administrator", url="https://ex.test/1",
+             location="Atlanta, GA", external_id="1", description=body)
+    rich.employer_tier, rich.department = "A", "Salesforce"
+    score(rich, profile)
+    assert rich.score != thin.score, "fixture must actually change the score"
+    store.upsert(db, [rich])
+
+    row = db.execute("SELECT * FROM jobs WHERE uid=?", (rich.uid,)).fetchone()
+    assert row is not None, "the re-sighting was never stored"
+    rebuilt = _pull.job_from_row(row)
+    score(rebuilt, profile)
+    assert (rebuilt.gate, rebuilt.score) == (rich.gate, rich.score), (
+        f"a field the scorer reads did not survive a RE-SIGHTING: fetched -> "
+        f"{rich.gate}/{rich.score}, from database -> {rebuilt.gate}/{rebuilt.score}. "
+        f"stored tier={row['employer_tier']!r} dept={row['department']!r} "
+        f"exempt={row['rails_exempt']!r} remote={row['remote_flag']!r}")
+
+
+def test_a_dot_com_spelling_cannot_evade_a_company_floor_or_block():
+    """Found by an external review lens, 2026-08-11. _norm_company strips
+    corporate suffixes but not the web-style one, so "Salesforce.com, Inc."
+    normalises to "salesforce com" and misses a floor keyed on "salesforce"
+    entirely - the row surfaces at full score as though no rule existed.
+
+    Fixed with a WIDER key used only for this matching. _norm_company itself is
+    left alone deliberately: models.py:85 and :114 build group_key and the uid
+    basis from it, so widening it there would rewrite the dedupe identity of
+    every stored row.
+
+    "org" is deliberately NOT stripped: salesforce.org is a different entity
+    from salesforce.com, and collapsing them would block the wrong employer."""
+    from engine.score import score
+    for spelling in ("Salesforce.com, Inc.", "salesforce.com"):
+        out = score(J(company=spelling, title="Administrator", location="Remote, US",
+                      description="d" * 400), _floor_profile(70))
+        assert out.gate == "SLOT-BLOCKED", \
+            f"{spelling!r} evaded the floor: {out.gate} {out.score}"
+        out = score(J(company=spelling, title="Solution Architect", location="Remote, US",
+                      description="d" * 400), _blocked_profile("Salesforce"))
+        assert out.gate == "SLOT-BLOCKED", f"{spelling!r} evaded the block: {out.gate}"
+
+
+def test_a_dot_org_sibling_is_not_swept_up_by_a_dot_com_block():
+    from engine.score import score
+    out = score(J(company="Salesforce.org", title="Solution Architect",
+                  location="Remote, US", description="d" * 400),
+                _blocked_profile("Salesforce"))
+    assert out.gate != "SLOT-BLOCKED", \
+        "blocking salesforce.com also blocked the distinct salesforce.org entity"
+
+
+@pytest.mark.parametrize("value", ["75.9", "true", ".inf"])
+def test_a_company_floor_that_is_not_a_whole_number_is_refused(value):
+    """int() quietly truncates 75.9 to 75 (so a score-75 row surfaces under a
+    floor the user wrote as higher than 75), turns `true` into 1 (a floor of 1
+    blocks nothing, silently), and lets `.inf` escape as a raw OverflowError.
+    A scoring rule that cannot be read exactly must not be guessed at."""
+    import yaml as _yaml, tempfile, pathlib
+    from engine.score import Profile, ProfileError
+    pf = pathlib.Path(tempfile.mkdtemp()) / "p.yaml"
+    pf.write_text(f"exclusions:\n  company_floors: {{Acme: {value}}}\n"
+                  "lanes:\n  - {key: sa, weight: 52, titles: [salesforce]}\n")
+    with pytest.raises(ProfileError) as e:
+        Profile.load(pf)
+    assert "Acme" in str(e.value), e.value
