@@ -151,7 +151,9 @@ def test_role_that_stops_qualifying_is_written_back(db):
     from engine import store
     j = J(external_id="9")
     store.upsert(db, [j])
-    store.reconcile(db, {j.uid: (0, "EXCLUDED", "comp below floor")}, {("greenhouse", "Acme")}, set())
+    dem = J(url="https://b/1", location="Remote, US", external_id="1")
+    dem.gate, dem.score, dem.reasons = "EXCLUDED", 0, ["comp below floor"]
+    store.reconcile(db, {j.uid: dem}, {("greenhouse", "Acme")}, set())
     assert db.execute("SELECT gate FROM jobs").fetchone()["gate"] == "EXCLUDED"
     assert not store.query(db)
 
@@ -3755,8 +3757,9 @@ def test_a_demoted_but_still_present_row_has_its_miss_counter_cleared(db):
     db.execute("UPDATE jobs SET miss_on='2020-01-01' WHERE uid=?", (j.uid,))
 
     # Day two: the board DOES report it, but it scores below a company floor.
-    store.reconcile(db, {j.uid: (35, "SLOT-BLOCKED", "below the configured score floor")},
-                    healthy, set())
+    dem = J(url="https://b/700", location="Remote, US", external_id="700")
+    dem.gate, dem.score, dem.reasons = "SLOT-BLOCKED", 35, ["below the configured score floor"]
+    store.reconcile(db, {j.uid: dem}, healthy, set())
     row = db.execute("SELECT misses, gate FROM jobs WHERE uid=?", (j.uid,)).fetchone()
     assert row[1] == "SLOT-BLOCKED", "the demotion itself did not land"
     assert row[0] == 0, (
@@ -3784,8 +3787,9 @@ def test_a_role_you_applied_to_keeps_the_verdict_it_had_when_you_applied(db):
     store.set_status(db, j.uid, "applied")
 
     # A later criteria change would demote it.
-    store.reconcile(db, {j.uid: (0, "EXCLUDED", "no role-family match")},
-                    {("greenhouse", "Acme")}, set())
+    dem = J(url="https://b/800", location="Remote, US", external_id="800")
+    dem.gate, dem.score, dem.reasons = "EXCLUDED", 0, ["no role-family match"]
+    store.reconcile(db, {j.uid: dem}, {("greenhouse", "Acme")}, set())
 
     row = db.execute("SELECT gate, score, status FROM jobs WHERE uid=?",
                      (j.uid,)).fetchone()
@@ -3884,3 +3888,96 @@ def test_a_genuine_repost_of_the_same_role_is_still_caught():
                           "Salesforce Solution Architect") >= 0.6
     assert _title_overlap("Senior Salesforce Solution Architect",
                           "Salesforce Solution Architect, Regulated Industries") >= 0.6
+
+
+def test_a_demoted_row_still_gets_the_fields_its_board_just_reported(db):
+    """The residual drift after the 2026-08-11 review. Demoted rows never pass
+    through upsert - pull filters them out of `keep` - so every field heal in
+    upsert misses them. reconcile received only (score, gate, reasons) and
+    wrote just the verdict, leaving employer_tier, department, remote_flag and
+    comp_text frozen at whatever the row last had.
+
+    That is a rescore waiting to disagree with a pull, and the company floor
+    makes it the ordinary case: 66 rows in the live database are demoted on
+    every single run."""
+    from engine import store
+    j = J(url="https://b/820", location="Portland, OR, US", external_id="820")
+    j.employer_tier, j.department = "", ""
+    store.upsert(db, [j])
+
+    # The board re-reports it with more detail, but it now scores below a floor.
+    fresh = J(url="https://b/820", location="Portland, OR, US", external_id="820")
+    fresh.employer_tier, fresh.department = "A", "Salesforce"
+    fresh.remote_flag = True
+    fresh.gate, fresh.score, fresh.reasons = "SLOT-BLOCKED", 35, ["below the configured score floor"]
+    store.reconcile(db, {fresh.uid: fresh}, {("greenhouse", "Acme")}, set())
+
+    row = db.execute("SELECT gate, employer_tier, department, remote_flag "
+                     "FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert row[0] == "SLOT-BLOCKED", "the demotion itself did not land"
+    assert (row[1], row[2], row[3]) == ("A", "Salesforce", 1), (
+        f"the board's fresh detail never reached the demoted row: "
+        f"tier={row[1]!r} dept={row[2]!r} remote={row[3]!r}")
+
+
+def test_when_every_sighting_is_demoted_the_best_gate_still_wins(db):
+    """pull already picks the best gate between a surfaced and a demoted
+    sighting. When ALL sightings of one uid are demoted the dict comprehension
+    is plain last-write-wins, so a foreign-located EXCLUDED copy can overwrite
+    the clean US SLOT-BLOCKED one purely on iteration order - and then a rescore
+    of the stored text disagrees with the pull that wrote it. The company floor
+    exposed this by turning the formerly-surfaced clean copy into a demotion."""
+    from engine.pull import pick_demoted
+    clean = J(company="Acme", title="Administrator", url="https://b/1", external_id="9")
+    clean.gate, clean.score, clean.reasons = "SLOT-BLOCKED", 35, ["below the configured score floor"]
+    foreign = J(company="Acme", title="Administrator", url="https://b/1", external_id="9")
+    foreign.gate, foreign.score, foreign.reasons = "EXCLUDED", 0, ["non-US: London"]
+    assert clean.uid == foreign.uid, "fixture must be two sightings of ONE row"
+
+    for order in ([clean, foreign], [foreign, clean]):
+        picked = pick_demoted(order, kept_uids=set())
+        assert picked[clean.uid].gate == "SLOT-BLOCKED", (
+            "iteration order decided the stored verdict: "
+            f"{[j.gate for j in order]} -> {picked[clean.uid].gate}")
+
+
+def test_an_ignored_row_still_tracks_whether_its_posting_is_alive(db):
+    """agy lens. reconcile skips status IN ('applied','rejected','ignored') when
+    counting misses, so an ignored row never accrues one. Ignoring a role is
+    "not interested now", not "this is history" - the posting can die while
+    hidden, and un-ignoring it then surfaces a dead requisition as live.
+
+    applied/rejected stay guarded: those ARE history, and the whole point of the
+    guard is not to retire something the user acted on."""
+    from engine import store
+    j = J(url="https://b/830", location="Remote, US", external_id="830")
+    store.upsert(db, [j])
+    store.set_status(db, j.uid, "ignored")
+    db.execute("UPDATE jobs SET last_seen='2020-01-01' WHERE uid=?", (j.uid,))
+
+    store.reconcile(db, {}, {("greenhouse", "Acme")}, set())
+    misses = db.execute("SELECT misses FROM jobs WHERE uid=?", (j.uid,)).fetchone()[0]
+    assert misses == 1, (
+        f"an ignored row did not register its board's silence (misses={misses}); "
+        "un-ignoring it later would surface a posting that had already died")
+
+
+def test_scoring_reads_the_same_text_that_gets_stored(db):
+    """kimi lens. upsert truncates the description at DESCRIPTION_LIMIT, but
+    score() at pull time reads the full fetched text. A comp band or signal
+    phrase past that offset is counted on the pull and gone on the rescore, so
+    the two disagree on a row nobody touched - in either direction.
+
+    The fix is not a bigger limit, which only moves the boundary: it is to
+    truncate ONCE, before scoring, so the text that is judged is the text that
+    is kept."""
+    from engine import store
+    from engine.pull import clip_description
+    j = J(url="https://b/840", location="Remote, US", external_id="840")
+    j.description = ("d" * store.DESCRIPTION_LIMIT) + " The salary range is $150,000 - $208,000."
+    clip_description(j)
+    assert len(j.description) <= store.DESCRIPTION_LIMIT
+    store.upsert(db, [j])
+    stored = db.execute("SELECT description FROM jobs WHERE uid=?", (j.uid,)).fetchone()[0]
+    assert stored == j.description, \
+        "the stored text still differs from the text that was scored"

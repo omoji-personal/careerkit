@@ -102,6 +102,50 @@ def fetch_all(reg: dict, keys: dict, con=None, *, employers_only: bool = False,
             "healthy_boards": healthy_boards, "healthy_feeds": healthy_feeds}
 
 
+#: Demotion gates, least severe first. SLOT-BLOCKED means the rails passed and
+#: only the user's own preference stopped it; EXCLUDED means a rail killed it.
+_DEMOTION_ORDER = {"EXCLUDED": 0, "SLOT-BLOCKED": 1}
+
+
+def clip_description(job) -> None:
+    """Cut the body to what will actually be stored, BEFORE it is scored.
+
+    score() read the full fetched text while upsert kept only the first
+    DESCRIPTION_LIMIT characters, so anything past that offset - a salary band, a
+    signal phrase, a clearance requirement - counted on the pull and vanished on
+    the rescore, flipping verdicts in both directions on rows nobody touched. A
+    larger limit only moves the boundary; judging exactly what is kept removes it.
+    """
+    if job.description and len(job.description) > store.DESCRIPTION_LIMIT:
+        job.description = job.description[:store.DESCRIPTION_LIMIT]
+
+
+def pick_demoted(scored: list, kept_uids: set) -> dict:
+    """One demotion per uid, best gate winning.
+
+    Aggregator sightings of one role share a uid, so a copy listed under a
+    foreign location scores EXCLUDED while the clean US copy scores
+    SLOT-BLOCKED. "Best gate wins" was already implemented between a SURFACED
+    and a demoted sighting; between two demoted ones this was a dict
+    comprehension, which is plain last-write-wins. Iteration order then decided
+    the stored verdict, and a rescore of the stored text disagreed with the pull
+    that wrote it.
+
+    Rare until the company floor arrived: the floor turns the formerly-surfaced
+    clean copy into a demotion, which is exactly the case that exposes it.
+    """
+    best: dict = {}
+    for j in scored:
+        if j.gate not in _DEMOTION_ORDER or j.uid in kept_uids:
+            continue
+        current = best.get(j.uid)
+        if current is None or (
+                (_DEMOTION_ORDER[j.gate], j.score) >
+                (_DEMOTION_ORDER[current.gate], current.score)):
+            best[j.uid] = j
+    return best
+
+
 def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = False,
              feeds_only: bool = False, tier=None, min_score: int = 0,
              discovered=(), echo=print) -> dict:
@@ -113,6 +157,8 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
                         feeds_only=feeds_only, tier=tier, echo=echo)
     all_jobs = fetched["jobs"]
 
+    for _j in all_jobs:
+        clip_description(_j)
     echo(f"\nScoring {len(all_jobs)} postings...")
     scored = score_all(all_jobs, profile)
     excluded: Counter = Counter()
@@ -141,9 +187,7 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
     # scores QUALIFIED. Writing the demotion back blindly overwrote the row
     # upsert had just created and deleted the role on the run it was found.
     kept_uids = {j.uid for j in keep}
-    demoted = {j.uid: (j.score, j.gate, " | ".join(j.reasons))
-               for j in scored
-               if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.uid not in kept_uids}
+    demoted = pick_demoted(scored, kept_uids)
     n_delisted, n_demoted = store.reconcile(
         con, demoted, fetched["healthy_boards"], fetched["healthy_feeds"],
         # Deactivated boards are deliberately no longer known/live. Keeping them

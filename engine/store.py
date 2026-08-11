@@ -474,7 +474,7 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
-                     j.description[:20000], j.source, j.board, j.group_key, run_id,
+                     j.description[:DESCRIPTION_LIMIT], j.source, j.board, j.group_key, run_id,
                      j.registry_lane,
                      *( (None,) * 3 if j.remote_flag is None
                         else (int(j.remote_flag),) * 3 ),
@@ -493,7 +493,7 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     (j.uid, j.group_key, j.board, j.company, j.title, j.url, j.location, j.source,
                      j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
                      j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
-                     j.description[:20000], today, today, run_id, run_id,
+                     j.description[:DESCRIPTION_LIMIT], today, today, run_id, run_id,
                      None if j.remote_flag is None else int(j.remote_flag),
                      int(bool(j.rails_exempt)), j.url_direct, j.company_site,
                      j.registry_lane),
@@ -508,6 +508,13 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
 
 
 VALID_STATUS = ("new", "reviewed", "applied", "rejected", "ignored")
+
+
+DESCRIPTION_LIMIT = 20000
+"""Longest posting body kept. Applied by pull BEFORE scoring, not only here:
+truncating at storage while score() read the full fetched text meant a comp band
+or signal phrase past this offset was counted on the pull and gone on the
+rescore. Truncate once, judge what you keep."""
 
 
 def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
@@ -537,7 +544,14 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
     today = date.today().isoformat()
     dem = 0
     with closing(con.cursor()) as cur:
-        for uid, (score, gate, reasons) in demoted.items():
+        for uid, dj in demoted.items():
+            # Accepts a Job. A demoted sighting was still REPORTED by its board,
+            # so it carries the same fresh detail a surfaced one does - but it
+            # never passes through upsert (pull filters it out of `keep`), so
+            # every field heal there missed it and the row's scorer inputs stayed
+            # frozen. That is a rescore waiting to disagree with a pull, and the
+            # company floor makes it the ordinary case rather than a rare one.
+            score, gate, reasons = dj.score, dj.gate, " | ".join(dj.reasons or [])
             # misses/miss_on are cleared for the same reason upsert clears them:
             # a demoted row WAS reported by its board this run, it just scored
             # below a gate. Leaving the counter standing turned "two consecutive
@@ -553,9 +567,24 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
             # SLOT-BLOCKED. stats() counts by gate, so an application the user
             # made is then tallied as a role that never qualified.
             cur.execute("UPDATE jobs SET score=?, gate=?, reasons=?, last_seen=?, "
-                        "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=? "
-                        "AND status NOT IN ('applied','rejected','ignored')",
-                        (score, gate, reasons, today, uid))
+                        "delisted_on=NULL, misses=0, miss_on=NULL, "
+                        "employer_tier=COALESCE(NULLIF(?,''),employer_tier), "
+                        "department=COALESCE(NULLIF(?,''),department), "
+                        "comp_text=COALESCE(NULLIF(?,''),comp_text), "
+                        "location=COALESCE(NULLIF(?,''),location), "
+                        "registry_lane=COALESCE(NULLIF(?,''),registry_lane), "
+                        "rails_exempt=COALESCE(?,rails_exempt), "
+                        "remote_flag=CASE WHEN ? IS NULL THEN remote_flag "
+                        "WHEN ? = 1 THEN 1 "
+                        "WHEN remote_flag IS NULL THEN ? ELSE remote_flag END "
+                        "WHERE uid=? AND status NOT IN ('applied','rejected','ignored')",
+                        (score, gate, reasons, today,
+                         dj.employer_tier, dj.department, dj.comp_text, dj.location,
+                         dj.registry_lane,
+                         None if dj.rails_exempt is None else int(dj.rails_exempt),
+                         *((None,) * 3 if dj.remote_flag is None
+                           else (int(dj.remote_flag),) * 3),
+                         uid))
             dem += cur.rowcount
         if not healthy_boards and not healthy_feeds:
             con.commit()
@@ -617,13 +646,15 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
         cur.execute(
             "UPDATE jobs SET misses = misses + 1, miss_on = ? WHERE delisted_on IS NULL "
             "AND last_seen < ? AND COALESCE(miss_on,'') <> ? "
-            "AND status NOT IN ('applied','rejected','ignored') "
+            # NOT 'ignored': that means "not interested now", and a hidden posting
+            # can still die. applied/rejected ARE history and stay guarded.
+            "AND status NOT IN ('applied','rejected') "
             "AND (" + " OR ".join(clauses) + ")",
             (today, today, today, *params),
         )
         cur.execute(
             "UPDATE jobs SET delisted_on=? WHERE delisted_on IS NULL AND misses >= 2 "
-            "AND status NOT IN ('applied','rejected','ignored')",
+            "AND status NOT IN ('applied','rejected')",
             (today,),
         )
         delisted = cur.rowcount
