@@ -204,7 +204,12 @@ PROFILE_SCHEMA: dict = {
                  "home_metro": str, "states": list},
     "exclusions": {"titles": list, "titles_always": list, "products": list, "certs_refused": list,
                    "body_patterns": list, "competing_platforms": list,
-                   "clearance": bool, "quota": bool, "companies": list},
+                   "clearance": bool, "quota": bool, "companies": list,
+                   # {company: minimum score}. For an employer that is worth
+                   # watching but effectively unreachable - an application cap
+                   # already spent, a recruiter-only route - so that only a
+                   # standout req there is worth surfacing.
+                   "company_floors": dict},
     # Gates read from a posting's REQUIREMENTS section only, never from its
     # responsibilities. "You will work with our architects" is not a demand that
     # you be one, and matching it anywhere in the body is how a good posting gets
@@ -389,6 +394,9 @@ class Profile:
     block_clearance: bool = True
     block_quota: bool = True
     dream_companies: set = field(default_factory=set)
+    # {normalised company: minimum score to surface}. Keys are normalised on
+    # load, so a board spelling the employer "Salesforce, Inc." cannot bypass it.
+    company_floors: dict = field(default_factory=dict)
     signals: list[tuple[re.Pattern, int, str]] = field(default_factory=list)
     search_terms: list[str] = field(default_factory=list)
     relevance_terms: list[str] = field(default_factory=list)
@@ -411,6 +419,8 @@ class Profile:
             block_clearance=bool(exc.get("clearance", True)),
             block_quota=bool(exc.get("quota", True)),
             dream_companies={c.lower() for c in (cfg.get("dream_companies") or [])},
+            company_floors={_norm_company(str(k)): int(v)
+                            for k, v in (exc.get("company_floors") or {}).items()},
             search_terms=list(cfg.get("search_terms") or []),
             lane_title_context=dict(cfg.get("lane_title_context") or {}),
         )
@@ -758,6 +768,31 @@ def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
 
 
 def score(job: Job, p: Profile) -> Job:
+    """Judge one posting, then apply any per-employer floor.
+
+    The floor is deliberately OUTSIDE the scorer rather than at its end.
+    _score_uncapped has roughly a dozen early returns, and a floor written at
+    the natural end of it held for none of them: 46 Salesforce rows surfaced at
+    scores of 1 to 25 under a floor of 75 on the first live rescore
+    (2026-08-11), every one of them out of the thin-body domain branch. A rule
+    that must hold for every result belongs at the single point every result
+    passes through.
+    """
+    job = _score_uncapped(job, p)
+    if not p.company_floors:
+        return job
+    floor = p.company_floors.get(_norm_company(job.company))
+    # Only ever demote something that would otherwise SURFACE. Re-gating a row
+    # the rails already killed would relabel why it died, and promoting one is
+    # not this rule's business.
+    if floor is not None and job.gate in ("QUALIFIED", "VERIFY") and job.score < floor:
+        job.gate = "SLOT-BLOCKED"
+        job.reasons = [f"below the score floor of {floor} set for {job.company} "
+                       f"(scored {job.score})"] + list(job.reasons or [])
+    return job
+
+
+def _score_uncapped(job: Job, p: Profile) -> Job:
     reasons: list[str] = []
     text = job.text
     title = job.title or ""
@@ -1006,6 +1041,7 @@ def score(job: Job, p: Profile) -> Job:
     job.score = total
     job.reasons = ([loc_e] if loc_v == "pass" else []) + reasons + \
                   ([f"NEEDS CHECK: {'; '.join(unknowns)}"] if unknowns else [])
+
     return job
 
 

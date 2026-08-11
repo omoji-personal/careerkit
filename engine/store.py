@@ -422,11 +422,22 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     # later aggregator sighting (which carries no registry lane)
                     # erase the one an ATS sighting established.
                     "registry_lane=COALESCE(NULLIF(?,''),registry_lane), "
+                    # Identical reasoning, and the field the comment at the top of
+                    # this module already names as the original example - which is
+                    # exactly why its absence here went unseen. remote_flag was
+                    # written by the INSERT and by nothing else, so every row
+                    # predating the column kept NULL however often its board
+                    # re-reported it as remote, and each `rescore` re-judged it as
+                    # onsite and dropped it on location. COALESCE, not a plain
+                    # write: an aggregator sighting that carries no remote field
+                    # must not erase what an ATS sighting established.
+                    "remote_flag=COALESCE(?,remote_flag), "
                     "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
                      j.description[:20000], j.source, j.board, j.group_key, run_id,
-                     j.registry_lane, j.uid),
+                     j.registry_lane,
+                     None if j.remote_flag is None else int(j.remote_flag), j.uid),
                 )
                 again.append(j)
             else:

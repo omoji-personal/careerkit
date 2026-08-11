@@ -3194,3 +3194,188 @@ def test_a_url_shared_by_two_requisitions_is_not_a_contradiction(db, tmp_path):
                    "- https://wd.test/job/1\n")
     problems = consistency.check_report(db, rpt)
     assert problems and "none of the 2 rows" in problems[0], problems
+
+
+# --------------------------------------------------------------------------
+# Per-company score floor.
+#
+# An employer can be worth watching while being unreachable in practice.
+# Salesforce allows three self-applications per twelve months and Omid's are
+# spent (2026-07-28), so every further req there is a recruiter ask rather than
+# an application, and a report full of them is a report he cannot act on.
+# Suppressing the employer outright is wrong too: it would hide the one req
+# worth spending that ask on. So the rule is a FLOOR, not a ban.
+#
+# `exclusions.companies` was declared in PROFILE_SCHEMA and never read by the
+# loader, which is the precise failure this file already documents for
+# remote_flag and lane_title_context: a key the user believes is doing work,
+# accepted without warning, doing nothing. The loader test below exists so that
+# cannot happen to this one.
+# --------------------------------------------------------------------------
+
+
+def _floor_profile(floor=75):
+    """A minimal profile whose only interesting feature is the company floor."""
+    import re as _re
+    from engine.score import Profile
+    p = Profile()
+    # Two lanes of deliberately different weight, mirroring the real case: a
+    # standout architect req worth a recruiter ask, and a routine admin req that
+    # is not. With no signals, no comp and no employer tier, score == lane
+    # weight, so the floor's behaviour is unambiguous at 80 vs 35.
+    p.lanes = [(80, _re.compile(r"solution architect", _re.I), "sa"),
+               (35, _re.compile(r"administrator", _re.I), "admin")]
+    p.domain_terms = None
+    p.company_floors = {"salesforce": floor}
+    return p
+
+
+def test_a_company_below_its_floor_is_kept_out_of_the_report():
+    from engine.score import score
+    j = J(company="Salesforce", title="Salesforce Administrator",
+          location="Remote, US", description="d" * 400)
+    out = score(j, _floor_profile())
+    assert out.gate == "SLOT-BLOCKED", (
+        f"a req under the company floor still reached the report as {out.gate}")
+    assert any("floor" in r.lower() or "cap" in r.lower() for r in out.reasons), \
+        f"the reason does not say why it was suppressed: {out.reasons}"
+
+
+def test_a_perfect_match_at_a_floored_company_is_judged_exactly_as_if_unfloored():
+    """The whole point of a floor rather than a ban: a req that clears the bar is
+    the one worth spending a recruiter ask on, so it must survive UNCHANGED.
+    Asserting against the unfloored verdict rather than a literal gate is what
+    makes this fail if the floor is ever implemented as a ban, or if it quietly
+    rewrites the score of the rows it lets through."""
+    from engine.score import score
+    unfloored = _floor_profile()
+    unfloored.company_floors = {}
+    baseline = score(J(company="Salesforce", title="Solution Architect",
+                       location="Remote, US", description="d" * 400), unfloored)
+    out = score(J(company="Salesforce", title="Solution Architect",
+                  location="Remote, US", description="d" * 400),
+                _floor_profile(floor=baseline.score))
+    assert (out.gate, out.score) == (baseline.gate, baseline.score), (
+        f"a req AT the floor was altered: {out.gate}/{out.score} "
+        f"vs unfloored {baseline.gate}/{baseline.score}")
+
+
+def test_the_company_floor_applies_to_no_other_employer():
+    from engine.score import score
+    j = J(company="NeuraFlash", title="Salesforce Administrator",
+          location="Remote, US", description="d" * 400)
+    out = score(j, _floor_profile())
+    assert out.gate != "SLOT-BLOCKED", \
+        "the floor leaked onto an employer it was never configured for"
+
+
+def test_the_company_floor_matches_despite_a_corporate_suffix():
+    """Boards spell the same employer a dozen ways. dream_companies already
+    normalises for this; a floor that only matched the exact string would be
+    silently bypassed by 'Salesforce, Inc.'"""
+    from engine.score import score
+    j = J(company="Salesforce, Inc.", title="Salesforce Administrator",
+          location="Remote, US", description="d" * 400)
+    out = score(j, _floor_profile())
+    assert out.gate == "SLOT-BLOCKED", \
+        f"'Salesforce, Inc.' evaded the floor set for Salesforce: {out.gate}"
+
+
+def test_the_loader_actually_reads_the_company_floor_from_the_file(tmp_path):
+    """The bug class this whole feature is most likely to ship with: the field
+    exists on Profile, score() honours it, and the loader never populates it, so
+    it works in every unit test and does nothing in production."""
+    from engine.score import Profile
+    pf = tmp_path / "p.yaml"
+    pf.write_text(
+        "comp: {screen_floor: 130000}\n"
+        "exclusions:\n"
+        "  company_floors: {Salesforce: 75}\n"
+        "lanes:\n"
+        "  - {key: sa, weight: 52, titles: [salesforce]}\n")
+    p = Profile.load(pf)
+    assert p.company_floors == {"salesforce": 75}, \
+        f"the loader ignored exclusions.company_floors: {p.company_floors!r}"
+
+
+def test_the_company_floor_also_catches_a_thin_bodied_req():
+    """Found on the live corpus, 2026-08-11, immediately after the floor shipped:
+    46 Salesforce rows kept surfacing at scores of 1 to 25, far under a floor of
+    75. score() returns EARLY for a posting whose body is too thin to confirm the
+    domain, and the floor was applied only at the natural end of the function, so
+    every early return walked straight past it. The unit tests all used a 400
+    character body and missed the entire path.
+
+    This is the bug class the file already documents twice: a check placed on one
+    exit of a function with several exits. The floor must hold for anything that
+    would SURFACE, whichever way the scorer got there."""
+    import re as _re
+    from engine.score import score
+    p = _floor_profile()
+    p.domain_terms = _re.compile(r"salesforce", _re.I)
+    # Title matches a lane but carries no domain term, and the body is too thin
+    # to confirm one. This is the live shape: aggregator rows for reqs like
+    # "RVP, Sales" and "Senior Copywriter" surfaced at score 1 under a floor of 75.
+    j = J(company="Salesforce", title="Administrator",
+          location="Remote, US", description="short body")
+    out = score(j, p)
+    assert out.gate != "VERIFY", (
+        f"a thin-bodied req under the floor still surfaced as {out.gate} "
+        f"at {out.score}: {out.reasons}")
+
+
+def test_the_company_floor_leaves_an_already_excluded_req_excluded():
+    """The floor must not PROMOTE anything. A req killed by a rail is killed;
+    re-gating it to SLOT-BLOCKED would quietly relabel why it died."""
+    import re as _re
+    from engine.score import score
+    p = _floor_profile()
+    p.domain_terms = _re.compile(r"salesforce", _re.I)
+    j = J(company="Salesforce", title="Administrator", location="Remote, US",
+          description="a body long enough to be judged on its merits " + "d" * 400)
+    out = score(j, p)
+    assert out.gate == "EXCLUDED" and "domain terms never mentioned" in " ".join(out.reasons), \
+        f"expected the domain rail to own this kill, got {out.gate}: {out.reasons}"
+
+
+def test_a_re_sighting_heals_a_row_whose_remote_flag_predates_the_column(db):
+    """Found on the live corpus 2026-08-11. `remote_flag` is written by the
+    INSERT and by nothing else: the UPDATE path heals `registry_lane` but never
+    touches this one. Every row stored before the column existed therefore keeps
+    NULL for good, no matter how many times its board re-reports it as remote.
+
+    The consequence is not cosmetic. location_verdict reads remote_flag, so on
+    the `rescore` the README tells you to run after any criteria change, those
+    rows are re-judged as onsite and excluded on location. Nine of Omid's live
+    rows demoted this way in one rescore, including a QUALIFIED 50 and a
+    VERIFY 64, both genuinely remote."""
+    from engine import store
+    stale = J(url="https://b/900", location="Portland, OR, US", external_id="900")
+    stale.remote_flag = None
+    store.upsert(db, [stale])
+    assert db.execute("SELECT remote_flag FROM jobs WHERE uid=?",
+                      (stale.uid,)).fetchone()[0] is None
+
+    fresh = J(url="https://b/900", location="Portland, OR, US", external_id="900")
+    fresh.remote_flag = True
+    store.upsert(db, [fresh])
+    assert db.execute("SELECT remote_flag FROM jobs WHERE uid=?",
+                      (fresh.uid,)).fetchone()[0] == 1, \
+        "a board re-reporting the role as remote never reached the stored row"
+
+
+def test_a_re_sighting_without_remote_information_does_not_erase_it(db):
+    """The mirror, and the reason this is COALESCE rather than a plain write.
+    Aggregator sightings frequently carry no remote field at all; letting one
+    overwrite what an ATS sighting established would swap a silent demotion for
+    a silent flapping one. Same reasoning as registry_lane."""
+    from engine import store
+    known = J(url="https://b/901", location="Portland, OR, US", external_id="901")
+    known.remote_flag = True
+    store.upsert(db, [known])
+    blind = J(url="https://b/901", location="Portland, OR, US", external_id="901")
+    blind.remote_flag = None
+    store.upsert(db, [blind])
+    assert db.execute("SELECT remote_flag FROM jobs WHERE uid=?",
+                      (known.uid,)).fetchone()[0] == 1, \
+        "a sighting that knew nothing about remote status erased what was known"
