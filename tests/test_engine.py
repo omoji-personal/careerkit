@@ -3379,3 +3379,200 @@ def test_a_re_sighting_without_remote_information_does_not_erase_it(db):
     assert db.execute("SELECT remote_flag FROM jobs WHERE uid=?",
                       (known.uid,)).fetchone()[0] == 1, \
         "a sighting that knew nothing about remote status erased what was known"
+
+
+# --------------------------------------------------------------------------
+# exclusions.companies — an outright employer block.
+#
+# This key had been declared in PROFILE_SCHEMA since the schema was written and
+# was read by nothing. Because it WAS in the schema, the unknown-key validator
+# stayed silent, so a user who set it got no warning and no effect: the single
+# worst shape a config option can have, and the exact failure the schema's own
+# comment describes ("a key the user believes is doing work").
+# --------------------------------------------------------------------------
+
+
+def _blocked_profile(*companies):
+    import re as _re
+    from engine.models import _norm_company
+    from engine.score import Profile
+    p = Profile()
+    p.lanes = [(80, _re.compile(r"solution architect", _re.I), "sa"),
+               (35, _re.compile(r"administrator", _re.I), "admin")]
+    p.domain_terms = None
+    # Normalised exactly as the loader stores them. "Blocked Corp" -> "blocked":
+    # _norm_company strips corporate suffixes, which is what lets a board
+    # spelling of "Blocked Corp, Inc." match the same entry.
+    p.excluded_companies = {_norm_company(c) for c in companies}
+    return p
+
+
+def test_an_excluded_employer_never_surfaces_however_well_it_scores():
+    """A floor asks "is this one good enough"; this asks nothing. Applied to the
+    top-scoring lane deliberately: a block that only held for weak reqs would be
+    indistinguishable from the floor and useless for its actual purpose (an
+    employer the user will not work for at any price)."""
+    from engine.score import score
+    j = J(company="Blocked Corp", title="Solution Architect",
+          location="Remote, US", description="d" * 400)
+    out = score(j, _blocked_profile("blocked corp"))
+    assert out.gate == "SLOT-BLOCKED", \
+        f"an excluded employer still surfaced as {out.gate} at {out.score}"
+    assert any("excluded" in r.lower() for r in out.reasons), \
+        f"the reason does not say the employer was excluded: {out.reasons}"
+
+
+def test_an_excluded_employer_is_blocked_on_a_thin_body_too():
+    """The early-return path that the score floor originally missed. Written
+    deliberately rather than assumed: the floor shipped broken on exactly this."""
+    import re as _re
+    from engine.score import score
+    p = _blocked_profile("blocked corp")
+    p.domain_terms = _re.compile(r"salesforce", _re.I)
+    j = J(company="Blocked Corp", title="Administrator",
+          location="Remote, US", description="short body")
+    out = score(j, p)
+    assert out.gate == "SLOT-BLOCKED", \
+        f"a thin-bodied req at an excluded employer surfaced as {out.gate}"
+
+
+def test_excluding_one_employer_does_not_touch_another():
+    from engine.score import score
+    j = J(company="Fine Corp", title="Solution Architect",
+          location="Remote, US", description="d" * 400)
+    out = score(j, _blocked_profile("blocked corp"))
+    assert out.gate != "SLOT-BLOCKED", "the employer block leaked onto another company"
+
+
+def test_the_employer_block_matches_despite_a_corporate_suffix():
+    from engine.score import score
+    j = J(company="Blocked Corp, Inc.", title="Solution Architect",
+          location="Remote, US", description="d" * 400)
+    out = score(j, _blocked_profile("blocked corp"))
+    assert out.gate == "SLOT-BLOCKED", \
+        f"'Blocked Corp, Inc.' evaded a block set for Blocked Corp: {out.gate}"
+
+
+def test_the_loader_actually_reads_exclusions_companies(tmp_path):
+    """The whole reason this feature is being written: the key was declared and
+    unread. A loader test is the only thing that can catch that recurring."""
+    from engine.score import Profile
+    pf = tmp_path / "p.yaml"
+    pf.write_text(
+        "exclusions:\n"
+        "  companies: [Blocked Corp, Another Ltd]\n"
+        "lanes:\n"
+        "  - {key: sa, weight: 52, titles: [salesforce]}\n")
+    p = Profile.load(pf)
+    assert p.excluded_companies == {"blocked", "another"}, \
+        f"the loader ignored exclusions.companies: {p.excluded_companies!r}"
+
+
+def test_the_floor_reason_collapses_to_one_label_whatever_the_score():
+    """Reasons in this engine are "label: variable payload", because the report's
+    screened-out breakdown and `audit` both key on reasons[0].split(":")[0]. The
+    floor's first wording put the score BEFORE any colon, so each suppressed row
+    became its own bucket: eighteen entries reading "below the score floor of 75
+    set for Salesforce (scored 74) 1, (scored 73) 2, ..." in place of one line.
+    Anything variable has to sit after the colon."""
+    from engine.score import score
+    labels = set()
+    for title, floor in (("Solution Architect", 95), ("Administrator", 95)):
+        out = score(J(company="Salesforce", title=title, location="Remote, US",
+                      description="d" * 400), _floor_profile(floor))
+        assert out.gate == "SLOT-BLOCKED", f"{title} should be under a floor of 95"
+        labels.add(out.reasons[0].split(":")[0].strip())
+    assert len(labels) == 1, \
+        f"two differently-scored rows produced two breakdown buckets: {labels}"
+
+
+def test_the_employer_block_reason_also_collapses_to_one_label():
+    from engine.score import score
+    labels = set()
+    for title in ("Solution Architect", "Administrator"):
+        out = score(J(company="Blocked Corp", title=title, location="Remote, US",
+                      description="d" * 400), _blocked_profile("Blocked Corp"))
+        labels.add(out.reasons[0].split(":")[0].strip())
+    assert len(labels) == 1, f"employer-block rows split into buckets: {labels}"
+
+
+def test_a_sighting_that_cannot_tell_must_not_downgrade_a_known_remote_role(db):
+    """The regression the remote_flag heal opened, caught reviewing its own diff.
+
+    Sources disagree about what False means. adapters.py:118 and :398 write None
+    when the board said nothing, but aggregators.py:102/:321/:512 and several
+    adapters write `bool(payload.get("remote"))`, which is False for "absent"
+    just as much as for "not remote". Once the UPDATE started writing this
+    column, one of those Falses could overwrite a True that another source had
+    established, and location_verdict reads `remote_flag is True`, so the role
+    silently stops counting as remote on the next rescore.
+
+    Measured as reachable, not hypothetical: four uids in the live database are
+    seen from two sources at once, among them jobspy:indeed (False-when-unknown)
+    paired with linkedin_guest.
+
+    So the heal is one-way. A True may be established from nothing and a genuine
+    False may be recorded when nothing is known, but a source that reports False
+    never erases a True. This is the same asymmetry registry_lane already uses,
+    for the same reason: the sighting that knows something outranks the one that
+    does not. The location text is still read independently, so a role that truly
+    stops being remote is not stuck being treated as one."""
+    from engine import store
+    known = J(url="https://b/950", location="Portland, OR, US", external_id="950")
+    known.remote_flag = True
+    store.upsert(db, [known])
+
+    blind = J(url="https://b/950", location="Portland, OR, US", external_id="950")
+    blind.remote_flag = False          # an aggregator that simply has no field
+    store.upsert(db, [blind])
+    assert db.execute("SELECT remote_flag FROM jobs WHERE uid=?",
+                      (known.uid,)).fetchone()[0] == 1, \
+        "a False from a source that cannot tell erased a known-remote role"
+
+
+def test_a_false_still_lands_on_a_row_that_knew_nothing(db):
+    """The other half: one-way must not mean write-once. A row stored with no
+    remote information at all should still accept a definite answer."""
+    from engine import store
+    blank = J(url="https://b/951", location="Austin, TX", external_id="951")
+    blank.remote_flag = None
+    store.upsert(db, [blank])
+    definite = J(url="https://b/951", location="Austin, TX", external_id="951")
+    definite.remote_flag = False
+    store.upsert(db, [definite])
+    assert db.execute("SELECT remote_flag FROM jobs WHERE uid=?",
+                      (blank.uid,)).fetchone()[0] == 0, \
+        "a row that knew nothing refused a definite answer"
+
+
+def test_a_blank_entry_in_the_company_exclusions_blocks_nothing(tmp_path):
+    """This repo has shipped this exact bug once already, in _compile_alt: a
+    stray "" in an exclusion list produced `\\b(a|)\\b`, which matched every
+    posting, and the search silently returned zero jobs - indistinguishable from
+    a quiet day. The company list is a set rather than a regex, so the shape
+    differs, but the failure is identical: _norm_company("  ") is "", and an ""
+    in the set matches every job whose company is blank or unparseable."""
+    from engine.score import Profile
+    pf = tmp_path / "p.yaml"
+    pf.write_text('exclusions:\n  companies: [" ", "", Acme]\n'
+                  'lanes:\n  - {key: sa, weight: 52, titles: [salesforce]}\n')
+    p = Profile.load(pf)
+    assert "" not in p.excluded_companies, \
+        f"a blank exclusion entry would block every unnamed employer: {p.excluded_companies!r}"
+    assert p.excluded_companies == {"acme"}, p.excluded_companies
+
+
+def test_a_non_numeric_company_floor_is_refused_with_a_readable_error(tmp_path):
+    """`company_floors: {Acme: high}` is a plausible typo. int() raises a bare
+    ValueError reading "invalid literal for int() with base 10: 'high'", which
+    names neither the file, the key, nor the employer. Every other profile rule
+    that cannot be compiled raises ProfileError precisely because silence, or an
+    unreadable crash, is unsafe here."""
+    from engine.score import Profile, ProfileError
+    pf = tmp_path / "p.yaml"
+    pf.write_text('exclusions:\n  company_floors: {Acme: high}\n'
+                  'lanes:\n  - {key: sa, weight: 52, titles: [salesforce]}\n')
+    with pytest.raises(ProfileError) as e:
+        Profile.load(pf)
+    assert "Acme" in str(e.value) and "company_floors" in str(e.value), \
+        f"the error does not say which key or employer is wrong: {e.value}"

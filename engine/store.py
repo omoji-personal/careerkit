@@ -428,16 +428,29 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     # written by the INSERT and by nothing else, so every row
                     # predating the column kept NULL however often its board
                     # re-reported it as remote, and each `rescore` re-judged it as
-                    # onsite and dropped it on location. COALESCE, not a plain
-                    # write: an aggregator sighting that carries no remote field
-                    # must not erase what an ATS sighting established.
-                    "remote_flag=COALESCE(?,remote_flag), "
+                    # onsite and dropped it on location.
+                    #
+                    # The heal is deliberately ONE-WAY. Sources disagree about
+                    # what False means: adapters.py:118 writes None when the board
+                    # said nothing, while aggregators.py:102/:321/:512 write
+                    # bool(payload.get("remote")), which is False for "absent" as
+                    # much as for "not remote". A plain COALESCE let one of those
+                    # erase a True established elsewhere, and four uids in a real
+                    # database are seen from two sources at once. So: establish a
+                    # True from nothing, record a False when nothing was known,
+                    # never downgrade a known True. location_verdict still reads
+                    # the location text independently, so a role that genuinely
+                    # stops being remote is not pinned.
+                    "remote_flag=CASE WHEN ? IS NULL THEN remote_flag "
+                    "WHEN ? = 1 THEN 1 "
+                    "WHEN remote_flag IS NULL THEN ? ELSE remote_flag END, "
                     "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      j.comp_min, j.comp_max, j.url, j.title, j.location,
                      j.description[:20000], j.source, j.board, j.group_key, run_id,
                      j.registry_lane,
-                     None if j.remote_flag is None else int(j.remote_flag), j.uid),
+                     *( (None,) * 3 if j.remote_flag is None
+                        else (int(j.remote_flag),) * 3 ), j.uid),
                 )
                 again.append(j)
             else:

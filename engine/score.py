@@ -233,6 +233,29 @@ PROFILE_SCHEMA: dict = {
 _LANE_KEYS = {"key", "titles", "weight", "label", "note"}
 
 
+def _company_floors(raw) -> dict:
+    """{employer: minimum score}, normalised, with a readable error on garbage.
+
+    `company_floors: {Acme: high}` is a plausible typo, and a bare int() raises
+    "invalid literal for int() with base 10: 'high'" - naming neither the key
+    nor the employer. Every other uncompilable profile rule raises ProfileError
+    for the same reason: a scoring rule that cannot be read must not fail
+    obscurely, and must never fail open.
+    """
+    out = {}
+    for name, value in (raw or {}).items():
+        key = _norm_company(str(name))
+        if not key:
+            continue
+        try:
+            out[key] = int(value)
+        except (TypeError, ValueError):
+            raise ProfileError(
+                f"exclusions.company_floors: {name!r} is set to {value!r}, "
+                f"which is not a score. Use a number, e.g. {{{name}: 75}}.")
+    return out
+
+
 def _closest(key: str, known) -> str:
     """Nearest known key by cheap edit distance, so the warning is actionable."""
     import difflib
@@ -397,6 +420,10 @@ class Profile:
     # {normalised company: minimum score to surface}. Keys are normalised on
     # load, so a board spelling the employer "Salesforce, Inc." cannot bypass it.
     company_floors: dict = field(default_factory=dict)
+    # Employers that never surface at any score. Normalised the same way, with
+    # the same caveat: _norm_company strips corporate suffixes, so "Acme Group"
+    # and "Acme" collapse to one key and blocking either blocks both.
+    excluded_companies: set = field(default_factory=set)
     signals: list[tuple[re.Pattern, int, str]] = field(default_factory=list)
     search_terms: list[str] = field(default_factory=list)
     relevance_terms: list[str] = field(default_factory=list)
@@ -419,8 +446,14 @@ class Profile:
             block_clearance=bool(exc.get("clearance", True)),
             block_quota=bool(exc.get("quota", True)),
             dream_companies={c.lower() for c in (cfg.get("dream_companies") or [])},
-            company_floors={_norm_company(str(k)): int(v)
-                            for k, v in (exc.get("company_floors") or {}).items()},
+            company_floors=_company_floors(exc.get("company_floors")),
+            # Filter AFTER normalising, not before: _norm_company("  ") is "",
+            # and an "" in this set matches every job with a blank or
+            # unparseable company. Same failure _compile_alt already carries a
+            # regression test for, in a different shape.
+            excluded_companies={k for k in
+                                (_norm_company(str(c)) for c in (exc.get("companies") or []))
+                                if k},
             search_terms=list(cfg.get("search_terms") or []),
             lane_title_context=dict(cfg.get("lane_title_context") or {}),
         )
@@ -779,16 +812,30 @@ def score(job: Job, p: Profile) -> Job:
     passes through.
     """
     job = _score_uncapped(job, p)
-    if not p.company_floors:
+    if not p.company_floors and not p.excluded_companies:
         return job
-    floor = p.company_floors.get(_norm_company(job.company))
+    key = _norm_company(job.company)
     # Only ever demote something that would otherwise SURFACE. Re-gating a row
     # the rails already killed would relabel why it died, and promoting one is
     # not this rule's business.
-    if floor is not None and job.gate in ("QUALIFIED", "VERIFY") and job.score < floor:
+    if job.gate not in ("QUALIFIED", "VERIFY"):
+        return job
+    # An outright block outranks a floor: "not this employer, at any score" is a
+    # different statement from "only a standout one here", and if a profile says
+    # both, the stronger one is the one the user meant.
+    if key in p.excluded_companies:
         job.gate = "SLOT-BLOCKED"
-        job.reasons = [f"below the score floor of {floor} set for {job.company} "
-                       f"(scored {job.score})"] + list(job.reasons or [])
+        job.reasons = [f"employer excluded by profile: {job.company}"] + list(job.reasons or [])
+        return job
+    floor = p.company_floors.get(key)
+    if floor is not None and job.score < floor:
+        job.gate = "SLOT-BLOCKED"
+        # "label: payload", like every other reason here. The report's
+        # screened-out breakdown and `audit` both key on the text BEFORE the
+        # first colon, so a score written ahead of it gave every suppressed row
+        # its own bucket - eighteen of them on the first live run.
+        job.reasons = [f"below the score floor for {job.company}: "
+                       f"scored {job.score}, floor {floor}"] + list(job.reasons or [])
     return job
 
 
