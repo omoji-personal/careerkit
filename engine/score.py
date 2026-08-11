@@ -278,6 +278,22 @@ def _company_floors(raw) -> dict:
             raise ProfileError(
                 f"exclusions.company_floors: {name!r} is set to {value!r}, which is "
                 f"not a whole-number score. Use an integer, e.g. {{{name}: 75}}.")
+        # Scores run 0-100. A negative floor blocks nothing and a floor above
+        # 100 blocks that employer entirely, both silently, and both read as a
+        # working rule in the file. If someone means "never this employer",
+        # exclusions.companies says so out loud.
+        if not 0 <= value <= 100:
+            raise ProfileError(
+                f"exclusions.company_floors: {name!r} is set to {value}, outside the "
+                f"0-100 score range. To block an employer outright use "
+                f"exclusions.companies: [{name}].")
+        # Two spellings that normalise to one key mean one of the user's rules
+        # silently does nothing, which is the failure this schema exists to stop.
+        if key in out and out[key] != value:
+            raise ProfileError(
+                f"exclusions.company_floors: {name!r} normalises to the same employer "
+                f"as another entry ({key!r}) but sets a different floor "
+                f"({out[key]} vs {value}). Keep one.")
         out[key] = value
     return out
 

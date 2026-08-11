@@ -3793,3 +3793,60 @@ def test_a_role_you_applied_to_keeps_the_verdict_it_had_when_you_applied(db):
         f"the verdict on an applied role was rewritten to {row[0]}/{row[1]}; "
         "the record of what it was when he applied is gone")
     assert row[2] == "applied"
+
+
+def test_merging_a_duplicate_row_does_not_lose_what_the_scorer_reads(db):
+    """kimi lens, 2026-08-11. The third write path, and the last one in this
+    family. _merge_duplicate_job_row folds a duplicate uid into the canonical
+    row and carries status, notes, first/last seen and the counters - but none
+    of the fields score() reads. A duplicate that knew the role was remote
+    merges into a row that does not, and the knowledge is gone.
+
+    Same property as the INSERT and UPDATE paths: a field the scorer reads must
+    survive every way a row can be written."""
+    from engine import store
+    canonical = J(url="https://b/810", location="Portland, OR, US", external_id="810")
+    canonical.remote_flag = None
+    store.upsert(db, [canonical])
+    # A duplicate row for the same role, from a sighting that DID know.
+    db.execute("INSERT INTO jobs (uid, company, title, url, location, source, "
+               "status, first_seen, last_seen, seen_count, remote_flag, employer_tier) "
+               "VALUES ('dupe-810','Acme','Administrator','https://b/810b',"
+               "'Portland, OR, US','greenhouse','new','2026-01-01','2026-01-02',1,1,'A')")
+    old = db.execute("SELECT * FROM jobs WHERE uid='dupe-810'").fetchone()
+
+    store._merge_duplicate_job_row(db.cursor(), canonical.uid, old)
+
+    row = db.execute("SELECT remote_flag, employer_tier FROM jobs WHERE uid=?",
+                     (canonical.uid,)).fetchone()
+    assert row[0] == 1, "the merge lost a known-remote flag the duplicate carried"
+    assert row[1] == "A", "the merge lost the employer tier the duplicate carried"
+
+
+def test_two_profile_keys_that_normalise_to_one_floor_are_refused(db):
+    """kimi lens. {Salesforce: 75, "Salesforce Inc": 90} both normalise to
+    "salesforce", so one silently wins and the other does nothing. A scoring
+    rule the user wrote and that has no effect is the failure mode this whole
+    schema is defensive about."""
+    import tempfile, pathlib
+    from engine.score import Profile, ProfileError
+    pf = pathlib.Path(tempfile.mkdtemp()) / "p.yaml"
+    pf.write_text('exclusions:\n  company_floors: {Salesforce: 75, "Salesforce Inc": 90}\n'
+                  'lanes:\n  - {key: sa, weight: 52, titles: [salesforce]}\n')
+    with pytest.raises(ProfileError) as e:
+        Profile.load(pf)
+    assert "Salesforce" in str(e.value), e.value
+
+
+@pytest.mark.parametrize("bad", [-5, 250])
+def test_a_floor_outside_the_score_range_is_refused(bad):
+    """kimi lens. Scores are 0-100. A negative floor blocks nothing and a floor
+    above 100 blocks everything at that employer - both silently, and both look
+    like a working rule in the file."""
+    import tempfile, pathlib
+    from engine.score import Profile, ProfileError
+    pf = pathlib.Path(tempfile.mkdtemp()) / "p.yaml"
+    pf.write_text(f"exclusions:\n  company_floors: {{Acme: {bad}}}\n"
+                  "lanes:\n  - {key: sa, weight: 52, titles: [salesforce]}\n")
+    with pytest.raises(ProfileError):
+        Profile.load(pf)

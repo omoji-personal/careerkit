@@ -288,14 +288,28 @@ def _merge_duplicate_job_row(cur: sqlite3.Cursor, target_uid: str,
                   if v is not None]
     last_runs = [v for v in (current["last_seen_run"], old["last_seen_run"])
                  if v is not None]
+    # The third write path, and the same rule as the other two: a field score()
+    # reads has to survive every way a row can be written. This merge used to
+    # carry only status, notes, the dates and the counters, so a duplicate that
+    # knew the role was remote folded into a row that did not and the knowledge
+    # was gone - invisible, because the merged row still looks complete.
+    # COALESCE keeps whatever the canonical row already established; the
+    # duplicate only fills gaps.
+    def _keep(col):
+        cur_val, old_val = current[col], old[col] if col in old.keys() else None
+        return cur_val if cur_val not in (None, "") else old_val
+
     cur.execute(
         "UPDATE jobs SET status=?, notes=?, first_seen=MIN(first_seen,?), "
         "last_seen=MAX(last_seen,?), seen_count=COALESCE(seen_count,0)+?, "
-        "first_seen_run=?, last_seen_run=? WHERE uid=?",
+        "first_seen_run=?, last_seen_run=?, remote_flag=?, rails_exempt=?, "
+        "employer_tier=?, department=?, comp_text=?, registry_lane=? WHERE uid=?",
         (status, " | ".join(notes), old["first_seen"], old["last_seen"],
          old["seen_count"] or 0,
          min(first_runs) if first_runs else None,
          max(last_runs) if last_runs else None,
+         _keep("remote_flag"), _keep("rails_exempt"), _keep("employer_tier"),
+         _keep("department"), _keep("comp_text"), _keep("registry_lane"),
          target_uid),
     )
     for sighting in cur.execute(
