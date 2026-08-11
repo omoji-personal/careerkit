@@ -568,6 +568,11 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
             # made is then tallied as a role that never qualified.
             cur.execute("UPDATE jobs SET score=?, gate=?, reasons=?, last_seen=?, "
                         "delisted_on=NULL, misses=0, miss_on=NULL, "
+                        # A demotion IS a sighting. Without this, last_seen
+                        # advanced on every pull while seen_count stood still,
+                        # and provenance - which `audit` and the ghost-listing
+                        # check both read - froze at the pre-demotion state.
+                        "seen_count=COALESCE(seen_count,0)+1, "
                         "employer_tier=COALESCE(NULLIF(?,''),employer_tier), "
                         "department=COALESCE(NULLIF(?,''),department), "
                         "comp_text=COALESCE(NULLIF(?,''),comp_text), "
@@ -585,6 +590,9 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
                          *((None,) * 3 if dj.remote_flag is None
                            else (int(dj.remote_flag),) * 3),
                          uid))
+            if cur.rowcount and dj.source:
+                cur.execute("INSERT OR REPLACE INTO sightings (uid, source, url, seen_on) "
+                            "VALUES (?,?,?,?)", (uid, dj.source, dj.url, today))
             dem += cur.rowcount
         if not healthy_boards and not healthy_feeds:
             con.commit()

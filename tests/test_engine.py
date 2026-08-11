@@ -3981,3 +3981,29 @@ def test_scoring_reads_the_same_text_that_gets_stored(db):
     stored = db.execute("SELECT description FROM jobs WHERE uid=?", (j.uid,)).fetchone()[0]
     assert stored == j.description, \
         "the stored text still differs from the text that was scored"
+
+
+def test_a_demoted_sighting_is_recorded_as_a_sighting(db):
+    """codex lens, the last of the five. A demoted row never reaches the code
+    that bumps seen_count or writes the sightings row, so its provenance and
+    frequency data freeze at whatever they were before the demotion: last_seen
+    advances on every pull while seen_count does not, and the source that keeps
+    reporting it is missing from sightings entirely.
+
+    That data is not decoration - `audit` and the ghost-listing check read
+    provenance to decide whether an employer was ever seen anywhere but an
+    aggregator."""
+    from engine import store
+    j = J(url="https://b/850", location="Remote, US", external_id="850", source="greenhouse")
+    store.upsert(db, [j])
+    before = db.execute("SELECT seen_count FROM jobs WHERE uid=?", (j.uid,)).fetchone()[0]
+    db.execute("DELETE FROM sightings WHERE uid=?", (j.uid,))
+
+    dem = J(url="https://b/850", location="Remote, US", external_id="850", source="greenhouse")
+    dem.gate, dem.score, dem.reasons = "SLOT-BLOCKED", 35, ["below the configured score floor"]
+    store.reconcile(db, {dem.uid: dem}, {("greenhouse", "Acme")}, set())
+
+    after = db.execute("SELECT seen_count FROM jobs WHERE uid=?", (j.uid,)).fetchone()[0]
+    assert after == before + 1, f"seen_count froze at {after} across a real sighting"
+    sight = db.execute("SELECT source FROM sightings WHERE uid=?", (j.uid,)).fetchone()
+    assert sight is not None, "the source that reported it was not recorded as a sighting"
