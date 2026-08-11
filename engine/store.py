@@ -524,8 +524,16 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
     dem = 0
     with closing(con.cursor()) as cur:
         for uid, (score, gate, reasons) in demoted.items():
+            # misses/miss_on are cleared for the same reason upsert clears them:
+            # a demoted row WAS reported by its board this run, it just scored
+            # below a gate. Leaving the counter standing turned "two consecutive
+            # misses" into "two misses ever", so a single later absence delisted
+            # a live posting. The company floor makes this the ordinary path
+            # rather than a rare one - every floored row is re-sighted and
+            # demoted on every pull.
             cur.execute("UPDATE jobs SET score=?, gate=?, reasons=?, last_seen=?, "
-                        "delisted_on=NULL WHERE uid=?", (score, gate, reasons, today, uid))
+                        "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
+                        (score, gate, reasons, today, uid))
             dem += cur.rowcount
         if not healthy_boards and not healthy_feeds:
             con.commit()

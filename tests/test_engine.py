@@ -3724,3 +3724,41 @@ def test_a_company_floor_that_is_not_a_whole_number_is_refused(value):
     with pytest.raises(ProfileError) as e:
         Profile.load(pf)
     assert "Acme" in str(e.value), e.value
+
+
+def test_a_demoted_but_still_present_row_has_its_miss_counter_cleared(db):
+    """Found by an external review lens, 2026-08-11.
+
+    reconcile counts a miss for any row a healthy board did not report, and
+    delists on the SECOND consecutive one - deliberately, because hiding a live
+    job is the failure this tool exists to prevent. upsert clears the counter
+    when a posting is seen again. The demoted path does not, although a demoted
+    row was seen too: it just scored below a gate this time.
+
+    So misses survive a confirmed sighting, and "two consecutive misses" quietly
+    becomes "two misses ever". The company floor makes this the common case
+    rather than a rare one - every floored row is re-sighted and demoted on
+    every pull, 66 of them in the live database."""
+    from engine import store
+    j = J(url="https://b/700", location="Remote, US", external_id="700")
+    store.upsert(db, [j])
+    healthy = {("greenhouse", "Acme")}
+    # A row can only miss on a day AFTER it was last seen, so age it.
+    db.execute("UPDATE jobs SET last_seen='2020-01-01' WHERE uid=?", (j.uid,))
+
+    # Day one: the board does not report it. One miss, not yet delisted.
+    store.reconcile(db, {}, healthy, set())
+    row = db.execute("SELECT misses, delisted_on FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert (row[0], row[1]) == (1, None), f"expected one miss, got {tuple(row)}"
+
+    # Pretend that miss was yesterday, so today's run is allowed to count again.
+    db.execute("UPDATE jobs SET miss_on='2020-01-01' WHERE uid=?", (j.uid,))
+
+    # Day two: the board DOES report it, but it scores below a company floor.
+    store.reconcile(db, {j.uid: (35, "SLOT-BLOCKED", "below the configured score floor")},
+                    healthy, set())
+    row = db.execute("SELECT misses, gate FROM jobs WHERE uid=?", (j.uid,)).fetchone()
+    assert row[1] == "SLOT-BLOCKED", "the demotion itself did not land"
+    assert row[0] == 0, (
+        f"a row the board confirmed this run still carries {row[0]} miss(es); "
+        "one more absence would delist a live posting after a single miss")
