@@ -60,15 +60,29 @@ def _norm(s: str) -> str:
 
 
 def _title_overlap(a: str, b: str) -> float:
-    """Crude but legible. Fraction of the shorter title's words that appear in
-    the longer one, ignoring filler."""
+    """Crude but legible. Shared words as a fraction of all words used, ignoring
+    filler.
+
+    Deliberately NOT "fraction of the SHORTER title", which is what this was.
+    That inflates any short title against a long one: "Senior Manager, Success
+    Architecture" is three words after stopwords, so sharing the two commonest
+    words in a Salesforce search - "success" and "manager" - with "Customer
+    Success Manager - Global Public Sector (State, Local Government and
+    Education)" scored 2/3 = 67% and tripped the "you were rejected for X at
+    this employer" warning on the highest-scoring role in the pipeline
+    (2026-08-11). This check errs toward talking the user out of a role, so it
+    has to be the harder direction to trip, not the easier one.
+
+    Jaccard costs nothing real: a genuine repost shares nearly all its words and
+    still clears the threshold, while two roles that merely sound alike do not.
+    """
     stop = {"the", "a", "an", "of", "and", "for", "in", "at", "to", "senior", "sr",
             "junior", "jr", "staff", "lead", "principal", "ii", "iii", "i"}
     wa = {w for w in re.findall(r"[a-z0-9]+", (a or "").lower()) if w not in stop}
     wb = {w for w in re.findall(r"[a-z0-9]+", (b or "").lower()) if w not in stop}
     if not wa or not wb:
         return 0.0
-    return len(wa & wb) / min(len(wa), len(wb))
+    return len(wa & wb) / len(wa | wb)
 
 
 def load_evidence(path: str | Path) -> list[dict]:
@@ -196,12 +210,19 @@ def surfacing_a_closed_door(con: sqlite3.Connection) -> list[str]:
                 continue
             overlap = _title_overlap(l["title"], rj["title"])
             if overlap >= 0.6:
-                out.append(f"{l['company']} / {l['title'][:55]}: you were rejected for "
-                           f"{rj['title'][:55]!r} at this employer "
-                           f"({overlap:.0%} title overlap)")
+                # A likely repost of the role itself. Worth stopping for.
+                out.append(("problem",
+                            f"{l['company']} / {l['title'][:55]}: you were rejected for "
+                            f"{rj['title'][:55]!r} at this employer "
+                            f"({overlap:.0%} title overlap)"))
             elif overlap > 0:
-                out.append(f"{l['company']} / {l['title'][:55]}: previously rejected by "
-                           f"this employer for a different role")
+                # Merely the same employer. True, and useful context, but it is
+                # not a defect in the row and doctor listing it as a PROBLEM
+                # reads as "do not bother" - which is how the highest-scoring
+                # role in the pipeline came to be flagged (2026-08-11).
+                out.append(("note",
+                            f"{l['company']} / {l['title'][:55]}: previously rejected by "
+                            f"this employer for a different role"))
             break
     return out
 

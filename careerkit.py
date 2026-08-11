@@ -742,8 +742,8 @@ def cmd_applied(args) -> None:
     doors = _applied.surfacing_a_closed_door(con)
     if doors:
         print(f"\n{len(doors)} live row(s) at an employer that already declined you:")
-        for d in doors[:20]:
-            print(f"  !  {d}")
+        for kind, text in doors[:20]:
+            print(f"  {'!' if kind == 'problem' else '-'}  {text}")
 
 
 def cmd_enrich(args) -> None:
@@ -815,8 +815,13 @@ def cmd_doctor(args) -> None:
 
     try:
         from engine import applied as _applied
-        for d in _applied.surfacing_a_closed_door(con)[:10]:
-            problems.append(f"already declined: {d}")
+        for kind, text in _applied.surfacing_a_closed_door(con)[:10]:
+            # A likely repost of the role you were declined for is a problem.
+            # "same employer, different role" is context, and listing it as a
+            # problem reads as do-not-bother on a role that may be excellent.
+            (problems if kind == "problem" else notes).append(
+                f"already declined: {text}" if kind == "problem"
+                else f"same employer previously declined you: {text}")
     except Exception:
         pass
 

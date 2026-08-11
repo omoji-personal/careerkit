@@ -2451,7 +2451,7 @@ def test_the_same_posting_reposted_keeps_its_rejected_status(db):
     assert len({r["group_key"] for r in rows}) == 1, "siblings must group together"
     assert any(r["status"] == "rejected" for r in rows), "the rejection must survive"
     from engine import applied
-    assert any("Delta" in d for d in applied.surfacing_a_closed_door(db)), \
+    assert any("Delta" in text for _kind, text in applied.surfacing_a_closed_door(db)), \
         "a live sibling at an employer that declined you must be flagged"
 
 
@@ -2472,7 +2472,7 @@ def test_a_different_role_at_an_employer_who_declined_you_is_flagged(db):
     db.commit()
 
     doors = applied.surfacing_a_closed_door(db)
-    assert any("Delta" in d for d in doors), doors
+    assert any("Delta" in text for _kind, text in doors), doors
 
 
 def test_an_unrelated_role_at_the_same_employer_reads_differently(db):
@@ -3850,3 +3850,37 @@ def test_a_floor_outside_the_score_range_is_refused(bad):
                   "lanes:\n  - {key: sa, weight: 52, titles: [salesforce]}\n")
     with pytest.raises(ProfileError):
         Profile.load(pf)
+
+
+def test_two_common_words_do_not_make_a_role_look_already_declined():
+    """Live false positive, 2026-08-11. doctor told the user his highest-scoring
+    role - Salesforce "Senior Manager, Success Architecture", 80 - had already
+    been declined, because he was once rejected for "Customer Success Manager -
+    Global Public Sector (State, Local Government and Education)".
+
+    They share {success, manager} and nothing else. The overlap divided by the
+    SHORTER title's word count (3 after stopwords), giving 2/3 = 67% and
+    tripping the >=0.6 "you were rejected for X at this employer" wording.
+    "Success" and "Manager" are the two commonest words in this user's entire
+    search, so any short title at an employer that ever rejected him trips it.
+
+    It errs toward talking the user out of a good role, which is the expensive
+    direction for this tool."""
+    from engine.applied import _title_overlap
+    o = _title_overlap("Senior Manager, Success Architecture",
+                       "Customer Success Manager - Global Public Sector "
+                       "(State, Local Government and Education)")
+    assert o < 0.6, (
+        f"two generic shared words scored {o:.0%}, enough to warn the user off "
+        "an unrelated role")
+
+
+def test_a_genuine_repost_of_the_same_role_is_still_caught():
+    """The other direction. The check exists because employers repost, and a
+    repost of a role you were declined for is not a fresh find. Weakening the
+    metric must not cost that."""
+    from engine.applied import _title_overlap
+    assert _title_overlap("Salesforce Solution Architect",
+                          "Salesforce Solution Architect") >= 0.6
+    assert _title_overlap("Senior Salesforce Solution Architect",
+                          "Salesforce Solution Architect, Regulated Industries") >= 0.6
