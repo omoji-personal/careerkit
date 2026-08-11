@@ -833,8 +833,12 @@ def score(job: Job, p: Profile) -> Job:
         # "label: payload", like every other reason here. The report's
         # screened-out breakdown and `audit` both key on the text BEFORE the
         # first colon, so a score written ahead of it gave every suppressed row
-        # its own bucket - eighteen of them on the first live run.
-        job.reasons = [f"below the score floor for {job.company}: "
+        # its own bucket - eighteen of them on the first live run. The EMPLOYER
+        # has to sit after the colon for the same reason: boards spell one
+        # company many ways ("Salesforce", "Salesforce, Inc."), and matching is
+        # done on the normalised key, so the message must not put back the
+        # variation the key exists to remove.
+        job.reasons = [f"below the configured score floor: {job.company} "
                        f"scored {job.score}, floor {floor}"] + list(job.reasons or [])
     return job
 

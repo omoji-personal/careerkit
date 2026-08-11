@@ -3576,3 +3576,44 @@ def test_a_non_numeric_company_floor_is_refused_with_a_readable_error(tmp_path):
         Profile.load(pf)
     assert "Acme" in str(e.value) and "company_floors" in str(e.value), \
         f"the error does not say which key or employer is wrong: {e.value}"
+
+
+def test_the_floor_reason_survives_two_spellings_of_the_same_employer():
+    """Found by an external review lens, 2026-08-11. The sibling test above
+    varied the SCORE and caught the bucket split; it used one company spelling
+    throughout, so it could not catch this. The reason interpolated the raw
+    job.company, and boards spell one employer many ways, so "Salesforce" and
+    "Salesforce, Inc." produced two breakdown buckets for the same rule. The
+    matching is done on the normalised key, so the message must not reintroduce
+    the variation the key exists to remove."""
+    from engine.score import score
+    labels = set()
+    for spelling in ("Salesforce", "Salesforce, Inc.", "SALESFORCE INC"):
+        out = score(J(company=spelling, title="Administrator", location="Remote, US",
+                      description="d" * 400), _floor_profile(70))
+        assert out.gate == "SLOT-BLOCKED", f"{spelling} should be floored"
+        labels.add(out.reasons[0].split(":")[0].strip())
+    assert len(labels) == 1, f"one employer produced {len(labels)} buckets: {labels}"
+
+
+def test_the_block_reason_survives_two_spellings_too():
+    from engine.score import score
+    labels = set()
+    for spelling in ("Blocked Corp", "Blocked Corp, Inc."):
+        out = score(J(company=spelling, title="Solution Architect", location="Remote, US",
+                      description="d" * 400), _blocked_profile("Blocked Corp"))
+        labels.add(out.reasons[0].split(":")[0].strip())
+    assert len(labels) == 1, f"one employer produced {len(labels)} buckets: {labels}"
+
+
+def test_company_floors_written_as_a_list_is_refused_readably(tmp_path):
+    """`company_floors:` written as a YAML list instead of a mapping is an easy
+    typo. .items() then raises a bare AttributeError, which is exactly the
+    obscure failure _company_floors' own docstring promises not to produce."""
+    from engine.score import Profile, ProfileError
+    pf = tmp_path / "p.yaml"
+    pf.write_text("exclusions:\n  company_floors:\n    - Salesforce: 70\n"
+                  "lanes:\n  - {key: sa, weight: 52, titles: [salesforce]}\n")
+    with pytest.raises(ProfileError) as e:
+        Profile.load(pf)
+    assert "company_floors" in str(e.value), e.value
