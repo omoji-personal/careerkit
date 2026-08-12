@@ -107,7 +107,16 @@ def _row_block(rows: list[sqlite3.Row], idx: int, new_uids: set | None = None) -
     age = ("NEW" if (r["uid"] in new_uids if new_uids is not None else is_new(r))
            else f"first seen {r['first_seen']}")
     lines = [
-        f"### {idx}. {sanitize_external(r['title'], 120)} - {sanitize_external(r['company'], 60)}"
+        # A blank company must never render as a bare trailing dash. Aggregators
+        # do serve rows with no employer at all, and the heading shape
+        # "Title - Company" is what this report's OWN parser splits blocks on:
+        # one such row on 2026-08-12 was folded into the previous posting's
+        # block, and `consistency` then compared a different employer's entry
+        # against it and reported three disagreements that did not exist. Saying
+        # the employer is unnamed is also the more useful thing to tell a reader,
+        # since a posting with no employer cannot be verified or applied to.
+        f"### {idx}. {sanitize_external(r['title'], 120)} - "
+        f"{sanitize_external(r['company'], 60) or 'employer not named'}"
         + (f"  ({len(rows)} open reqs)" if len(rows) > 1 else "")
         + (" \u26a0 STALE (not sighted in 2+ days - verify live before acting)"
            if str(r["last_seen"] or "")[:10] < (_dt.date.today() - _dt.timedelta(days=2)).isoformat() else ""),

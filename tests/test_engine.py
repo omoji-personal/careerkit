@@ -4007,3 +4007,84 @@ def test_a_demoted_sighting_is_recorded_as_a_sighting(db):
     assert after == before + 1, f"seen_count froze at {after} across a real sighting"
     sight = db.execute("SELECT source FROM sightings WHERE uid=?", (j.uid,)).fetchone()
     assert sight is not None, "the source that reported it was not recorded as a sighting"
+
+
+def test_a_demoted_row_is_not_left_describing_a_different_posting(db):
+    """Found by a pull/rescore drift probe, 2026-08-12: five rows disagreed with
+    themselves. reconcile was taught to refresh the scorer's INPUTS on a demoted
+    sighting, but only some of them - location, tier, department, comp, exempt,
+    remote - and not the DESCRIPTION, which upsert does refresh.
+
+    The body is a scorer input: lanes fall back to matching it when the title
+    does not, so a rewritten posting can stop qualifying on its body alone. The
+    row then stored a verdict computed from the NEW body beside the OLD body,
+    and the next rescore re-judged from the old text and reached a different
+    answer. Zendesk drifted EXCLUDED/0 -> VERIFY/25 exactly this way.
+
+    The title cannot drift like this - it is part of the uid, so a retitled
+    posting becomes a different row - which is why the body is the whole gap.
+
+    A row must describe the posting its own verdict was computed from."""
+    from engine import store
+    from engine.score import Profile, score
+    import re as _re
+    p = Profile()
+    p.lanes = [(50, _re.compile(r"product manager", _re.I), "pm")]
+    p.domain_terms = None
+
+    # Title matches no lane, so the verdict rests entirely on the body.
+    body_ok = "we are hiring a product manager for this team. " + "d" * 400
+    first = J(url="https://b/860", title="Analyst", location="Remote, US",
+              external_id="860", description=body_ok)
+    score(first, p)
+    assert first.gate in ("QUALIFIED", "VERIFY"), f"fixture must surface: {first.gate}"
+    store.upsert(db, [first])
+
+    # Same req, body rewritten so nothing matches any more.
+    body_bad = "we are hiring a warehouse associate for this team. " + "d" * 400
+    again = J(url="https://b/860", title="Analyst", location="Remote, US",
+              external_id="860", description=body_bad)
+    score(again, p)
+    assert again.gate == "EXCLUDED", f"fixture must demote: {again.gate}"
+    assert again.uid == first.uid, "fixture must be the SAME row"
+    store.reconcile(db, {again.uid: again}, {("greenhouse", "Acme")}, set())
+
+    row = db.execute("SELECT description, gate FROM jobs WHERE uid=?",
+                     (again.uid,)).fetchone()
+    assert row["gate"] == "EXCLUDED"
+    assert "warehouse associate" in (row["description"] or ""), (
+        "the row still stores the old body while carrying a verdict computed "
+        "from the new one; a rescore will disagree with itself")
+
+
+def test_a_posting_with_no_employer_does_not_corrupt_the_report(db, tmp_path, monkeypatch):
+    """Live on 2026-08-12. One jobspy row arrived with an EMPTY company, so its
+    heading rendered as `### 49. Some Title - ` with nothing after the dash. The
+    report's own parser splits blocks on that `Title - Company` shape, folded
+    the orphaned entry into the PREVIOUS posting's block, and `consistency` then
+    compared CVS Health against the wrong entry's numbers and reported three
+    disagreements that did not exist.
+
+    A checker that reports findings which are not real is worse than no checker,
+    because its output is counted as evidence - this repo says so in its own
+    test file. So the heading must always name something."""
+    from engine import store, consistency
+    from engine import report as _report
+    monkeypatch.setattr(_report, "OUT_DIR", tmp_path)
+    a = J(company="Real Co", title="Salesforce Administrator", url="https://b/870",
+          external_id="870", location="Remote, US")
+    a.gate, a.score, a.reasons = "VERIFY", 40, ["remote-US"]
+    b = J(company="", title="#128206 - Contract Salesforce Specialist",
+          url="https://b/871", external_id="871", location="Remote, US")
+    b.gate, b.score, b.reasons = "VERIFY", 35, ["remote-US"]
+    store.upsert(db, [a, b])
+
+    rows = store.query(db, min_score=0, limit=50)
+    out = _report.write_report(db, rows, health=[],
+                               run_detail={"pulled": 2, "sources_ok": 1},
+                               filename="r.md")
+    text = out.read_text()
+    assert " - \n" not in text and not text.rstrip().endswith(" - "), \
+        "a heading ends with a bare dash, which breaks the report's own parser"
+    problems = consistency.check_report(db, str(out))
+    assert not problems, f"the report disagrees with the database it came from: {problems}"

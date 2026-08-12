@@ -577,6 +577,16 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
                         "department=COALESCE(NULLIF(?,''),department), "
                         "comp_text=COALESCE(NULLIF(?,''),comp_text), "
                         "location=COALESCE(NULLIF(?,''),location), "
+                        # The BODY is a scorer input too - lanes fall back to
+                        # matching it when the title does not - so leaving it out
+                        # of this refresh stored a verdict computed from the new
+                        # posting beside the old text, and the next rescore
+                        # re-judged from that old text and disagreed. Five rows
+                        # drifted this way on 2026-08-12. (The title cannot drift:
+                        # it is part of the uid, so a retitled posting is a
+                        # different row.)
+                        "description=COALESCE(NULLIF(?,''),description), "
+                        "url=COALESCE(NULLIF(?,''),url), "
                         "registry_lane=COALESCE(NULLIF(?,''),registry_lane), "
                         "rails_exempt=COALESCE(?,rails_exempt), "
                         "remote_flag=CASE WHEN ? IS NULL THEN remote_flag "
@@ -585,6 +595,7 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
                         "WHERE uid=? AND status NOT IN ('applied','rejected','ignored')",
                         (score, gate, reasons, today,
                          dj.employer_tier, dj.department, dj.comp_text, dj.location,
+                         (dj.description or "")[:DESCRIPTION_LIMIT], dj.url,
                          dj.registry_lane,
                          None if dj.rails_exempt is None else int(dj.rails_exempt),
                          *((None,) * 3 if dj.remote_flag is None
