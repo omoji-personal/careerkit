@@ -173,6 +173,42 @@ fixed passed even with the bug put back, because the sample data it used had no
 salaries in it. Each was caught by pointing the thing at real data and by
 deliberately breaking the code to watch the test fail.
 
+**A requirement stated as a section heading was invisible.**
+"Required Skills & Certifications:" followed by bullets is how postings state
+requirements, and the screen that kills a posting demanding a product the user
+does not run read only the bullet's own sentence - on purpose, so one bullet's
+framing could not leak into the next. The heading's framing therefore governed
+nothing, and "* Deep CPQ expertise" under a requirements heading sailed
+through. Headings are now read as framing for the bullets beneath them, a
+preference heading keeps its bullets out, and a heading cannot promote a
+shallow ask ("familiarity with") into a hard gate.
+
+**Changing your criteria rewrote the record of roles already applied to, again.**
+The first fix guarded the pull path: reconcile stopped demoting rows the user
+had acted on. `rescore` - the command the documentation says to run after every
+criteria change - kept rewriting gate, score and reasons unconditionally, and
+the same two submitted applications that motivated the first fix were found
+reading EXCLUDED score 0 a third time. What a role scored when you acted on it
+is history, not state; both paths now leave it alone, and `doctor` names the
+rows whose history an earlier build already destroyed.
+
+**The manual-check section buried its strongest roles.**
+One report ran to 1,178 lines: fourteen qualified entries, then 144 full
+manual-check blocks sorted by score. A 71-score role missing one piece of
+evidence rendered below a 38-score marginal match, and the person the report
+was for never saw it. Roles above the bar keep their full block and the best
+one is named in the report header; the tail collapses to one line per role
+that still carries the score, the missing rail, the id and the link.
+
+**The exclusion list spoke a product name the vendor had stopped using.**
+The profile excluded "data cloud". Salesforce renamed the product Data 360, and
+a "Data360 Success Architect" req led a report at 84 while requiring two
+implementation lifecycles of it. The same rename family had already caused the
+same miss once (CPQ -> Revenue Cloud). The engine now owns the rename families
+and `profile-lint` fails a profile that excludes one name in a family while
+blind to its siblings, so the next rename is a lint failure instead of a wasted
+recommendation.
+
 ## What is still true today
 
 - **US locations only.** Roles outside the US are screened out unless you

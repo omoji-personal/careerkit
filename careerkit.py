@@ -12,6 +12,7 @@
     ./careerkit.py ingest-urls FILE    resolve pasted job URLs -> employers, register
     ./careerkit.py audit [--grep RX]   re-fetch + re-score, show every kill and why
     ./careerkit.py report [--format md|json|csv|html]   report, export, or dashboard
+./careerkit.py profile-lint        lint lanes and exclusions against shipped failure classes
     ./careerkit.py analytics          conversion, timing, aging, follow-up queue
     ./careerkit.py progress UID STAGE record applied/interview/offer/outcome dates
     ./careerkit.py rescore             re-judge stored postings after a criteria change
@@ -630,6 +631,28 @@ def cmd_rescore(args) -> None:
     _pull.rebuild_report(con, min_score=getattr(args, "min_score", 0))
 
 
+def cmd_profile_lint(args) -> None:
+    """Lint the profile against failure classes that have shipped.
+
+    Two checks, both from live incidents: a lane that admits a competing
+    platform (Optomi's Dynamics req, 2026-08-06), and a product exclusion
+    written under a name Salesforce no longer uses (Data Cloud -> Data 360,
+    2026-08-14). Exit 1 on a failure so it can gate a criteria change."""
+    import yaml as _yaml
+    from engine import profile_lint as _plint
+    raw = _yaml.safe_load(PROFILE.read_text()) or {}
+    findings = _plint.lint(raw, load_profile())
+    fails = [m for sev, m in findings if sev == "fail"]
+    notes = [m for sev, m in findings if sev != "fail"]
+    if not findings:
+        print("profile lint: clean")
+    for m in fails:
+        print(f"  x  {m}")
+    for m in notes:
+        print(f"  -  {m}")
+    sys.exit(1 if fails else 0)
+
+
 def cmd_consistency(args) -> None:
     """Does the report tell the truth about the database it came from?
 
@@ -809,6 +832,14 @@ def cmd_doctor(args) -> None:
         except ProfileError as e:
             problems.append(f"profile: {e}")
 
+    try:
+        from engine import profile_lint as _plint
+        raw = yaml.safe_load(PROFILE.read_text()) or {}
+        for sev, msg in _plint.lint(raw, load_profile()):
+            (problems if sev == "fail" else notes).append(f"profile lint: {msg}")
+    except Exception:
+        pass
+
     n_emp = len([e for e in reg.get("employers", []) if e.get("active", True)])
     if not n_emp:
         problems.append("no active employers registered - run discover or ingest-urls")
@@ -853,6 +884,17 @@ def cmd_doctor(args) -> None:
     for item in drift["ambiguous_tracker_matches"]:
         problems.append(f"tracker link matches {len(item['candidates'])} postings: "
                         f"{item['tracker_url'][:60]} (run tracker-sync to review)")
+
+    # Verdict history that an earlier build already destroyed. Before the
+    # rescore guard (2026-08-14) a criteria change rewrote the gate and score
+    # of applied rows; what they read when the user applied is unrecoverable.
+    # Silent corruption is the failure mode this tool actually has, so the
+    # least doctor can do is stop it being silent.
+    for r in con.execute("SELECT company, title FROM jobs WHERE status='applied' "
+                         "AND gate NOT IN ('QUALIFIED','VERIFY')"):
+        notes.append("applied row's verdict was rewritten by an earlier build "
+                     f"(score at application time unrecoverable): "
+                     f"{r['company']} - {r['title']}")
 
     scrapers = [f["name"] for f in reg.get("feeds", [])
                 if f.get("active", True)
@@ -1355,6 +1397,7 @@ def main() -> None:
     sp.add_argument("action", choices=["check", "backup"])
 
     sp = sub.add_parser("rescore"); sp.set_defaults(fn=cmd_rescore)
+    sp = sub.add_parser("profile-lint"); sp.set_defaults(fn=cmd_profile_lint)
     sp.add_argument("--min-score", type=int, default=0)
 
     sp = sub.add_parser("doctor"); sp.set_defaults(fn=cmd_doctor)

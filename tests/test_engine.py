@@ -1610,6 +1610,119 @@ def test_report_renders_the_discovered_section(tmp_path, monkeypatch):
     assert "Newly discovered employers" in body and "Acme" in body
 
 
+def test_profile_lint_catches_a_lane_that_admits_a_competing_platform(tmp_path):
+    """Optomi, 2026-08-06: `crm-mgr` keyed on bare "CRM" and a pure Microsoft
+    Dynamics req reached the report as an Atlanta find. The lane was patched
+    and nothing asserted the class. The lint scores real-shaped competing-
+    platform postings through the FULL scorer, so it tests whatever rail is
+    supposed to stop them, not one regex in isolation."""
+    import yaml as _yaml
+    from engine.profile_lint import lint
+    from engine.score import Profile
+
+    bare = tmp_path / "bare.yaml"
+    bare.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "crm-mgr", "weight": 40, "titles": ["/crm.{0,20}manager/"]}],
+        "location": {"remote_us": True}}))
+    findings = lint({}, Profile.load(bare))
+    assert any(sev == "fail" and "Dynamics 365" in msg for sev, msg in findings), \
+        "a bare-CRM lane admitted a Dynamics posting and the lint said nothing"
+
+    guarded = tmp_path / "guarded.yaml"
+    guarded.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "crm-mgr", "weight": 40,
+                   "titles": ["/(salesforce).{0,25}(crm).{0,20}(manager)/"]}],
+        "location": {"remote_us": True}}))
+    assert not lint({}, Profile.load(guarded)), \
+        "a salesforce-context lane was flagged; the lint is crying wolf"
+
+
+def test_profile_lint_names_the_missing_product_rename_alias(tmp_path):
+    """Data 360, 2026-08-14: the profile excluded "data cloud", Salesforce had
+    renamed it, and JR356148 led the report at 84 with a hard product gate the
+    user cannot clear. Second occurrence of the class (CPQ -> Revenue Cloud was
+    2026-08-12). The engine owns the rename families; the lint fails a profile
+    that excludes one name in a family but is blind to its siblings."""
+    import yaml as _yaml
+    from engine.profile_lint import lint
+    from engine.score import Profile
+    p = tmp_path / "p.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "sf", "titles": ["/salesforce architect/"]}],
+        "location": {"remote_us": True}}))
+    prof = Profile.load(p)
+
+    stale = {"exclusions": {"products": ["data cloud"]}}
+    findings = lint(stale, prof)
+    assert any(sev == "fail" and "data 360" in msg for sev, msg in findings), \
+        "an exclusion blind to a Salesforce rename passed the lint"
+
+    current = {"exclusions": {"products": [
+        "data cloud", "data 360", "data360", "customer data platform"]}}
+    assert not [f for f in lint(current, prof) if "Data Cloud" in f[1]], \
+        "a fully-covered rename family was still flagged"
+
+    # A family the profile never mentions is scope, not a bug.
+    silent = {"exclusions": {"products": ["mulesoft"]}}
+    assert not [f for f in lint(silent, prof) if "fail" == f[0] and "Pardot" in f[1]]
+
+    # A /regex/ term counts as covering what it matches.
+    rx = {"exclusions": {"products": [
+        "/field service( lightning)?/", "fsl"]}}
+    assert not [f for f in lint(rx, prof) if "Field Service" in f[1]], \
+        "a regex exclusion term was not recognised as covering its family"
+
+
+def test_the_manual_check_tail_collapses_to_one_line_per_role(tmp_path, monkeypatch):
+    """The 2026-08-14 report ran 1,178 lines against this module's own
+    two-minute promise: 144 full manual-check blocks, so a 71-score strong fit
+    (one unproven rail) rendered below a 38-score marginal QUALIFIED role and
+    was read by nobody. Strong fits keep the full block and are named in the
+    header; the tail keeps score, missing rail, uid and url in one line."""
+    from engine import report as _report
+    monkeypatch.setattr(_report, "OUT_DIR", tmp_path)
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+
+    def row(uid, title, score, gate, reasons):
+        return dict(uid=uid, group_key=uid, company="Acme", title=title,
+                    url=f"https://b/{uid}", location="Boston, MA", source="jobspy",
+                    lane="sa", score=score, gate=gate, reasons=reasons,
+                    comp_min=None, comp_max=None, description="d" * 600,
+                    first_seen="2026-08-14", last_seen="2026-08-14",
+                    first_seen_run=None, last_seen_run=None)
+
+    rows = [row("u1", "Strong Fit Architect", 71, "VERIFY",
+                "comp | NEEDS CHECK: 'Boston, MA' - remote but US eligibility unconfirmed"),
+            row("u2", "Marginal Qualified", 38, "QUALIFIED", "target metro"),
+            row("u3", "Weak Check One", 40, "VERIFY",
+                "NEEDS CHECK: comp unstated"),
+            row("u4", "Weak Check Two", 22, "VERIFY",
+                "NEEDS CHECK: bare US location")]
+    import types
+    r_rows = []
+    for d in rows:
+        con.execute(f"CREATE TABLE IF NOT EXISTS t ({','.join(d)})")
+        con.execute(f"INSERT INTO t VALUES ({','.join('?' * len(d))})",
+                    tuple(d.values()))
+    r_rows = list(con.execute("SELECT * FROM t"))
+
+    path = _report.write_report(con, r_rows, health=[],
+                                run_detail={"pulled": 4, "sources_ok": 1},
+                                filename="t.md")
+    body = path.read_text()
+    # The strong fit is a full block AND named in the header.
+    assert "**Strongest unverified:** Strong Fit Architect" in body
+    assert "### 1. Strong Fit Architect - Acme" in body
+    # The tail is one line per role carrying everything needed to act.
+    assert "...and 2 more below" in body
+    weak = [ln for ln in body.splitlines() if "Weak Check One" in ln]
+    assert len(weak) == 1, f"tail role rendered {len(weak)} lines, want 1"
+    assert "40" in weak[0] and "comp unstated" in weak[0] and "`u3`" in weak[0]
+    # No full block for a tail role.
+    assert "### 2. Weak Check One" not in body and "### 3. Weak Check" not in body
+
+
 def test_discover_platform_count_is_not_a_hardcoded_number():
     """The CLI advertised "12 ATS platforms" as a literal. Adding a probe left
     the claim stale, and a user reading it believed coverage they did not have."""
@@ -2984,6 +3097,78 @@ def test_a_requirement_counted_in_deliveries_blocks_like_one_counted_in_years(tm
     assert gate("Must have delivered at least 2 Product-to-Cash (CPQ) programs.") == "SLOT-BLOCKED"
 
 
+def test_a_requirement_stated_in_a_section_heading_governs_the_bullets_under_it(tmp_path):
+    """DMI "Salesforce Architect", 2026-08-14: OmniStudio appeared twelve times,
+    once under a literal "Required Skills & Certifications:" heading, and the role
+    reached the report as QUALIFIED 59. The framing that makes it a requirement is
+    the HEADING, one line above the bullet, and _clause_before stops at the newline
+    on purpose so a previous bullet cannot leak in. Nothing could see it.
+
+    A heading is not a previous bullet: it ends in a colon and introduces the lines
+    beneath it. That is the discriminator, and it has to cut both ways -- a
+    "Preferred Qualifications:" heading has to keep its bullets OUT of the rail, or
+    this fix recreates the optional-requirement bug in a new place."""
+    import yaml as _yaml
+    from engine.models import Job
+    from engine.score import Profile, score
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "sf", "titles": ["/salesforce architect/"]}],
+        "location": {"remote_us": True},
+        "exclusions": {"products": ["cpq", "omnistudio"]}}))
+    profile = Profile.load(p)
+
+    def gate(body):
+        j = Job(company="Acme", title="Salesforce Architect", url="u", source="greenhouse",
+                location="Remote, USA", description=body + "\n" + "d" * 300)
+        score(j, profile)
+        return j.gate
+
+    # A bullet whose ONLY framing is the heading above it.
+    assert gate("Requirements:\n* Deep CPQ expertise.") == "SLOT-BLOCKED"
+    assert gate("Minimum Qualifications:\n* CPQ configuration across the estate.") == "SLOT-BLOCKED"
+    # A blank line between heading and bullet is normal markdown, not a boundary.
+    assert gate("Required Skills & Certifications:\n\n* OmniStudio configuration.") == "SLOT-BLOCKED"
+    # ...and so is a sibling bullet in between: the heading governs the run.
+    assert gate("Requirements:\n* Salesforce administration.\n"
+                "* OmniStudio configuration.") == "SLOT-BLOCKED"
+
+    # DMI, 2026-08-14, the posting that prompted this: it stays OUT of the rail on
+    # purpose. "programming with APEX APIs, OmniStudio" is comma-separated peers,
+    # so _LIST_ITEM yields, and the rail yielding on lists is a deliberate choice
+    # recorded above -- a false block costs more than a surfaced role the user can
+    # judge. The heading fix must NOT quietly override that.
+    assert gate("Required Skills & Certifications:\n\n* Strong experience with "
+                "configuration, customization, and programming with APEX APIs, "
+                "OmniStudio") != "SLOT-BLOCKED"
+
+    # ...and the mirror case. An optional heading must keep its bullets out, or
+    # this reintroduces "3+ years with Marketing Cloud preferred" as a blocker.
+    assert gate("Preferred Qualifications:\n* Hands-on CPQ delivery.") != "SLOT-BLOCKED"
+    assert gate("Nice to have:\n* CPQ configuration.") != "SLOT-BLOCKED"
+
+    # A heading is strong framing, so it must not promote a SHALLOW ask into a
+    # hard gate. Both of these are verbatim shapes from live postings that the
+    # heading fix turned into blocks on its first corpus run (2026-08-14): Optum
+    # "Sr. Business Analyst" and PPG "Salesforce Platform Administrator". Neither
+    # demands the product; both are bars the user clears.
+    assert gate("Required Qualifications:\n* Familiarity with Salesforce CPQ") != "SLOT-BLOCKED"
+    assert gate("Required Salesforce certifications:\n"
+                "* Working knowledge of OmniStudio") != "SLOT-BLOCKED"
+    # ...but an INLINE requirement still blocks, softening word or not. The
+    # shallow guard only tempers framing INHERITED from a heading.
+    assert gate("Requirements:\n* Familiarity with the stack; 5+ years of CPQ "
+                "configuration.") == "SLOT-BLOCKED"
+
+    # The existing invariant survives: a PREVIOUS BULLET is not a heading, and its
+    # framing still must not leak across the newline.
+    assert gate("Led at least two large-scale migrations.\n"
+                "Familiarity with CPQ.") != "SLOT-BLOCKED"
+    # A heading governs the lines beneath it, not the whole rest of the posting.
+    assert gate("Requirements:\n* Salesforce administration.\n\n"
+                "About the team:\n* We use CPQ across the business.") != "SLOT-BLOCKED"
+
+
 def test_latest_md_follows_every_report_write_not_just_a_pull(db, tmp_path, monkeypatch):
     """out/latest.md was copied by the pull command only. After a `rescore` the
     dated report held the new verdicts and latest.md still showed the old ones --
@@ -3765,6 +3950,53 @@ def test_a_demoted_but_still_present_row_has_its_miss_counter_cleared(db):
     assert row[0] == 0, (
         f"a row the board confirmed this run still carries {row[0]} miss(es); "
         "one more absence would delist a live posting after a single miss")
+
+
+def test_rescore_does_not_rewrite_the_verdict_of_a_role_you_acted_on(db, tmp_path):
+    """The b0d3c69 guard, applied to the OTHER path a criteria change flows
+    through. reconcile's demotion loop was guarded on 2026-08-11; `rescore` -
+    the command the README tells the user to run after every criteria change -
+    kept rewriting gate, score and reasons unconditionally. Found live
+    2026-08-14: the same two submitted Anthropic applications kimi measured on
+    8/11 read EXCLUDED score 0 again, re-corrupted by rescore runs after the
+    reconcile fix landed. The record of what a role scored when the user acted
+    on it must survive both paths, or it survives neither."""
+    import yaml as _yaml
+    from engine import store
+    from engine.pull import rescore as _rescore
+    from engine.score import Profile
+
+    j = J(title="Salesforce Administrator", url="https://b/801",
+          location="Remote, US", external_id="801")
+    j.gate, j.score, j.reasons = "QUALIFIED", 73, ["target metro: Atlanta"]
+    store.upsert(db, [j])
+    store.set_status(db, j.uid, "applied")
+
+    # A profile whose lanes no longer match this title at all.
+    p = tmp_path / "profile.yaml"
+    p.write_text(_yaml.safe_dump({
+        "lanes": [{"key": "x", "titles": ["/unrelated title family/"]}],
+        "location": {"remote_us": True}}))
+    _rescore(db, Profile.load(p), echo=lambda *a, **k: None)
+
+    row = db.execute("SELECT gate, score, status FROM jobs WHERE uid=?",
+                     (j.uid,)).fetchone()
+    assert (row[0], row[1]) == ("QUALIFIED", 73), (
+        f"rescore rewrote an applied role to {row[0]}/{row[1]}; the record of "
+        "what it was when he applied is gone, again")
+    assert row[2] == "applied"
+
+    # ...and a row the user has NOT acted on is still re-judged. The guard must
+    # not quietly freeze the whole database.
+    k = J(title="Salesforce Administrator", url="https://b/802",
+          location="Remote, US", external_id="802")
+    k.gate, k.score = "QUALIFIED", 70
+    store.upsert(db, [k])
+    _rescore(db, Profile.load(p), echo=lambda *a, **k2: None)
+    row = db.execute("SELECT gate FROM jobs WHERE uid=?", (k.uid,)).fetchone()
+    assert row[0] not in ("QUALIFIED",), (
+        "an untouched row kept its old verdict through a rescore; the guard "
+        "is freezing rows it should not")
 
 
 def test_a_role_you_applied_to_keeps_the_verdict_it_had_when_you_applied(db):

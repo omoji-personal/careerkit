@@ -296,7 +296,17 @@ def rescore(con, profile, *, echo=print) -> dict:
     Scores from stored text, so it makes no network requests."""
     from .score import score
 
-    rows = list(con.execute("SELECT * FROM jobs"))
+    # The same guard reconcile's demotion loop carries, and for the same
+    # reason: you do not rewrite the record of a posting the user acted on.
+    # This is the OTHER path a criteria change flows through - the README
+    # tells the user to run rescore after changing criteria - and it was left
+    # unguarded when b0d3c69 guarded reconcile. Found live on 2026-08-14: the
+    # same two submitted Anthropic applications that motivated that fix read
+    # EXCLUDED score 0 again, re-corrupted by ordinary rescore runs. The
+    # verdict a role carried when the user acted on it is history, not state,
+    # and history is not subject to the current profile.
+    rows = list(con.execute(
+        "SELECT * FROM jobs WHERE status NOT IN ('applied','rejected','ignored')"))
     changed, dropped = 0, 0
     for r in rows:
         j = job_from_row(r)

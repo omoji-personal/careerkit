@@ -671,6 +671,35 @@ def _clause_before(text: str, m: "re.Match") -> str:
     return " ".join(text[start:m.start()].split())
 
 
+def _governing_heading(text: str, m: "re.Match") -> str:
+    """The section heading the match's line sits under, or "".
+
+    A requirement is often stated once, as a heading, and inherited by every
+    bullet beneath it -- "Required Skills & Certifications:" then five bullets.
+    _clause_before stops at the newline on purpose, so nothing downstream can
+    see that framing (DMI, 2026-08-14).
+
+    A heading is a line ending in a colon, allowing the trailing markdown
+    emphasis real postings carry ("Requirements:**"). That is what separates it
+    from a PREVIOUS BULLET, whose framing must still never leak across the
+    newline. Blank lines and sibling bullets are stepped over; the walk stops at
+    the first heading found, and is bounded so a heading far above cannot claim
+    lines that belong to a later section."""
+    start = text.rfind("\n", 0, m.start()) + 1
+    seen = 0
+    while start > 0 and seen < 8:
+        prev_end = start - 1
+        prev_start = text.rfind("\n", 0, prev_end) + 1
+        line = text[prev_start:prev_end].strip()
+        start = prev_start
+        if not line:
+            continue                      # blank line between heading and bullets
+        seen += 1
+        if line.rstrip("*_# \t").endswith(":"):
+            return line
+    return ""
+
+
 def _sentence_around(text: str, m: "re.Match") -> str:
     """Quote the sentence a rail fired on, not a 40-character slice of it.
 
@@ -759,6 +788,31 @@ _ENUMERATION = re.compile(
 # Deliberately NOT triggered by "(", so a parenthetical gloss of the thing being
 # required -- "Product-to-Cash (CPQ/RCA) implementations" -- still blocks.
 _LIST_ITEM = re.compile(r"(,|;|/|&|\band\b|\bor\b)\s*$", re.I)
+
+# Headings carry requirement framing in their own vocabulary, which is not the
+# vocabulary of an inline requirement: "Minimum Qualifications:" is a gate, but
+# it is not "a minimum of 3". Kept SEPARATE from _REQUIREMENT deliberately --
+# widening the inline pattern to catch heading words would fire on ordinary duty
+# prose everywhere in the body, which is the failure mode this rail keeps
+# rediscovering. Only _governing_heading consults it.
+# Checked AFTER _PREFERENCE, so "Preferred Qualifications:" never reaches it.
+_REQUIREMENT_HEADING = re.compile(
+    r"\b(requirements?|required|qualifications?|must[- ]haves?|"
+    r"what (you'?ll |you )?(need|bring)|skills? (and|&) (experience|certifications?))\b", re.I)
+
+# Depth words the bullet itself must NOT be built on when its only framing comes
+# from the heading. Employers pad required sections with shallow asks:
+# "* Familiarity with Salesforce CPQ" under "Required Qualifications:" (Optum)
+# and "* Working knowledge of Marketing Cloud" under "Required Salesforce
+# certifications:" (PPG) both became blocks the moment headings were readable,
+# and neither is a product specialization -- they are bars the user can clear.
+# A heading is strong framing; letting it promote a shallow bullet into a hard
+# gate discards roles he can do, which this rail treats as the costlier error.
+# Only consulted when the frame came from the heading; an INLINE "5+ years of
+# CPQ" still blocks regardless of any softening word elsewhere in the bullet.
+_SHALLOW = re.compile(
+    r"\b(familiar(ity)?|working knowledge|exposure to|awareness of|"
+    r"some experience|basic (understanding|knowledge)|comfortable with)\b", re.I)
 
 _PREFERENCE = re.compile(
     r"\b(preferred|preferable|nice[ -]to[ -]have|a plus|bonus|desirable|"
@@ -983,10 +1037,24 @@ def _score_uncapped(job: Job, p: Profile) -> Job:
             # team; 5+ years of Salesforce required", where the requirement
             # attaches to something else entirely.
             ctx = _clause_before(text, m)
+            heading = _governing_heading(text, m)
             if _PREFERENCE.search(_sentence_around(text, m)):
                 continue          # the posting says this one is optional
+            if heading and _PREFERENCE.search(heading):
+                continue          # ...or the section it sits under does
             frames = list(_REQUIREMENT.finditer(ctx))
-            between = ctx[frames[-1].end():] if frames else ""
+            # A requirement stated once in the heading governs the bullets under
+            # it. The guards below still apply to the bullet itself, so a list
+            # under a "Requirements:" heading yields exactly as it does anywhere
+            # else -- the heading supplies framing, it does not override the
+            # rule that a requirement over a LIST is not a requirement per item.
+            head_frame = (_REQUIREMENT.search(heading)
+                          or _REQUIREMENT_HEADING.search(heading)) if heading else None
+            if not frames and head_frame and not _SHALLOW.search(ctx):
+                frames = [head_frame]
+                between = ""
+            else:
+                between = ctx[frames[-1].end():] if frames else ""
             if (frames and not _ENUMERATION.search(between)
                     and not _LIST_ITEM.search(ctx[-24:])):
                 job.gate, job.score = "SLOT-BLOCKED", base

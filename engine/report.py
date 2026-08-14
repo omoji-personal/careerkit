@@ -151,6 +151,32 @@ def _row_block(rows: list[sqlite3.Row], idx: int, new_uids: set | None = None) -
     return "\n".join(lines)
 
 
+#: VERIFY rows at or above this score get a full block; below it, one line.
+#: The 2026-08-14 report was 1,178 lines against this module's own two-minute
+#: promise: 144 full manual-check blocks, so a 71-score strong fit with one
+#: unproven rail rendered BELOW a 38-score marginal qualified role and was
+#: read by nobody. The bar sits just under the lane weights (52-55), where a
+#: manual check has a real chance of changing the answer; the tail keeps every
+#: fact needed to act (score, missing rail, uid, url) in one line per role.
+STRONG_VERIFY = 55
+
+
+def _tail_line(rows: list[sqlite3.Row]) -> str:
+    """One line for a manual-check role below the strong bar."""
+    r = rows[0]
+    miss = ""
+    m = (r["reasons"] or "")
+    i = m.find("NEEDS CHECK: ")
+    if i != -1:
+        miss = m[i + len("NEEDS CHECK: "):].split(" | ")[0]
+    else:
+        miss = m.split(" | ")[0]
+    sib = f" (+{len(rows) - 1} reqs)" if len(rows) > 1 else ""
+    return (f"- {r['score']:>3} · {sanitize_external(r['title'], 70)} - "
+            f"{sanitize_external(r['company'], 40) or 'employer not named'}{sib} · "
+            f"{sanitize_external(miss, 70)} · `{r['uid']}`\n  {r['url']}")
+
+
 def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
                  health: list[sqlite3.Row], run_detail: dict,
                  filename: str | None = None, run_id: int | None = None) -> Path:
@@ -162,6 +188,8 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     _new_uids = {r["uid"] for r in new_rows}
     qual = _group([r for r in rows if r["gate"] == "QUALIFIED"])
     verify = _group([r for r in rows if r["gate"] == "VERIFY"])
+    strong = [g for g in verify if (g[0]["score"] or 0) >= STRONG_VERIFY]
+    tail = [g for g in verify if (g[0]["score"] or 0) < STRONG_VERIFY]
 
     L: list[str] = [
         f"# Sourcing run - {today}",
@@ -172,6 +200,13 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
         f"({sum(len(g) for g in qual)} reqs) | {len(verify)} need a check",
         "",
     ]
+    # A strong fit missing one rail can outscore everything in Qualified, and
+    # the section order buries it. Name the best one where it cannot be missed.
+    if strong:
+        b = strong[0][0]
+        L += [f"**Strongest unverified:** {sanitize_external(b['title'], 70)} - "
+              f"{sanitize_external(b['company'], 40) or 'employer not named'} "
+              f"({b['score']}) - see the manual-check section", ""]
 
     if run_detail.get("excluded_breakdown"):
         eb = run_detail["excluded_breakdown"]
@@ -187,9 +222,15 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     L += ["---", "", "## Needs a manual check", "",
           "_Passes the role and location rails but one rail could not be evidenced "
           "from the posting text._", ""]
-    if verify:
-        L += [_row_block(r, i, _new_uids) + "\n" for i, r in enumerate(verify, 1)]
-    else:
+    if strong:
+        L += [_row_block(r, i, _new_uids) + "\n" for i, r in enumerate(strong, 1)]
+    if tail:
+        L += [f"### ...and {len(tail)} more below {STRONG_VERIFY}, one line each", "",
+              "_Everything needed to act is here: score, the unproven rail, the "
+              "uid to mark, the link. Full detail lives in the database._", ""]
+        L += [_tail_line(g) for g in tail]
+        L += [""]
+    if not verify:
         L += ["_None._", ""]
 
     L += ["---", "", "## Source health", "",
