@@ -1699,8 +1699,6 @@ def test_the_manual_check_tail_collapses_to_one_line_per_role(tmp_path, monkeypa
                 "NEEDS CHECK: comp unstated"),
             row("u4", "Weak Check Two", 22, "VERIFY",
                 "NEEDS CHECK: bare US location")]
-    import types
-    r_rows = []
     for d in rows:
         con.execute(f"CREATE TABLE IF NOT EXISTS t ({','.join(d)})")
         con.execute(f"INSERT INTO t VALUES ({','.join('?' * len(d))})",
@@ -3903,7 +3901,7 @@ def test_a_company_floor_that_is_not_a_whole_number_is_refused(value):
     floor the user wrote as higher than 75), turns `true` into 1 (a floor of 1
     blocks nothing, silently), and lets `.inf` escape as a raw OverflowError.
     A scoring rule that cannot be read exactly must not be guessed at."""
-    import yaml as _yaml, tempfile, pathlib
+    import tempfile, pathlib
     from engine.score import Profile, ProfileError
     pf = pathlib.Path(tempfile.mkdtemp()) / "p.yaml"
     pf.write_text(f"exclusions:\n  company_floors: {{Acme: {value}}}\n"

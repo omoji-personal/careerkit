@@ -95,7 +95,13 @@ def test_the_engine_has_no_pyflakes_findings():
     import subprocess
     import sys
     root = pathlib.Path(__file__).resolve().parent.parent
-    files = [str(p) for p in sorted(root.glob("engine/*.py"))] + [str(root / "careerkit.py")]
+    # tests/ included because CI lints it and this gate did not: an unused
+    # import shipped on 2026-08-11 sat invisible to a green local suite and
+    # kept CI red for three days. Local and CI must lint the same files, or
+    # "the suite is green" stops meaning "the push will be".
+    files = ([str(p) for p in sorted(root.glob("engine/*.py"))]
+             + [str(root / "careerkit.py")]
+             + [str(p) for p in sorted(root.glob("tests/*.py"))])
     r = subprocess.run([sys.executable, "-m", "pyflakes", *files],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
