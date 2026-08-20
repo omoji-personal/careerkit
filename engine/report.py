@@ -327,7 +327,7 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     if state:
         L += [f"<!-- careerkit-report-state-v1: {state} -->", ""]
 
-    path.write_text("\n".join(L))
+    path.write_text("\n".join(L), encoding="utf-8")
     # latest.md follows the report EVERY time one is written, not just on a pull.
     # It used to be copied by the pull command only, so after a `rescore` the
     # dated report held the new verdicts while latest.md still showed the old
@@ -336,7 +336,7 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     # postings as QUALIFIED that the database had already excluded.
     if filename is None:
         try:
-            (OUT_DIR / "latest.md").write_text("\n".join(L))
+            (OUT_DIR / "latest.md").write_text("\n".join(L), encoding="utf-8")
         except OSError as e:
             print(f"  (could not refresh latest.md: {e})")
     return path

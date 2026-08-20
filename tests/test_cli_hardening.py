@@ -288,13 +288,15 @@ def test_test_runner_uses_windows_venv_layout(tmp_path):
     scripts = tmp_path / ".venv/Scripts"
     scripts.mkdir(parents=True)
     python = scripts / "python.exe"
-    python.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> invoked.txt\n")
+    python.write_text(
+        "#!/bin/sh\nprintf '%s|%s\\n' \"$PYTHONUTF8\" \"$*\" >> invoked.txt\n"
+    )
     python.chmod(0o755)
 
     result = _run(str(tmp_path / "run-tests.sh"), cwd=tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     calls = (tmp_path / "invoked.txt").read_text().splitlines()
-    assert calls == ["-c import pytest", "-m pytest tests/ -q"]
+    assert calls == ["1|-c import pytest", "1|-m pytest tests/ -q"]
 
 
 def test_main_launcher_uses_windows_venv_without_a_python3_command(tmp_path):
@@ -305,7 +307,7 @@ def test_main_launcher_uses_windows_venv_without_a_python3_command(tmp_path):
     venv = tmp_path / ".venv/Scripts"
     venv.mkdir(parents=True)
     python = venv / "python.exe"
-    python.write_text('#!/bin/sh\nprintf "%s\\n" "$*"\n')
+    python.write_text('#!/bin/sh\nprintf "%s|%s\\n" "$PYTHONUTF8" "$*"\n')
     python.chmod(0o755)
 
     empty_path = tmp_path / "empty-path"
@@ -323,6 +325,7 @@ def test_main_launcher_uses_windows_venv_without_a_python3_command(tmp_path):
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().startswith("1|")
     assert result.stdout.strip().endswith("careerkit.py --help")
 
 

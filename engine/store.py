@@ -303,7 +303,7 @@ class RunLock:
             # `w` truncates before flock runs, so a losing contender erased the
             # active owner's PID. Append/update opens without mutating; only the
             # process that acquired the lock may replace the diagnostic content.
-            self._fh = open(self.path, "a+")
+            self._fh = open(self.path, "a+", encoding="utf-8")
             self._acquire_platform_lock()
             self._fh.seek(0)
             self._fh.truncate()

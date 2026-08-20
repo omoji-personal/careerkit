@@ -9,6 +9,16 @@ script=${1:?missing CareerKit script path}
 shift
 
 case "$script" in
+  [A-Za-z]:\\*|[A-Za-z]:/*)
+    if [ ! -x /usr/bin/cygpath ]; then
+      echo "Could not translate the Windows CareerKit path: cygpath is missing." >&2
+      exit 1
+    fi
+    script=$(/usr/bin/cygpath -u "$script")
+    ;;
+esac
+
+case "$script" in
   /*) script_path=$script ;;
   *) script_path=$PWD/$script ;;
 esac
@@ -27,4 +37,6 @@ else
   exit 1
 fi
 
+PYTHONUTF8=1
+export PYTHONUTF8
 exec "$runner" "$script_path" "$@"

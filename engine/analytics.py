@@ -605,12 +605,15 @@ sortJobs();renderJobs();
 <section class="panel full" id="opportunities"><div class="panel-head"><div><div class="eyebrow">Decision queue</div><h2>Actionable opportunities</h2><p>Ranked by the transparent rules in your profile. VERIFY means evidence is incomplete.</p></div></div><div class="opportunity-tools"><label class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="job-search" aria-label="Search opportunities" placeholder="Search role, employer, location, lane…"></label><div class="chips" aria-label="Filter by gate"><button class="chip active" data-filter-gate="">All</button><button class="chip" data-filter-gate="QUALIFIED">Qualified</button><button class="chip" data-filter-gate="VERIFY">Verify</button></div><label><span class="skip">Sort opportunities</span><select id="job-sort"><option value="score">Highest score</option><option value="newest">Newest first</option><option value="company">Company A–Z</option></select></label><span class="results" id="result-count" aria-live="polite"></span></div><div class="table-wrap"><table><thead><tr><th>Score</th><th>Role</th><th>Decision</th><th>Location & comp</th><th>Provenance</th></tr></thead><tbody id="job-rows">{''.join(job_rows)}</tbody></table></div></section>
 <section class="panel full" id="sources"><div class="panel-head"><div><div class="eyebrow">Coverage integrity</div><h2>Source health</h2><p>Issues first. Dormant optional integrations are not failures.</p></div><div class="source-summary"><span>{healthy} healthy</span><span>{len(dormant)} dormant</span><span>{len(failing)} failing</span></div></div><div class="issue-grid">{issue_cards}</div><details class="source-details"><summary>Inspect all {len(health)} sources</summary><div class="source-table"><table><thead><tr><th>Source</th><th>Status</th><th>Last OK</th><th>Count</th><th>Last error</th></tr></thead><tbody>{''.join(health_rows)}</tbody></table></div></details></section>
 <footer class="footer"><b>CareerKit · local command center</b><span>Generated {esc(generated)} · no telemetry, remote fonts, analytics, or network-loaded scripts.</span></footer></main></div></div><script>{script}</script></body></html>'''
-    path.write_text(page)
+    path.write_text(page, encoding="utf-8")
     return path
 
 
 def write_json(snapshot: dict, path: str | Path) -> Path:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+    p.write_text(
+        json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return p

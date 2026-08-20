@@ -1,6 +1,7 @@
 """Cross-cutting release regressions owned by the integration layer."""
 from __future__ import annotations
 
+import ast
 import builtins
 import csv
 import io
@@ -9,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from types import SimpleNamespace
 
 try:
     import tomllib
@@ -48,12 +50,60 @@ def test_run_lock_contender_does_not_erase_active_owner(tmp_path):
 
     path = tmp_path / "jobs.lock"
     with RunLock(path):
-        owner = path.read_text()
-        assert owner.isdigit()
         with pytest.raises(RuntimeError, match="already writing"):
             with RunLock(path):
                 pass
-        assert path.read_text() == owner
+    # Windows byte-range locks deny a second handle's read while the owner is
+    # active. Reading after release still proves the losing contender did not
+    # truncate or replace the owner's diagnostic PID.
+    assert path.read_text(encoding="utf-8") == str(os.getpid())
+
+
+def test_product_text_boundaries_never_inherit_the_windows_ansi_locale():
+    """Native Windows defaults to cp1252, while job and profile text is UTF-8."""
+    paths = [ROOT / "careerkit.py", *sorted((ROOT / "engine").glob("*.py"))]
+    missing = []
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else (
+                node.func.id if isinstance(node.func, ast.Name) else "")
+            if name in {"read_text", "write_text"}:
+                if not any(kw.arg == "encoding" for kw in node.keywords):
+                    missing.append(f"{path.relative_to(ROOT)}:{node.lineno} {name}")
+            if name == "open" and node.args:
+                mode_node = node.args[1] if isinstance(node.func, ast.Name) and len(node.args) > 1 else node.args[0]
+                mode = mode_node.value if isinstance(mode_node, ast.Constant) else ""
+                if isinstance(mode, str) and "b" not in mode:
+                    if not any(kw.arg == "encoding" for kw in node.keywords):
+                        missing.append(f"{path.relative_to(ROOT)}:{node.lineno} open")
+    assert missing == []
+
+
+def test_csv_export_round_trips_non_ascii_for_windows_spreadsheets(
+        db, tmp_path, monkeypatch):
+    import careerkit
+    from engine import store
+    from engine.models import Job
+
+    job = Job(company="München GmbH", title="Développeur CRM",
+              url="https://example.test/unicode", source="greenhouse",
+              external_id="unicode", location="Zürich, Schweiz")
+    job.score, job.gate, job.reasons = 70, "QUALIFIED", ["fit"]
+    store.upsert(db, [job])
+    monkeypatch.setattr(careerkit.store, "connect", lambda: db)
+    monkeypatch.setattr(careerkit, "OUT_DIR_FOR_EXPORT", lambda: tmp_path)
+
+    careerkit.cmd_report(SimpleNamespace(min_score=0, format="csv"))
+    path = next(tmp_path.glob("export-*.csv"))
+    payload = path.read_bytes()
+    assert payload.startswith(b"\xef\xbb\xbf")
+    decoded = payload.decode("utf-8-sig")
+    assert "München GmbH" in decoded
+    assert "Développeur CRM" in decoded
+    assert "Zürich, Schweiz" in decoded
 
 
 def test_run_lock_fails_closed_when_lock_file_cannot_open(tmp_path, monkeypatch):

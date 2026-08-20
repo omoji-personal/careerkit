@@ -192,7 +192,7 @@ def report_is_stale(con: sqlite3.Connection, report_path: str | Path) -> str | N
     # timestamps: closing the report process may checkpoint already-rendered
     # WAL frames into jobs.db afterwards, making an unchanged report look old.
     # Archived reports predate the marker, so keep the mtime fallback for them.
-    marker = _STATE.search(path.read_text())
+    marker = _STATE.search(path.read_text(encoding="utf-8"))
     if marker:
         if marker.group("digest") == report_state_fingerprint(con):
             return None
@@ -220,7 +220,7 @@ def check_report(con: sqlite3.Connection, report_path: str | Path) -> list[str]:
         return [f"report not found: {path}"]
     problems: list[str] = []
 
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     for block in _blocks(text):
         uid = None
         url = None

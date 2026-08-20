@@ -1,5 +1,5 @@
 #!/bin/sh
-''''exec /bin/sh "${0%/*}/scripts/run-careerkit.sh" "$0" "$@" # '''
+''''exec /bin/sh -c 'set -eu; script=$1; shift; case "$script" in [A-Za-z]:\\*|[A-Za-z]:/*) script=$(/usr/bin/cygpath -u "$script");; esac; exec /bin/sh "${script%/*}/scripts/run-careerkit.sh" "$script" "$@"' sh "$0" "$@" # '''
 from __future__ import annotations
 
 __doc__ = """CareerKit sourcing CLI. Personal state lives in profile/ (gitignored).
@@ -138,6 +138,7 @@ def engine_checkout_notes(repo: Path = ENGINE_ROOT) -> list[str]:
         try:
             return subprocess.run(
                 ["git", "-C", str(repo), *args], capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
                 timeout=3, check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -212,7 +213,7 @@ CLAIMS = _configured_path("CAREERKIT_CLAIMS", PROFILE.parent / "claims.md")
 def load_yaml(p: Path, default):
     if not p.exists():
         return default
-    return yaml.safe_load(p.read_text()) or default
+    return yaml.safe_load(p.read_text(encoding="utf-8")) or default
 
 
 class RegistryError(ValueError):
@@ -250,7 +251,7 @@ def load_registry(*, required: bool = False) -> dict:
     # Do not use load_yaml here: its convenient ``or default`` intentionally
     # treats an empty document as absent, but an existing empty registry is a
     # damaged config that should be named rather than silently replaced.
-    reg = (yaml.safe_load(EMPLOYERS.read_text()) if exists
+    reg = (yaml.safe_load(EMPLOYERS.read_text(encoding="utf-8")) if exists
            else {"employers": [], "feeds": []})
     if not isinstance(reg, dict):
         raise RegistryError(f"{EMPLOYERS}: expected a YAML mapping at the top level")
@@ -324,7 +325,7 @@ def save_employers(data: dict) -> None:
     # Write beside the target, fsync, then atomically replace.
     tmp = EMPLOYERS.with_name(f".{EMPLOYERS.name}.{os.getpid()}.tmp")
     try:
-        with tmp.open("w") as fh:
+        with tmp.open("w", encoding="utf-8") as fh:
             fh.write(rendered)
             fh.flush()
             os.fsync(fh.fileno())
@@ -441,7 +442,8 @@ def cmd_discover(args) -> None:
     known_names = {e["name"].lower() for e in reg["employers"]}
     names = list(args.names)
     if args.file:
-        lines = [line.strip() for line in Path(args.file).read_text().splitlines()]
+        lines = [line.strip() for line in
+                 Path(args.file).read_text(encoding="utf-8").splitlines()]
         names += [line for line in lines if line and not line.startswith("#")]
     todo = [n for n in names if n.lower() not in known_names]
     print(f"Probing {len(todo)} companies across {_discover.PROBEABLE} ATS platforms...",
@@ -506,7 +508,7 @@ def cmd_search(args) -> None:
 
     qpath = ROOT / "out" / "search-queries.txt"
     qpath.parent.mkdir(parents=True, exist_ok=True)
-    qpath.write_text("\n".join(queries) + "\n")
+    qpath.write_text("\n".join(queries) + "\n", encoding="utf-8")
     print(f"Query matrix: {qpath}")
     print(f"Search registered {len(added)} new employer(s). Bing RSS is shallow; "
           "run the saved matrix through a stronger search tool for fuller coverage.")
@@ -562,7 +564,8 @@ def cmd_ingest_urls(args) -> None:
     path = Path(args.file)
     if not path.exists():
         sys.exit(f"File not found: {path}")
-    _ingest([l.strip() for l in path.read_text().splitlines() if l.strip()])
+    _ingest([l.strip() for l in path.read_text(encoding="utf-8").splitlines()
+             if l.strip()])
 
 
 def _ingest(raw_urls: list[str]) -> list[dict]:
@@ -680,10 +683,16 @@ def cmd_report(args) -> None:
                 "last_seen", "url"]
         path = out / f"export-{date.today().isoformat()}.{fmt}"
         if fmt == "json":
-            path.write_text(json.dumps([{c: r[c] for c in cols} for r in rows], indent=1))
+            path.write_text(
+                json.dumps([{c: r[c] for c in cols} for r in rows], indent=1),
+                encoding="utf-8",
+            )
         else:
             import csv
-            with path.open("w", newline="") as fh:
+            # The CSV is explicitly for spreadsheets. UTF-8 with a BOM is the
+            # portable signal that keeps Excel on native Windows from decoding
+            # non-ASCII employer, title, and location text as the ANSI locale.
+            with path.open("w", encoding="utf-8-sig", newline="") as fh:
                 w = csv.writer(fh)
                 w.writerow(cols)
                 for r in rows:
@@ -715,7 +724,7 @@ def cmd_analytics(args) -> None:
         if args.output:
             path = Path(args.output).expanduser()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(payload)
+            path.write_text(payload, encoding="utf-8")
             print(f"Analytics: {path}")
         else:
             print(payload, end="")
@@ -776,8 +785,10 @@ def cmd_claims_lint(args) -> None:
     if not reg_p.exists():
         sys.exit(f"No claims register at {reg_p}. It is written by /setup, and "
                  f"linting a draft against nothing would flag every fact in it.")
-    findings = lint(draft_p.read_text(), reg_p.read_text(),
-                    extra_allowed=Path(args.allow).read_text() if args.allow else "")
+    findings = lint(draft_p.read_text(encoding="utf-8"),
+                    reg_p.read_text(encoding="utf-8"),
+                    extra_allowed=(Path(args.allow).read_text(encoding="utf-8")
+                                   if args.allow else ""))
     print(format_report(findings, draft_p.name))
     sys.exit(1 if findings else 0)
 
@@ -796,7 +807,7 @@ def cmd_voice_lint(args) -> None:
         if not path.exists():
             missing.append(p)
             continue
-        drafts[path.name] = path.read_text()
+        drafts[path.name] = path.read_text(encoding="utf-8")
     if missing:
         sys.exit("No such draft(s): " + ", ".join(missing))
     if not drafts:
@@ -864,7 +875,7 @@ def cmd_profile_lint(args) -> None:
     # Let the normal first-run check explain how to create the file before
     # attempting a direct read.  The previous order exposed a raw ENOENT path.
     profile = load_profile()
-    raw = _yaml.safe_load(PROFILE.read_text()) or {}
+    raw = _yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}
     findings = _plint.lint(raw, profile)
     fails = [m for sev, m in findings if sev == "fail"]
     notes = [m for sev, m in findings if sev != "fail"]
@@ -1060,14 +1071,14 @@ def cmd_doctor(args) -> None:
     else:
         try:
             for w in _score_mod.validate_profile(
-                    yaml.safe_load(PROFILE.read_text()) or {}):
+                    yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}):
                 notes.append(f"profile: {w}")
         except ProfileError as e:
             problems.append(f"profile: {e}")
 
     try:
         from engine import profile_lint as _plint
-        raw = yaml.safe_load(PROFILE.read_text()) or {}
+        raw = yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}
         for sev, msg in _plint.lint(raw, load_profile()):
             (problems if sev == "fail" else notes).append(f"profile lint: {msg}")
     except Exception:
@@ -1225,11 +1236,12 @@ def queue_discovered(entries: list[dict]) -> None:
         return
     try:
         DISCOVERED_QUEUE.parent.mkdir(parents=True, exist_ok=True)
-        prev = json.loads(DISCOVERED_QUEUE.read_text()) if DISCOVERED_QUEUE.exists() else []
+        prev = (json.loads(DISCOVERED_QUEUE.read_text(encoding="utf-8"))
+                if DISCOVERED_QUEUE.exists() else [])
         seen = {(e.get("ats"), e.get("slug") or e.get("tenant")) for e in prev}
         prev += [e for e in entries
                  if (e.get("ats"), e.get("slug") or e.get("tenant")) not in seen]
-        DISCOVERED_QUEUE.write_text(json.dumps(prev[-200:]))
+        DISCOVERED_QUEUE.write_text(json.dumps(prev[-200:]), encoding="utf-8")
     except OSError:
         pass          # a report nicety must never fail a discovery run
 
@@ -1239,7 +1251,7 @@ def take_discovered() -> list[dict]:
     if not DISCOVERED_QUEUE.exists():
         return []
     try:
-        entries = json.loads(DISCOVERED_QUEUE.read_text())
+        entries = json.loads(DISCOVERED_QUEUE.read_text(encoding="utf-8"))
         DISCOVERED_QUEUE.unlink()
         return entries if isinstance(entries, list) else []
     except (OSError, ValueError):
@@ -1291,7 +1303,7 @@ def tracker_drift(con) -> dict:
     # application, so it must not demand a matching 'applied' row.
     CLOSED = _re.compile(r"\b(dead|rejected|closed|withdrawn|declined)\b", _re.I)
 
-    text = TRACKER.read_text() if TRACKER.exists() else ""
+    text = TRACKER.read_text(encoding="utf-8") if TRACKER.exists() else ""
     section, in_tracker = "", {}
     for line in text.splitlines():
         # Real headings carry a parenthetical ("## APPLIED (do not resurface)"),

@@ -2,6 +2,8 @@
 # Regression suite. Every test here locks down a bug that actually shipped.
 # No network, no touching your real database.
 set -e
+PYTHONUTF8=1
+export PYTHONUTF8
 cd "$(dirname "$0")"
 if [ -x .venv/Scripts/python.exe ]; then
   PY=.venv/Scripts/python.exe

@@ -221,6 +221,38 @@ def test_guide_builder_uses_a_locked_playwright_browser():
     assert "Careerkit-Guide.pdf is stale" in workflow
 
 
+def test_guide_ci_uses_source_build_marker_as_its_freshness_contract():
+    """PDF text layout is platform-specific, so CI must compare the stable
+    source-derived marker instead of requiring two extractions to be identical."""
+    workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text()
+    assert 'marker = re.compile(r"\\bGuide build ([0-9a-f]{12})\\b")' in workflow
+    assert 'committed_id = inspect("committed-guide.txt")' in workflow
+    assert 'generated_id = inspect("generated-guide.txt")' in workflow
+    assert "if committed_id != generated_id:" in workflow
+    assert workflow.count("pdfinfo guide/Careerkit-Guide.pdf") == 2
+    for critical_text in (
+        "stops at submit for your review",
+        "never relay codes",
+        "What leaves your machine",
+        "git pull && ./setup.sh",
+    ):
+        assert critical_text in workflow
+    assert 'committed = " ".join' not in workflow
+    assert "if committed != generated:" not in workflow
+
+
+def test_actions_are_sha_pinned_to_node24_generations():
+    workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
+        encoding="utf-8"
+    )
+    uses = re.findall(r"^\s*- uses:\s+(\S+)", workflow, re.MULTILINE)
+    assert uses
+    assert all(re.search(r"@[0-9a-f]{40}$", item) for item in uses)
+    assert "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09" in uses
+    assert "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1" in uses
+    assert "actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444" in uses
+
+
 def test_every_instance_update_path_reapplies_setup():
     command = "git pull && ./setup.sh"
     assert command in (ROOT / "README.md").read_text()

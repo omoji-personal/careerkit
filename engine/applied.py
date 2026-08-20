@@ -94,7 +94,7 @@ def load_evidence(path: str | Path) -> list[dict]:
     if not p.exists():
         return []
     out = []
-    for i, line in enumerate(p.read_text().splitlines(), 1):
+    for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -245,7 +245,7 @@ def write_evidence(path: str | Path, records: list[dict]) -> int:
             seen.add((_norm(rec.get("company", "")), (rec.get("title") or "").lower(),
                       rec.get("status")))
     n = 0
-    with p.open("a") as fh:
+    with p.open("a", encoding="utf-8") as fh:
         for rec in records:
             key = (_norm(rec.get("company", "")), (rec.get("title") or "").lower(),
                    rec.get("status"))

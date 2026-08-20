@@ -604,7 +604,7 @@ class Profile:
 
     @classmethod
     def load(cls, path: str | Path) -> "Profile":
-        cfg = yaml.safe_load(Path(path).read_text()) or {}
+        cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
         for problem in validate_profile(cfg):
             print(f"  profile warning: {problem}", file=sys.stderr)
         comp = cfg.get("comp") or {}

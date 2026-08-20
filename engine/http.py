@@ -556,7 +556,7 @@ def fetch(
     use_cache = use_cache and _cache_enabled
     if use_cache and cp.exists() and (time.time() - cp.stat().st_mtime) < CACHE_TTL:
         try:
-            blob = json.loads(cp.read_text())
+            blob = json.loads(cp.read_text(encoding="utf-8"))
             # Record the status on this path too. Only 200s are ever cached, so
             # a cache hit IS a success - but returning without setting it left
             # the thread-local holding a previous board's value (or None after
@@ -603,7 +603,10 @@ def fetch(
 
     if use_cache and status == 200:
         try:
-            cp.write_text(json.dumps({"status": status, "text": text}))
+            cp.write_text(
+                json.dumps({"status": status, "text": text}),
+                encoding="utf-8",
+            )
         except Exception:
             pass
     _local.last_status = status
