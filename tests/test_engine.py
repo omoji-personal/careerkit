@@ -1502,7 +1502,7 @@ def test_mark_rejects_an_invalid_status_at_the_cli():
     from engine.store import VALID_STATUS
     import re as _re
     src = (ROOT / "careerkit.py").read_text()
-    m = _re.search(r'sub\.add_parser\("mark"\)(.*?)\n\n', src, _re.S)
+    m = _re.search(r'sub\.add_parser\("mark".*?\)(.*?)\n\n', src, _re.S)
     assert m and "VALID_STATUS" in m.group(1), \
         "mark should constrain status to VALID_STATUS in argparse, not only in the store"
     assert set(VALID_STATUS) >= {"applied", "rejected"}
@@ -2349,7 +2349,7 @@ def test_consistency_is_quiet_when_report_and_row_agree(db, tmp_path):
         "## Qualified\n\n"
         "### 1. Senior Lifecycle Marketing Manager - Chime\n"
         "- **Score** 52 | **QUALIFIED** | NEW\n"
-        "- **Location** USA | **Comp** $150,000 - $208,000\n"
+        "- **Location** USA | **Comp** $150,000 - $208,000 (source unknown)\n"
         "- **Why** remote-US: USA | comp $150,000-$208,000\n"
         "- https://example.test/2\n")
     assert consistency.check_report(db, rpt) == []

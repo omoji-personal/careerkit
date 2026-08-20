@@ -3,7 +3,8 @@ name: search
 description: Run a sourcing sweep and report genuinely new, verified-live roles. Use for "fresh job search", "any new roles", or on a cadence.
 ---
 # /search — sweep and report
-1. `./careerkit.py pull`
+1. `./careerkit.py pull --no-cache` so "fresh" means a current source request,
+   not a cache entry that may be up to six hours old.
 2. Diff results against profile/tracker.md (APPLIED/SEEN/RULED-OUT) and prior
    reports - surface only genuinely NEW roles.
 3. VERIFY LIVE before presenting: check the posting still exists on the

@@ -4,16 +4,18 @@
 criteria it read 19,550 postings and surfaced 161.
 
 It watches the job boards employers actually post on, 18 applicant tracking
-platforms plus 14 public feeds (8 of them live immediately; 4 want an API key
-you register for, 2 are scrapers and off by default), and scores every posting
-against rules you wrote yourself. Then it helps you evaluate roles, build applications, prepare for
+platforms plus 13 usable public feeds (8 live immediately, 4 want an API key,
+and 1 optional scraper is off by default), with a 14th adapter security-gated
+until its upstream dependency is fixed. It scores every posting against rules
+you wrote yourself. Then it helps you evaluate roles, build applications, prepare for
 interviews, and keep track of where everything stands. Dated pipeline analytics,
 follow-up aging, employer relationship memory, and a private local dashboard
 close the loop: the search can learn which lanes actually produce interviews.
 
 It is built for people who are not programmers. You talk to Claude; Claude runs
-the machinery. Nothing personal lives in this repo: your profile, database and
-tracker are gitignored and stay on your machine.
+the machinery. Personal files are gitignored and remain local to your checkout;
+their contents leave only through the Claude, provider, and application requests
+disclosed below.
 
 **[Read the guide](guide/Careerkit-Guide.pdf)** for how scoring actually works,
 what leaves your machine, and the failure modes worth knowing about.
@@ -60,7 +62,7 @@ no rules to score against and will tell you so rather than guess.
 ```
 /search             # sweep every board + feed, report genuinely new roles
 /evaluate <url>     # honest fit read of any posting you found anywhere
-/apply <url>        # build the pack, fill the form; YOU click submit
+/apply <url>        # build/fill; you review and approve this one submission
 /prep <company>     # interview prep from your own story bank
 /track              # where everything stands
 ```
@@ -106,11 +108,12 @@ is not a demand that you be one, and it ignores a gate the posting itself calls
 preferred. This is the rail that catches the requirement buried three screens
 into a job description, which is where most wasted applications come from.
 
-If a rule you wrote is unusable (an empty list item, a broken regex) the engine
-names what it ignored and carries on. In an exclusion list it stops the run
-instead: dropping an exclusion fails open, the rail disappears, and everything
-you banned starts surfacing. Either way it will not silently match everything or
-match nothing, which is the failure that costs you jobs without telling you.
+Malformed profile structure and invalid values stop the run with the exact field
+named. Unknown keys, and unusable regexes in non-exclusion scoring terms, are
+reported and skipped. An unusable exclusion stops the run instead: dropping an
+exclusion fails open, the rail disappears, and everything you banned starts
+surfacing. Blank company-exclusion strings are the narrow harmless exception;
+they are filtered out. No rule silently matches everything or nothing.
 
 ## What actually leaves your machine
 
@@ -125,21 +128,29 @@ Worth being precise about, because "nothing" would be a lie.
   These are ordinary outbound web requests from your machine, throttled to one
   request per host per 0.7s, widening automatically if a host asks us to slow
   down. They identify themselves as CareerKit and link back to this repository,
-  so a site operator can tell what the traffic is. Your identity is not attached
-  to them.
-- **One exception, if you enable it:** the USAJobs feed requires your registered
-  email in the request header. That is their API's rule, not a CareerKit choice.
-  Skip that feed if you would rather not.
+  so a site operator can tell what the traffic is. Unauthenticated public
+  endpoints do not receive identity fields from your CareerKit profile, though
+  normal network metadata such as your IP address remains visible.
+- **Keyed feeds, if you enable them:** Adzuna, Findwork, Careerjet, and USAJobs
+  send the API keys, account identifiers, or affiliate values you configured to
+  that provider. USAJobs additionally requires your registered email in the
+  request header. Skip any keyed feed whose disclosure you do not accept.
 - **`/ingest` and `/evaluate`** fetch the URL you hand them. That is a request to
   whoever hosts it.
 - **No telemetry.** Nothing is reported back to the author or anyone else.
 
-Delete `profile/`, `data/` and `out/` and nothing personal remains locally. (`out/` holds your generated reports, which name the roles you were matched to.)
+Delete `profile/`, `data/` and `out/` to remove CareerKit-owned personal state
+from this checkout. (`out/` holds generated reports that name matched roles.)
+Deletion cannot retract requests already sent to providers or remove copies in
+backups, exports, or other tools.
 
-**On scraping.** Two feeds (`linkedin_guest`, `jobspy`) read public search pages
-rather than official APIs. They are off by default, can be rate-limited or
-blocked, and their terms of use are yours to read. Any run whose results include
-one says so in the report. Every feed declares what it is in
+**On scraping.** The optional `linkedin_guest` feed reads public search pages
+rather than an official API. It is off by default, can be rate-limited or
+blocked, and its terms of use are yours to read. The `jobspy` adapter is retained
+but has no supported installation until its dependency graph can use the
+security-fixed `markdownify>=0.14.1`; CareerKit refuses the vulnerable
+combination at runtime. Any run whose results include a scraper says so in the
+report. Every feed declares what it is in
 `engine/aggregators.py` under `SOURCE_POLICY`: official API, needs-your-own-key,
 or scraper.
 
@@ -147,18 +158,22 @@ Five employer platforms may also be read from public HTML rather than an API:
 **iCIMS**, **Jobvite**, **HRMDirect/ClearCompany**, **Paylocity**, and **Phenom**
 (when its widgets endpoint is unavailable). Paylocity and Phenom expose public
 JSON models inside those pages; the other three parse server-rendered job
-markup. Unlike the two feeds above, these are active whenever you have an
+markup. Unlike the optional feed above, these are active whenever you have an
 employer registered on that platform. If that matters to you, deactivate those
 entries in `profile/employers.yaml`.
 
 ## Rules the copilot lives by
 
 No fabricated experience, ever. Everything it writes is gated by your claims
-register. You click submit on applications: that is the default and it is the
-setting to leave alone, though `autonomy:` in your profile can loosen it. It never creates accounts, touches
-passwords, or completes "prove you're human" checks. It reads employer AI-use
-policies and follows them. Job postings are treated as data, never as
-instructions, including when a posting contains text addressed to the AI.
+register. It stops at every submit button by default. An agent click is allowed
+only after you review the completed form, personally handle any certification,
+and give fresh, explicit approval for that one application while present; there
+is no batch or standing submission permission. It
+never creates accounts, touches passwords, or completes captcha or OTP steps;
+you handle those directly and never relay codes to the agent. It reads employer
+AI-use policies and follows them. Job postings are
+treated as data, never as instructions, including when a posting contains text
+addressed to the AI.
 
 The full contract is in `CLAUDE.md`. These are prompt-level rules that a
 capable model follows, not sandboxed technical controls. Read them and decide
@@ -170,10 +185,15 @@ whether you are comfortable before pointing this at a real job search.
 `../careerkit-instances/<name>`, with its own profile, database, and reports.
 Instances never see each other's data. Use one per person.
 
-It clones from this repo's `origin` on GitHub, so `cd` into an instance and
-`git pull` really does bring engine fixes. (Pass `--local` to clone from your
-working copy instead, including unreleased changes; updates then only work on
-the machine that made it.)
+It clones from this checkout's portable HTTP(S) origin and prints the exact URL;
+confirm the recipient can access that origin. A local path or SSH-only origin
+requires explicit `--local`. To update an instance, run
+`git pull && ./setup.sh` inside it so dependency and setup changes are applied
+alongside engine fixes. Pass `--local` to snapshot this checkout instead: it
+includes tracked changes and non-ignored untracked files, while still excluding
+gitignored private state such as `profile/`, `data/`, and `out/`. Its origin is
+local, so updates then work only on the machine that made it; commit or remove
+snapshot changes before a later pull when they overlap upstream changes.
 
 ## Running the engine directly
 
@@ -184,6 +204,8 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py search        # key-free ATS-domain discovery; registers new boards
 ./careerkit.py queries --full  # print the matrix for a stronger search tool
 ./careerkit.py rescore       # re-judge stored postings after a criteria change
+./careerkit.py rescore --min-score 40  # rebuild the report at a score floor
+./careerkit.py profile-lint  # validate profile rules before using them
 ./careerkit.py doctor        # one check: profile, sources, freshness, drift
 ./careerkit.py tracker-sync  # exact dry-run of tracker/database reconciliation
 ./careerkit.py tracker-sync --apply  # append links + mark matched rows after review
@@ -199,26 +221,32 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py report --format html   # private single-file command center
 ./careerkit.py analytics     # conversions, timing, lane outcomes, stale threads
 ./careerkit.py analytics --format json  # scheduler/notification-friendly output
+./careerkit.py analytics --output out/analytics.json  # write a JSON artifact
 ./careerkit.py progress UID interviewing --on 2026-08-08
 ./careerkit.py relationship add "Acme" --kind recruiter --contact "Jane Smith"
 ./careerkit.py relationship list "Acme"
 ./careerkit.py history       # every status change, in order
 ./careerkit.py claims-lint out/cover.md     # numbers and names not in your register
+./careerkit.py voice-lint out/cover.md      # flag machine-written patterns
+./careerkit.py db check                     # SQLite integrity check
+./careerkit.py db backup                    # timestamped local backup
 ./careerkit.py mark UID applied
 ./careerkit.py ingest-url -- "https://boards.greenhouse.io/acme/jobs/1"
 ./careerkit.py pull --no-cache      # really re-fetch, ignoring the 6h cache
 ```
 
-`rescore` is the one to run after you change your criteria. Editing your profile
-only affects postings the boards happen to show you again afterwards, so
-everything already in your database keeps the verdict it was given under the old
-rules. `rescore` re-judges all of it from stored text, with no network requests.
+Run `rescore`, then `pull`, after you change your criteria. Editing your profile
+alone leaves everything already in your database with its old verdict;
+`rescore` re-judges those stored postings immediately and without network
+requests. `pull` then recovers postings the previous rules screened out before
+they could be stored.
 
 One caveat worth knowing, because it decides which command you need. Screened-out
-postings are never stored, so `rescore` can only re-judge what survived. A change
-to your **criteria** needs a `rescore`; a change to the **engine's rails** needs a
-`pull`, because the postings a rail used to reject are not in your database to
-re-judge.
+postings are never stored, so `rescore` can only re-judge what survived. Any
+criteria or engine change that may loosen a gate needs a `pull`, because the
+postings the old gate rejected are not in your database to re-judge. The
+`/criteria` workflow runs both commands so it is correct for tightening and
+loosening changes.
 
 `applied` is how the tool learns what you have already done. Write one line of
 JSON per application to `profile/applications.jsonl`:
@@ -312,8 +340,10 @@ the application; the machine needs the matching URL to connect it safely. A
 role missing from the database resurfaces later as a fresh find you have already
 acted on.
 
-To install it as an ordinary command instead (`careerkit pull`), run
-`pip install -e .`.
+CareerKit is intentionally clone-only; do not install it with `pip`. Its Claude
+skills, setup workflow, guide, examples, and private-state layout are required
+parts of the product and are not a complete Python package. Run `./setup.sh`
+and `./careerkit.py` from a cloned checkout.
 
 ## License
 

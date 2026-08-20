@@ -1,9 +1,7 @@
-# Runtime only. Test tooling lives in requirements-dev.txt so installing
-# CareerKit to USE it does not pull a test framework.
+# Reusable runtime dependency set. The supported clone setup installs
+# requirements-dev.txt as well so every user can run the regression suite.
 PyYAML>=6.0
-requests>=2.31
-
-# Optional. Adds Indeed / ZipRecruiter / Glassdoor / Google via the `jobspy`
-# feed. Everything else works without it; the feed reports itself as dormant
-# when the import is unavailable. Uncomment to enable.
-# python-jobspy>=1.1.80
+packaging>=24.0
+# 2.33.0 closes the redirect/netrc credential disclosure advisories affecting
+# the formerly allowed 2.31.x/2.32.x line.
+requests>=2.33.0

@@ -19,6 +19,7 @@ the profile and move to the human-screening stage.
 """
 from __future__ import annotations
 
+import math
 import re
 import sys
 from dataclasses import dataclass, field
@@ -72,7 +73,8 @@ _US_STATES = (
     "wisconsin|wyoming|district of columbia"
 )
 US_EVIDENCE = re.compile(
-    r"\b(united states|u\.?s\.?a\.?|us[- ]based|usa?[- ]remote|remote[ -]+u\.?s|"
+    r"\b(united states|u\.?s\.?a\.?|us[- ]based|usa?[- ]remote|"
+    r"remote(?:[ -]+|\s*,\s*)u\.?s|"
     r"anywhere in the u\.?s|nationwide|" + _US_STATES + r")\b", re.I)
 # CASE-SENSITIVE on purpose, and deliberately separate from US_EVIDENCE above.
 # Two things depend on the distinction:
@@ -85,7 +87,7 @@ US_EVIDENCE = re.compile(
 # Real listings write country and state tokens in caps; English prose does not.
 US_TOKEN = re.compile(
     r"\b(USA|U\.S\.|U\.S\.A\.)\b|"
-    r"\((?:US|USA)\)|\bUS[- ]remote\b|\bremote[ -]+US\b|"
+    r"\((?:US|USA)\)|\bUS[- ]remote\b|\bremote(?:[ -]+|\s*,\s*)US\b|"
     r",\s?(AL|AK|AZ|CA|CT|FL|GA|HI|IA|KS|KY|LA|ME|MD|MI|MN|"
     r"MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|"
     r"WV|WI|WY|DC)\b")
@@ -329,7 +331,9 @@ def validate_profile(cfg: dict) -> list[str]:
             for sub, sval in val.items():
                 if sub not in spec:
                     warn.append(f"unknown key '{key}.{sub}'{_closest(sub, spec)} - ignored")
-                elif sval is not None and not isinstance(sval, spec[sub]):
+                elif sval is not None and (
+                        not isinstance(sval, spec[sub])
+                        or (key == "comp" and isinstance(sval, bool))):
                     raise ProfileError(
                         f"profile.yaml: '{key}.{sub}' must be "
                         f"{getattr(spec[sub], '__name__', 'one of ' + str(spec[sub]))}, "
@@ -343,7 +347,33 @@ def validate_profile(cfg: dict) -> list[str]:
             if not isinstance(lane, dict):
                 raise ProfileError(f"profile.yaml: {where} must be a mapping with "
                                    f"'titles', got {type(lane).__name__}.")
-            if not lane.get("titles"):
+            titles = lane.get("titles")
+            if titles is not None and not isinstance(titles, list):
+                raise ProfileError(
+                    f"profile.yaml: {where}.titles must be a list of title terms, "
+                    f"got {type(titles).__name__} ({titles!r}).")
+            if titles is not None:
+                bad_terms = [t for t in titles
+                             if not isinstance(t, str) or not t.strip()]
+                if bad_terms:
+                    raise ProfileError(
+                        f"profile.yaml: {where}.titles must contain only non-empty "
+                        f"strings, got {bad_terms[0]!r}.")
+            weight = lane.get("weight", 35 if section == "lanes" else 40)
+            if isinstance(weight, bool) or not isinstance(weight, int):
+                raise ProfileError(
+                    f"profile.yaml: {where}.weight must be a whole-number score, "
+                    f"got {weight!r}.")
+            if not 0 <= weight <= 100:
+                raise ProfileError(
+                    f"profile.yaml: {where}.weight must be within the 0-100 score "
+                    f"range, got {weight}.")
+            if "key" in lane and (not isinstance(lane["key"], str)
+                                  or not lane["key"].strip()):
+                raise ProfileError(
+                    f"profile.yaml: {where}.key must be a non-empty string, "
+                    f"got {lane['key']!r}.")
+            if not titles:
                 # A lane with no titles matches nothing, so the whole lane is
                 # dead weight the user thinks is live.
                 warn.append(f"{where} ('{lane.get('key', '?')}') has no titles - "
@@ -352,6 +382,107 @@ def validate_profile(cfg: dict) -> list[str]:
                 if k not in _LANE_KEYS:
                     warn.append(f"unknown key '{where}.{k}'{_closest(k, _LANE_KEYS)} - ignored")
     comp = cfg.get("comp") or {}
+    for name in ("screen_floor", "accept_floor"):
+        value = comp.get(name)
+        finite = (not isinstance(value, float) or math.isfinite(value))
+        if value is not None and (not finite or value < 0):
+            raise ProfileError(
+                f"profile.yaml: 'comp.{name}' must be a finite, non-negative "
+                f"amount, got {value!r}.")
+    string_lists = {
+        "dream_companies": cfg.get("dream_companies") or [],
+        "search_terms": cfg.get("search_terms") or [],
+        "domain_terms": cfg.get("domain_terms") or [],
+        "location.metros": (cfg.get("location") or {}).get("metros") or [],
+        "location.states": (cfg.get("location") or {}).get("states") or [],
+    }
+    exclusions = cfg.get("exclusions") or {}
+    for name in ("titles", "titles_always", "products", "certs_refused",
+                 "competing_platforms"):
+        string_lists[f"exclusions.{name}"] = exclusions.get(name) or []
+    for where, values in string_lists.items():
+        for i, value in enumerate(values):
+            if not isinstance(value, str) or not value.strip():
+                raise ProfileError(
+                    f"profile.yaml: {where}[{i}] must be a non-empty string, "
+                    f"got {value!r}.")
+    # Blank company exclusions are deliberately harmless and filtered during
+    # normalisation (a historical regression covers that behavior).  Reject
+    # non-strings, though: coercing YAML null to the literal company "none"
+    # silently blocks a real employer with that name.
+    for i, value in enumerate(exclusions.get("companies") or []):
+        if not isinstance(value, str):
+            raise ProfileError(
+                f"profile.yaml: exclusions.companies[{i}] must be a string, "
+                f"got {value!r}.")
+    for label, phrases in (cfg.get("hard_requirements") or {}).items():
+        if not isinstance(label, str) or not label.strip():
+            raise ProfileError(
+                "profile.yaml: hard_requirements keys must be non-empty strings, "
+                f"got {label!r}.")
+        if not isinstance(phrases, list):
+            raise ProfileError(
+                f"profile.yaml: hard_requirements.{label} must be a list of "
+                f"phrases, got {type(phrases).__name__}.")
+        if any(not isinstance(x, str) or not x.strip() for x in phrases):
+            raise ProfileError(
+                f"profile.yaml: hard_requirements.{label} must contain only "
+                "non-empty strings.")
+    for i, signal in enumerate(cfg.get("signals") or []):
+        where = f"signals[{i}]"
+        if not isinstance(signal, dict):
+            raise ProfileError(
+                f"profile.yaml: {where} must be a mapping, got "
+                f"{type(signal).__name__}.")
+        terms = signal.get("terms")
+        if not isinstance(terms, list) or not terms:
+            raise ProfileError(
+                f"profile.yaml: {where}.terms must be a non-empty list.")
+        if any(not isinstance(x, str) or not x.strip() for x in terms):
+            raise ProfileError(
+                f"profile.yaml: {where}.terms must contain only non-empty strings.")
+        points = signal.get("points", 4)
+        if isinstance(points, bool) or not isinstance(points, int):
+            raise ProfileError(
+                f"profile.yaml: {where}.points must be a whole number, got "
+                f"{points!r}.")
+        if not 0 <= points <= 100:
+            raise ProfileError(
+                f"profile.yaml: {where}.points must be within 0-100, got "
+                f"{points}.")
+    for i, entry in enumerate((cfg.get("exclusions") or {}).get("body_patterns") or []):
+        where = f"exclusions.body_patterns[{i}]"
+        if isinstance(entry, str):
+            if not entry.strip():
+                raise ProfileError(f"profile.yaml: {where} must not be blank.")
+            continue
+        if not isinstance(entry, dict):
+            raise ProfileError(
+                f"profile.yaml: {where} must be a string or mapping, got "
+                f"{type(entry).__name__}.")
+        terms = entry.get("terms")
+        if not isinstance(terms, list) or not terms:
+            raise ProfileError(
+                f"profile.yaml: {where}.terms must be a non-empty list.")
+        if any(not isinstance(x, str) or not x.strip() for x in terms):
+            raise ProfileError(
+                f"profile.yaml: {where}.terms must contain only non-empty strings.")
+        if "label" in entry and (not isinstance(entry["label"], str)
+                                 or not entry["label"].strip()):
+            raise ProfileError(
+                f"profile.yaml: {where}.label must be a non-empty string.")
+    context = cfg.get("lane_title_context") or {}
+    for key, value in context.items():
+        if (not isinstance(key, str) or not key.strip()
+                or not isinstance(value, str) or not value.strip()):
+            raise ProfileError(
+                "profile.yaml: lane_title_context keys and values must be "
+                f"non-empty strings, got {key!r}: {value!r}.")
+    submit = (cfg.get("autonomy") or {}).get("submit")
+    if submit is not None and submit != "ask_each":
+        raise ProfileError(
+            "profile.yaml: autonomy.submit must be 'ask_each'; batch, "
+            "session-wide, and standing submission permission are not supported.")
     if comp.get("accept_floor") and comp.get("screen_floor") and \
             comp["accept_floor"] < comp["screen_floor"]:
         warn.append(f"comp.accept_floor ({comp['accept_floor']}) is below "
@@ -584,9 +715,19 @@ class Profile:
 def extract_comp(job: Job) -> tuple[int | None, int | None]:
     """Prefer the board's structured field; fall back to parsing the body near
     an explicit base-salary phrase. Multi-geo-band postings span min..max of
-    ALL figures in the window; hourly bands normalize x2080."""
+    ALL figures in the window; hourly bands normalize x2080.
+
+    `comp_source` is populated as part of the resolution.  A structured number
+    or compensation text supplied separately by the board is stronger evidence
+    than a band inferred from the posting body, and the report must not present
+    those two claims as equivalent.  Stored pre-migration figures arrive with
+    source `unknown`; preserve that honest uncertainty instead of laundering
+    them into board-supplied values during a rescore.
+    """
     if job.comp_min or job.comp_max:
         lo, hi = job.comp_min, job.comp_max
+        if job.comp_source not in ("board", "body", "unknown"):
+            job.comp_source = "board"
         # A low floor alone does not mean the board quoted an hourly rate. Boards
         # accept junk: an Indeed listing advertised "Pay: $1.00 - $250,000.00 per
         # year", and treating lo < 1000 as hourly multiplied BOTH ends by 2080,
@@ -596,50 +737,64 @@ def extract_comp(job: Job) -> tuple[int | None, int | None]:
         if lo and lo < 1000 and (hi is None or hi < 1000):
             lo, hi = lo * 2080, (hi * 2080 if hi else None)
         return lo, hi
-    text = f"{job.comp_text}\n{job.description}"
-    best: list[int] = []
-    for m in _RANGE_CTX.finditer(text):
-        window = text[m.start(): m.start() + 320]
-        hourly = bool(re.search(r"\bper hour\b|/\s?h(?:ou)?r\b|\bhourly\b", window, re.I))
-        weekly = bool(re.search(r"\bper week\b|/\s?w(?:ee)?k\b|\bweekly\b", window, re.I))
-        monthly = bool(re.search(r"\bper month\b|/\s?mo(?:nth)?\b|\bmonthly\b", window, re.I))
-        # A bare 2-3 digit figure is only shorthand for thousands when the window
-        # says so. Without this a "$500 home office stipend" sitting next to a
-        # salary line was read as $500,000 and inflated the band.
-        thousands_ok = bool(re.search(r"\d\s?[kK]\b", window)) or bool(
-            re.search(r"\$\s?\d{2,3},\d{3}", window))
-        vals, explicit = [], []
-        for mm in _MONEY.finditer(window):
-            a, b = mm.group(1), mm.group(2)
-            raw = int(a + b) if b else int(a)
-            if hourly and raw < 500:
-                v = raw * 2080
-            elif weekly and raw < 20_000:
-                v = raw * 52
-            elif monthly and raw < 60_000:
-                v = raw * 12
-            elif b:
-                v = raw
-            elif thousands_ok:
-                v = raw * 1000
-            else:
-                continue        # a bare small figure with no thousands signal
-            if 40_000 <= v <= 1_500_000:   # 500k dropped real exec bands whole
-                vals.append(v)
-                if b or re.match(r"\$\s?\d{1,3}\s?[kK]", mm.group(0)):
-                    explicit.append(v)      # states its own magnitude
-        # A figure that states its own magnitude (a comma or a k suffix) beats a
-        # bare one in the same window. Otherwise a "$500 home office stipend"
-        # next to a real band was read as $500,000 and inflated the maximum.
-        use = explicit if len(explicit) >= 2 else vals
-        if len(use) >= 2:
-            best = [min(use), max(use)]
-            break
-        if use and not best:
-            best = use[:1]
-    if not best:
-        return None, None
-    return (best[0], best[-1] if len(best) > 1 else None)
+    def parse_text(text: str) -> tuple[int | None, int | None]:
+        best: list[int] = []
+        for m in _RANGE_CTX.finditer(text):
+            window = text[m.start(): m.start() + 320]
+            hourly = bool(re.search(
+                r"\bper hour\b|/\s?h(?:ou)?r\b|\bhourly\b", window, re.I))
+            weekly = bool(re.search(
+                r"\bper week\b|/\s?w(?:ee)?k\b|\bweekly\b", window, re.I))
+            monthly = bool(re.search(
+                r"\bper month\b|/\s?mo(?:nth)?\b|\bmonthly\b", window, re.I))
+            # A bare 2-3 digit figure is only shorthand for thousands when the
+            # window says so. Without this a "$500 home office stipend" sitting
+            # next to a salary line was read as $500,000 and inflated the band.
+            thousands_ok = bool(re.search(r"\d\s?[kK]\b", window)) or bool(
+                re.search(r"\$\s?\d{2,3},\d{3}", window))
+            vals, explicit = [], []
+            for mm in _MONEY.finditer(window):
+                a, b = mm.group(1), mm.group(2)
+                raw = int(a + b) if b else int(a)
+                if hourly and raw < 500:
+                    v = raw * 2080
+                elif weekly and raw < 20_000:
+                    v = raw * 52
+                elif monthly and raw < 60_000:
+                    v = raw * 12
+                elif b:
+                    v = raw
+                elif thousands_ok:
+                    v = raw * 1000
+                else:
+                    continue       # a bare small figure with no thousands signal
+                if 40_000 <= v <= 1_500_000:  # 500k dropped real exec bands whole
+                    vals.append(v)
+                    if b or re.match(r"\$\s?\d{1,3}\s?[kK]", mm.group(0)):
+                        explicit.append(v)     # states its own magnitude
+            # A figure that states its own magnitude (a comma or a k suffix)
+            # beats a bare one in the same window. Otherwise a "$500 home office
+            # stipend" next to a real band inflated the maximum.
+            use = explicit if len(explicit) >= 2 else vals
+            if len(use) >= 2:
+                return min(use), max(use)
+            if use and not best:
+                best = use[:1]
+        if not best:
+            return None, None
+        return best[0], None
+
+    # Parse the sources separately.  Joining them lets a context phrase at the
+    # end of a board field capture unrelated money at the start of the body and
+    # makes honest attribution impossible.
+    for source, text in (("board", job.comp_text or ""),
+                         ("body", job.description or "")):
+        lo, hi = parse_text(text)
+        if lo is not None or hi is not None:
+            job.comp_source = source
+            return lo, hi
+    job.comp_source = "absent"
+    return None, None
 
 
 # A binding attendance requirement, not a passing mention of the word hybrid.
@@ -966,9 +1121,14 @@ def _score_uncapped(job: Job, p: Profile) -> Job:
     # URL was surfaced as VERIFY.
     if ctx and title.strip() and ctx.lower() not in title.lower():
         title = f"{ctx} {title}"
-    exempt = (job.company.lower() in p.dream_companies
-              or _norm_company(job.company) in {_norm_company(c) for c in p.dream_companies}) or getattr(job, "rails_exempt", False)
-    job.rails_exempt = exempt
+    # A dream-company exemption belongs to this scoring profile, not to the
+    # posting. Persisting the derived True on Job made it indistinguishable from
+    # a registry-level carve-out: removing an employer from dream_companies and
+    # rescoring still waived location, compensation and requirement rails.
+    exempt = ((job.company.lower() in p.dream_companies
+               or _norm_company(job.company) in
+               {_norm_company(c) for c in p.dream_companies})
+              or bool(getattr(job, "rails_exempt", False)))
 
     # --- title fit -------------------------------------------------------
     base, lane_key = 0, ""
@@ -1144,18 +1304,28 @@ def _score_uncapped(job: Job, p: Profile) -> Job:
     if hi is not None:
         job.comp_max = hi
     comp_state = "unknown"
-    if lo and p.screen_floor:
-        top = hi or lo
+    has_comp = lo is not None or hi is not None
+
+    def _comp_reason() -> str:
+        if lo is None:
+            return f"comp up to ${hi:,}"
+        if hi is None:
+            return f"comp ${lo:,}+"
+        return f"comp ${lo:,}-${hi:,}"
+
+    if has_comp and p.screen_floor:
+        top = hi if hi is not None else lo
         if top < p.screen_floor and not exempt:
             job.gate, job.score = "EXCLUDED", base
             job.reasons = [f"comp ceiling ${top:,} below ${p.screen_floor:,} screen floor"]
             return job
         comp_state = "pass" if top >= p.accept_floor else "thin"
-        reasons.append(f"comp ${lo:,}" + (f"-${hi:,}" if hi else "") +
-                       ("" if comp_state == "pass" else " (below accept floor, negotiable?)"))
-    elif lo:
+        reasons.append(_comp_reason()
+                       + ("" if comp_state == "pass"
+                          else " (below accept floor, negotiable?)"))
+    elif has_comp:
         comp_state = "pass"
-        reasons.append(f"comp ${lo:,}" + (f"-${hi:,}" if hi else ""))
+        reasons.append(_comp_reason())
     else:
         reasons.append("comp not stated")
 

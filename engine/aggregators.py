@@ -32,6 +32,10 @@ def set_search_terms(terms):
 
 import json
 import re
+from importlib import metadata
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 from urllib.parse import quote_plus
 from typing import Callable
 
@@ -409,8 +413,6 @@ def linkedin_guest(cfg: dict) -> list[Job]:
     loc = cfg.get("location", "United States")
     pages = int(cfg.get("pages", 2))
     detail_cap = int(cfg.get("detail_cap", 40))
-    ua = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"}
 
     # No card_re here on purpose. A combined link+title pattern was tried and
     # abandoned: LinkedIn's guest markup puts the two in separate elements often
@@ -428,7 +430,7 @@ def linkedin_guest(cfg: dict) -> list[Job]:
             url = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/"
                    f"search?keywords={_q(term)}&location={_q(loc)}"
                    f"&f_TPR=r{since}&start={p * 25}")
-            status, text = fetch(url, headers=ua)
+            status, text = fetch(url)
             if status != 200 or not text:
                 break
             cards = text.split('<div class="base-card')
@@ -450,7 +452,7 @@ def linkedin_guest(cfg: dict) -> list[Job]:
                         w.lower() in title.lower() for w in term.split()):
                     _time.sleep(1.0)
                     ds, dtext = fetch("https://www.linkedin.com/jobs-guest/jobs/api/"
-                                      f"jobPosting/{jid.group(1)}", headers=ua)
+                                      f"jobPosting/{jid.group(1)}")
                     if ds == 200 and dtext:
                         m = desc_re.search(dtext)
                         if m:
@@ -474,13 +476,17 @@ def linkedin_guest(cfg: dict) -> list[Job]:
 @feed("jobspy")
 def jobspy_feed(cfg: dict) -> list[Job]:
     """Optional multi-portal feed via the python-jobspy library (Indeed,
-    ZipRecruiter, Glassdoor, Google). Install: pip install python-jobspy.
-    Indeed is the workhorse (no rate limiting per their docs); we skip
-    LinkedIn here because the polite linkedin_guest feed covers it."""
+    ZipRecruiter, Glassdoor, Google).
+
+    There is currently no supported installation path: python-jobspy 1.1.82
+    requires markdownify<0.14.0 while CVE-2025-46656 is fixed in 0.14.1. The
+    adapter remains for a future compatible upstream release, and the runtime
+    guard below refuses today's vulnerable combination before importing it."""
+    _require_safe_jobspy_runtime()
     try:
         from jobspy import scrape_jobs
-    except ImportError:
-        raise RuntimeError("python-jobspy not installed (optional dependency)")
+    except ImportError as exc:
+        raise RuntimeError("python-jobspy not installed (optional dependency)") from exc
     sites = cfg.get("sites") or ["indeed", "zip_recruiter"]
     hours = int(cfg.get("hours_old", 72))
     want = int(cfg.get("results_per_term", 25))
@@ -519,6 +525,72 @@ def jobspy_feed(cfg: dict) -> list[Job]:
     return out
 
 
+_VERSION_CORE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(.*)$")
+
+
+def _safe_markdownify_version(value: str) -> bool:
+    """Whether a markdownify release includes the heading-memory fix.
+
+    markdownify before 0.14.1 can allocate attacker-chosen amounts of memory
+    while converting a huge HTML heading tag. JobSpy processes third-party job
+    HTML through this library, so importing an installed-but-vulnerable stack as
+    if it were usable turns untrusted board markup into a local DoS primitive.
+    """
+    match = _VERSION_CORE.fullmatch((value or "").strip().lower())
+    if not match:
+        return False
+    core = tuple(int(part or 0) for part in match.groups()[:3])
+    suffix = match.group(4).lstrip(".-+")
+    prerelease = bool(re.match(r"(?:a|alpha|b|beta|rc|pre|preview|dev)", suffix))
+    return core >= (0, 14, 1) and not prerelease
+
+
+def _require_safe_jobspy_runtime() -> None:
+    """Fail closed before JobSpy imports a vulnerable markdownify runtime."""
+    try:
+        metadata.version("python-jobspy")
+    except metadata.PackageNotFoundError as exc:
+        raise RuntimeError("python-jobspy not installed (optional dependency)") from exc
+    try:
+        markdownify_version = metadata.version("markdownify")
+    except metadata.PackageNotFoundError as exc:
+        raise RuntimeError(
+            "jobspy disabled: markdownify is missing from its runtime"
+        ) from exc
+    if not _safe_markdownify_version(markdownify_version):
+        raise RuntimeError(
+            "jobspy disabled: installed markdownify "
+            f"{markdownify_version} is affected by CVE-2025-46656; require "
+            "markdownify>=0.14.1 with a compatible python-jobspy release"
+        )
+    try:
+        parsed = Version(markdownify_version)
+        requirements = metadata.distribution("python-jobspy").requires or []
+    except (InvalidVersion, metadata.PackageNotFoundError) as exc:
+        raise RuntimeError(
+            "jobspy disabled: its installed dependency metadata cannot prove "
+            "compatibility with security-fixed markdownify"
+        ) from exc
+    compatible = False
+    for raw in requirements:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement:
+            continue
+        if canonicalize_name(requirement.name) != "markdownify":
+            continue
+        if requirement.marker and not requirement.marker.evaluate():
+            continue
+        if parsed in requirement.specifier:
+            compatible = True
+            break
+    if not compatible:
+        raise RuntimeError(
+            "jobspy disabled: installed python-jobspy does not declare "
+            f"compatibility with secure markdownify {markdownify_version}"
+        )
+
+
 # --------------------------------------------------------------------------
 # Source policy (CK-020)
 # --------------------------------------------------------------------------
@@ -551,7 +623,7 @@ SOURCE_POLICY = {
     "linkedin_guest": {"kind": "scraping",
                        "note": "reads the public guest search pages; no API "
                                "contract, can be blocked. Off by default."},
-    "jobspy":         {"kind": "scraping",
+    "jobspy":         {"kind": "scraping", "supported": False,
                        "note": "third-party scraper for Indeed / ZipRecruiter / "
                                "Glassdoor / Google. Off by default."},
 }

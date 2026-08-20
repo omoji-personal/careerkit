@@ -8,6 +8,7 @@ provenance for each sighting.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sqlite3
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   company        TEXT, title TEXT, url TEXT, location TEXT,
   source         TEXT, lane TEXT, employer_tier TEXT,
   posted_at      TEXT, department TEXT,
-  comp_min       INTEGER, comp_max INTEGER, comp_text TEXT,
+  comp_min       INTEGER, comp_max INTEGER, comp_text TEXT, comp_source TEXT,
   score          INTEGER, gate TEXT, reasons TEXT,
   description    TEXT,
   first_seen     TEXT, last_seen TEXT, seen_count INTEGER DEFAULT 1,
@@ -107,6 +108,11 @@ _MIGRATIONS = [
     # was discarding them, which left the check with no data source.
     ("jobs", "url_direct", "TEXT"),
     ("jobs", "company_site", "TEXT"),
+    # Confidence/provenance for the displayed compensation: an employer board
+    # field is not the same claim as a number parsed from free-form body text.
+    # Existing figures cannot be reconstructed reliably, so migrated rows are
+    # marked unknown until a fresh sighting supplies authoritative provenance.
+    ("jobs", "comp_source", "TEXT"),
 ]
 
 
@@ -166,6 +172,14 @@ def _migrate(con: sqlite3.Connection) -> None:
                 # The loser is not an error; the column exists either way.
                 if "duplicate column" not in str(e).lower():
                     raise
+    # The old schema retained the numbers but not enough evidence to reconstruct
+    # whether they came from a board field or prose.  Mark that uncertainty
+    # explicitly; calling every migrated figure "board" would invent confidence.
+    job_cols = {r["name"] for r in con.execute("PRAGMA table_info(jobs)")}
+    if {"comp_min", "comp_max", "comp_source"}.issubset(job_cols):
+        con.execute("UPDATE jobs SET comp_source='unknown' "
+                    "WHERE (comp_min IS NOT NULL OR comp_max IS NOT NULL) "
+                    "AND COALESCE(comp_source,'')='' ")
     # A pre-2026-08-05 row's uid was sha256(company|normalized_title), which is
     # exactly what group_key is now. Backfilling it lets upsert recognise an
     # existing posting under the new uid scheme instead of treating all of them
@@ -229,40 +243,99 @@ class RunLock:
     run had just re-sighted. SQLite's own locking serializes individual writes,
     which is not the same as serializing a run.
 
-    Advisory and best-effort by design. If the lock file cannot be created the
-    run proceeds rather than refusing to work."""
+    Fails closed. If the lock cannot be established, starting a second writer is
+    more dangerous than refusing the run: SQLite serializes statements, not the
+    multi-minute reconcile transaction this lock protects."""
 
     def __init__(self, path: Path | None = None):
         self.path = path or DB_PATH.with_suffix(".lock")
         self._fh = None
+        self._unlock = None
+
+    def _acquire_platform_lock(self) -> None:
+        """Acquire a nonblocking native lock, POSIX first and Windows second."""
+        try:
+            import fcntl
+        except ImportError:
+            try:
+                import msvcrt
+            except ImportError as windows_error:
+                raise ImportError(
+                    "neither fcntl nor msvcrt file locking is available"
+                ) from windows_error
+
+            # msvcrt locks a byte range from the current file position.  A new
+            # zero-length file needs one byte to lock; never write this sentinel
+            # into a nonempty file, which may contain an active owner's PID.
+            self._fh.seek(0, os.SEEK_END)
+            if self._fh.tell() == 0:
+                self._fh.write("\0")
+                self._fh.flush()
+            self._fh.seek(0)
+            try:
+                msvcrt.locking(self._fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as e:
+                # CPython commonly maps ERROR_LOCK_VIOLATION to EACCES, but
+                # retain the Windows codes as well so contention consistently
+                # reaches the ordinary "already writing" path.
+                if (e.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+                        or getattr(e, "winerror", None) in {32, 33, 36}):
+                    raise BlockingIOError(e.errno or errno.EACCES, str(e)) from e
+                raise
+
+            def unlock_windows(fh):
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+
+            self._unlock = unlock_windows
+            return
+
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def unlock_posix(fh):
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+        self._unlock = unlock_posix
 
     def __enter__(self):
-        import fcntl
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._fh = open(self.path, "w")
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # `w` truncates before flock runs, so a losing contender erased the
+            # active owner's PID. Append/update opens without mutating; only the
+            # process that acquired the lock may replace the diagnostic content.
+            self._fh = open(self.path, "a+")
+            self._acquire_platform_lock()
+            self._fh.seek(0)
+            self._fh.truncate()
             self._fh.write(str(os.getpid()))
             self._fh.flush()
         except BlockingIOError:
             if self._fh:
                 self._fh.close()
                 self._fh = None
+            self._unlock = None
             raise RuntimeError(
                 f"another CareerKit run is already writing to {DB_PATH.name}. "
-                f"Wait for it to finish, or remove {self.path} if no run is active.")
-        except (OSError, ImportError):
-            self._fh = None      # unlockable filesystem: proceed unprotected
+                "Wait for that run to finish before trying again.")
+        except (OSError, ImportError) as e:
+            if self._fh:
+                self._fh.close()
+                self._fh = None
+            self._unlock = None
+            raise RuntimeError(
+                f"cannot acquire CareerKit write lock at {self.path}: {e}; "
+                "refusing to write without serialization") from e
         return self
 
     def __exit__(self, *exc):
         if self._fh:
-            import fcntl
             try:
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                if self._unlock:
+                    self._unlock(self._fh)
             finally:
                 self._fh.close()
                 self._fh = None
+                self._unlock = None
         return False
 
 
@@ -299,17 +372,49 @@ def _merge_duplicate_job_row(cur: sqlite3.Cursor, target_uid: str,
         cur_val, old_val = current[col], old[col] if col in old.keys() else None
         return cur_val if cur_val not in (None, "") else old_val
 
+    def _evidence(col):
+        """Prefer found evidence, while preserving looked-vs-not-looked."""
+        cur_val = current[col] if col in current.keys() else None
+        old_val = old[col] if col in old.keys() else None
+        if cur_val not in (None, ""):
+            return cur_val
+        if old_val not in (None, ""):
+            return old_val
+        # NULL means this evidence source was never checked; empty means it was
+        # checked and nothing was found. Either row having been checked is useful
+        # information and must survive the identity repair.
+        return "" if cur_val is not None or old_val is not None else None
+
+    current_has_comp = current["comp_min"] is not None or current["comp_max"] is not None
+    old_has_comp = old["comp_min"] is not None or old["comp_max"] is not None
+    if current_has_comp:
+        comp_min, comp_max = current["comp_min"], current["comp_max"]
+        comp_text = current["comp_text"]
+        comp_source = current["comp_source"] or "unknown"
+    elif old_has_comp:
+        comp_min, comp_max = old["comp_min"], old["comp_max"]
+        comp_text = old["comp_text"]
+        comp_source = ((old["comp_source"] or "unknown")
+                       if "comp_source" in old.keys() else "unknown")
+    else:
+        comp_min = comp_max = None
+        comp_text = _keep("comp_text")
+        comp_source = _keep("comp_source")
+
     cur.execute(
         "UPDATE jobs SET status=?, notes=?, first_seen=MIN(first_seen,?), "
         "last_seen=MAX(last_seen,?), seen_count=COALESCE(seen_count,0)+?, "
         "first_seen_run=?, last_seen_run=?, remote_flag=?, rails_exempt=?, "
-        "employer_tier=?, department=?, comp_text=?, registry_lane=? WHERE uid=?",
+        "employer_tier=?, department=?, comp_min=?, comp_max=?, comp_text=?, "
+        "comp_source=?, registry_lane=?, url_direct=?, company_site=? WHERE uid=?",
         (status, " | ".join(notes), old["first_seen"], old["last_seen"],
          old["seen_count"] or 0,
          min(first_runs) if first_runs else None,
          max(last_runs) if last_runs else None,
          _keep("remote_flag"), _keep("rails_exempt"), _keep("employer_tier"),
-         _keep("department"), _keep("comp_text"), _keep("registry_lane"),
+         _keep("department"), comp_min, comp_max,
+         comp_text, comp_source, _keep("registry_lane"),
+         _evidence("url_direct"), _evidence("company_site"),
          target_uid),
     )
     for sighting in cur.execute(
@@ -323,6 +428,52 @@ def _merge_duplicate_job_row(cur: sqlite3.Cursor, target_uid: str,
     cur.execute("DELETE FROM sightings WHERE uid=?", (old["uid"],))
     cur.execute("UPDATE events SET uid=? WHERE uid=?", (target_uid, old["uid"]))
     cur.execute("DELETE FROM jobs WHERE uid=?", (old["uid"],))
+
+
+def _repair_blank_company_identity(cur: sqlite3.Cursor, job: Job) -> None:
+    """Adopt the exact legacy row after blank-company UIDs were disambiguated.
+
+    Older aggregator rows with no employer name used title alone as both UID
+    and group key, so unrelated anonymous "Product Manager" postings collapsed.
+    The model now adds source + normalized URL to that identity.  Preserve the
+    old row's application state and history only when its raw source and URL
+    exactly match this fresh sighting; title-only matching would repeat the bug
+    this migration repairs.
+    """
+    legacy_uid = job.legacy_blank_company_uid
+    legacy_group = job.legacy_blank_company_group_key
+    if not legacy_uid or not legacy_group or legacy_uid == job.uid:
+        return
+    cur.execute(
+        "SELECT * FROM jobs WHERE uid=? AND group_key=? AND source=? AND url=?",
+        (legacy_uid, legacy_group, job.source, job.url),
+    )
+    old = cur.fetchone()
+    if old is None:
+        return
+
+    cur.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,))
+    current = cur.fetchone()
+    if current is None:
+        try:
+            cur.execute(
+                "UPDATE jobs SET uid=?, group_key=?, schema_v=2 WHERE uid=?",
+                (job.uid, job.group_key, old["uid"]),
+            )
+            cur.execute("UPDATE sightings SET uid=? WHERE uid=?",
+                        (job.uid, old["uid"]))
+            cur.execute("UPDATE events SET uid=? WHERE uid=?",
+                        (job.uid, old["uid"]))
+            return
+        except sqlite3.IntegrityError:
+            # A canonical row or sighting may already have appeared between the
+            # reads.  Resolve through the same lossless merge used by the other
+            # identity migrations.
+            cur.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,))
+            current = cur.fetchone()
+
+    if current is not None:
+        _merge_duplicate_job_row(cur, job.uid, old)
 
 
 def _repair_same_url_identity(cur: sqlite3.Cursor, job: Job) -> None:
@@ -371,6 +522,47 @@ def _repair_same_url_identity(cur: sqlite3.Cursor, job: Job) -> None:
 
         if current is not None:
             _merge_duplicate_job_row(cur, job.uid, old)
+
+
+def _remote_sql_args(flag: bool | None, source: str,
+                     board: str = "") -> tuple[int | None, int | None, int]:
+    """Arguments for the authoritative-ATS/monotonic-aggregator merge.
+
+    An employer ATS saying False is an actual edit to the posting and may clear
+    an earlier True. Aggregator adapters also use False for a missing field, so
+    they may establish False from NULL but cannot erase known remote evidence.
+    """
+    raw = None if flag is None else int(bool(flag))
+    base_source = (source or "").lower().split(":", 1)[0]
+    # A registry-backed board id proves this is the employer adapter path. Source
+    # names alone are insufficient because callers and imported aggregator rows
+    # can retain an ATS-looking label while carrying False-for-missing semantics.
+    authoritative = base_source in ATS_SOURCES and bool((board or "").strip())
+    return raw, raw, int(authoritative)
+
+
+def _resolved_comp(job: Job) -> int:
+    """Whether this sighting carries one authoritative compensation band."""
+    return int(job.comp_source in {"board", "body", "unknown"}
+               and (job.comp_min is not None or job.comp_max is not None))
+
+
+def _recover_abandoned_newness(cur: sqlite3.Cursor, row: sqlite3.Row,
+                               run_id: int | None) -> bool:
+    """Move a first sighting out of an interrupted run into the retrying run."""
+    first_run = row["first_seen_run"] if "first_seen_run" in row.keys() else None
+    if run_id is None or first_run is None or first_run == run_id:
+        return False
+    prior = cur.execute("SELECT finished, state FROM runs WHERE run_id=?",
+                        (first_run,)).fetchone()
+    if prior is None or prior["finished"] is not None:
+        return False
+    # Tests and library callers may open two logical runs in one process without
+    # finishing the first. A real retry after process death has a different PID;
+    # legacy unfinished rows have no marker and are also safely recoverable.
+    return (prior["state"] or "") != f"running:{os.getpid()}"
+
+
 def upsert(con: sqlite3.Connection, jobs: list[Job],
            run_id: int | None = None) -> tuple[list[Job], list[Job]]:
     """Insert or refresh. Returns (new_jobs, seen_again)."""
@@ -386,8 +578,9 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
         jobs = sorted(jobs, key=lambda j: 0 if legacy_urls.get(j.group_key) == j.url else 1)
     with closing(con.cursor()) as cur:
         for j in jobs:
+            _repair_blank_company_identity(cur, j)
             _repair_same_url_identity(cur, j)
-            cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
+            cur.execute("SELECT uid, status, first_seen_run FROM jobs WHERE uid=?", (j.uid,))
             row = cur.fetchone()
             if row is None and j.uid != j.group_key:
                 # No row under the new uid. Look for a LEGACY row in this group
@@ -415,22 +608,40 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                                     (j.uid, legacy["uid"]))
                         cur.execute("UPDATE OR REPLACE sightings SET uid=? WHERE uid=?",
                                     (j.uid, legacy["uid"]))
-                        cur.execute("SELECT uid, status FROM jobs WHERE uid=?", (j.uid,))
+                        cur.execute("SELECT uid, status, first_seen_run FROM jobs WHERE uid=?",
+                                    (j.uid,))
                         row = cur.fetchone()
                     except sqlite3.IntegrityError:
                         row = None
             if row:
+                recovered_new = _recover_abandoned_newness(cur, row, run_id)
                 # url/title/location/description are REFRESHED, not frozen at
                 # first sighting. A board that edits a title or re-issues a
                 # posting under a new URL used to leave the row pointing at a
                 # dead link forever. delisted_on is cleared: seeing it again
                 # means it is live again.
                 cur.execute(
-                    "UPDATE jobs SET last_seen=?, seen_count=seen_count+1, score=?, "
-                    "gate=?, reasons=?, comp_min=COALESCE(?,comp_min), "
-                    "comp_max=COALESCE(?,comp_max), url=?, title=?, location=?, "
+                    "UPDATE jobs SET last_seen=?, seen_count=seen_count+1, "
+                    # Human action turns the verdict into historical evidence:
+                    # what the role looked like when it was applied to, rejected,
+                    # or ignored. A later pull still refreshes whether the posting
+                    # is alive and what the board currently says, but must not
+                    # rewrite that recorded decision underneath the user.
+                    "score=CASE WHEN status IN ('applied','rejected','ignored') "
+                    "THEN score ELSE ? END, "
+                    "gate=CASE WHEN status IN ('applied','rejected','ignored') "
+                    "THEN gate ELSE ? END, "
+                    "reasons=CASE WHEN status IN ('applied','rejected','ignored') "
+                    "THEN reasons ELSE ? END, "
+                    # A band is one claim, not two independent facts. Fieldwise
+                    # COALESCE combined a fresh max-only board value with a stale
+                    # old minimum and invented a range no source had published.
+                    "comp_min=CASE WHEN ?=1 THEN ? ELSE comp_min END, "
+                    "comp_max=CASE WHEN ?=1 THEN ? ELSE comp_max END, "
+                    "url=?, title=?, location=?, "
                     "description=COALESCE(NULLIF(?,''),description), "
                     "source=?, board=COALESCE(NULLIF(?,''),board), group_key=?, "
+                    "first_seen_run=CASE WHEN ?=1 THEN ? ELSE first_seen_run END, "
                     "last_seen_run=COALESCE(?,last_seen_run), "
                     # Heal rows stored before this column existed, but never let a
                     # later aggregator sighting (which carries no registry lane)
@@ -444,20 +655,17 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     # re-reported it as remote, and each `rescore` re-judged it as
                     # onsite and dropped it on location.
                     #
-                    # The heal is deliberately ONE-WAY. Sources disagree about
-                    # what False means: adapters.py:118 writes None when the board
-                    # said nothing, while aggregators.py:102/:321/:512 write
-                    # bool(payload.get("remote")), which is False for "absent" as
-                    # much as for "not remote". A plain COALESCE let one of those
-                    # erase a True established elsewhere, and four uids in a real
-                    # database are seen from two sources at once. So: establish a
-                    # True from nothing, record a False when nothing was known,
-                    # never downgrade a known True. location_verdict still reads
-                    # the location text independently, so a role that genuinely
-                    # stops being remote is not pinned.
+                    # Aggregator evidence is deliberately ONE-WAY. Several feeds
+                    # encode both "not remote" and "field absent" as False, so
+                    # they may establish False from NULL but never erase a known
+                    # True. A registry-backed employer ATS is authoritative in the
+                    # other direction: its explicit True -> False edit must clear
+                    # stale state or rescore will keep treating an onsite role as
+                    # remote. The third argument below selects that trusted path.
                     "remote_flag=CASE WHEN ? IS NULL THEN remote_flag "
                     "WHEN ? = 1 THEN 1 "
-                    "WHEN remote_flag IS NULL THEN ? ELSE remote_flag END, "
+                    "WHEN ? = 1 THEN 0 "
+                    "WHEN remote_flag IS NULL THEN 0 ELSE remote_flag END, "
                     # The same omission, three more times over. Every one of
                     # these is read by score(), so leaving it out of the UPDATE
                     # makes `pull` and `rescore` disagree on a row nobody
@@ -469,30 +677,53 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     # cannot blank what another one established.
                     "employer_tier=COALESCE(NULLIF(?,''),employer_tier), "
                     "department=COALESCE(NULLIF(?,''),department), "
-                    "comp_text=COALESCE(NULLIF(?,''),comp_text), "
+                    "comp_text=CASE WHEN ?=1 THEN ? "
+                    "ELSE COALESCE(NULLIF(?,''),comp_text) END, "
+                    # A fresh resolved band replaces the value above, so its
+                    # provenance must travel with it.  `absent` never erases a
+                    # source already established by an earlier sighting.
+                    "comp_source=CASE WHEN ?=1 THEN ? "
+                    "WHEN comp_min IS NULL AND comp_max IS NULL AND ?='absent' "
+                    "THEN 'absent' ELSE comp_source END, "
                     "rails_exempt=COALESCE(?,rails_exempt), "
+                    # Evidence is tri-state: NULL means never checked, empty means
+                    # checked with no result, non-empty is a resolved employer URL.
+                    # A blank sighting may advance NULL -> empty, but never erases a
+                    # URL another sighting already resolved.
+                    "url_direct=CASE WHEN ? IS NULL THEN url_direct "
+                    "WHEN ? <> '' THEN ? WHEN url_direct IS NULL THEN '' "
+                    "ELSE url_direct END, "
+                    "company_site=CASE WHEN ? IS NULL THEN company_site "
+                    "WHEN ? <> '' THEN ? WHEN company_site IS NULL THEN '' "
+                    "ELSE company_site END, "
                     "delisted_on=NULL, misses=0, miss_on=NULL WHERE uid=?",
                     (today, j.score, j.gate, " | ".join(j.reasons),
-                     j.comp_min, j.comp_max, j.url, j.title, j.location,
-                     j.description[:DESCRIPTION_LIMIT], j.source, j.board, j.group_key, run_id,
+                     _resolved_comp(j), j.comp_min, _resolved_comp(j), j.comp_max,
+                     j.url, j.title, j.location,
+                     j.description[:DESCRIPTION_LIMIT], j.source, j.board, j.group_key,
+                     int(recovered_new), run_id, run_id,
                      j.registry_lane,
-                     *( (None,) * 3 if j.remote_flag is None
-                        else (int(j.remote_flag),) * 3 ),
-                     j.employer_tier, j.department, j.comp_text,
+                     *_remote_sql_args(j.remote_flag, j.source, j.board),
+                     j.employer_tier, j.department,
+                     _resolved_comp(j), j.comp_text, j.comp_text,
+                     _resolved_comp(j), j.comp_source, j.comp_source,
                      None if j.rails_exempt is None else int(j.rails_exempt),
+                     j.url_direct, j.url_direct, j.url_direct,
+                     j.company_site, j.company_site, j.company_site,
                      j.uid),
                 )
-                again.append(j)
+                (new if recovered_new else again).append(j)
             else:
                 cur.execute(
                     "INSERT INTO jobs (uid,group_key,board,company,title,url,location,source,lane,"
-                    "employer_tier,posted_at,department,comp_min,comp_max,comp_text,"
+                    "employer_tier,posted_at,department,comp_min,comp_max,comp_text,comp_source,"
                     "score,gate,reasons,description,first_seen,last_seen,first_seen_run,last_seen_run,"
                     "remote_flag,rails_exempt,url_direct,company_site,registry_lane) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (j.uid, j.group_key, j.board, j.company, j.title, j.url, j.location, j.source,
                      j.lane, j.employer_tier, j.posted_at, j.department, j.comp_min,
-                     j.comp_max, j.comp_text, j.score, j.gate, " | ".join(j.reasons),
+                     j.comp_max, j.comp_text, j.comp_source, j.score, j.gate,
+                     " | ".join(j.reasons),
                      j.description[:DESCRIPTION_LIMIT], today, today, run_id, run_id,
                      None if j.remote_flag is None else int(j.remote_flag),
                      int(bool(j.rails_exempt)), j.url_direct, j.company_site,
@@ -566,7 +797,14 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
             # with score 0, and a company floor left a rejected req reading
             # SLOT-BLOCKED. stats() counts by gate, so an application the user
             # made is then tallied as a role that never qualified.
-            cur.execute("UPDATE jobs SET score=?, gate=?, reasons=?, last_seen=?, "
+            cur.execute(
+                        "UPDATE jobs SET "
+                        "score=CASE WHEN status IN ('applied','rejected','ignored') "
+                        "THEN score ELSE ? END, "
+                        "gate=CASE WHEN status IN ('applied','rejected','ignored') "
+                        "THEN gate ELSE ? END, "
+                        "reasons=CASE WHEN status IN ('applied','rejected','ignored') "
+                        "THEN reasons ELSE ? END, last_seen=?, "
                         "delisted_on=NULL, misses=0, miss_on=NULL, "
                         # A demotion IS a sighting. Without this, last_seen
                         # advanced on every pull while seen_count stood still,
@@ -575,7 +813,18 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
                         "seen_count=COALESCE(seen_count,0)+1, "
                         "employer_tier=COALESCE(NULLIF(?,''),employer_tier), "
                         "department=COALESCE(NULLIF(?,''),department), "
-                        "comp_text=COALESCE(NULLIF(?,''),comp_text), "
+                        # Demoted sightings never pass through upsert, but the
+                        # scorer may have resolved a fresh band before a company
+                        # floor moved the role to SLOT-BLOCKED.  Persist the
+                        # inputs used for that verdict or the next rescore reads
+                        # an older posting than the row claims to describe.
+                        "comp_min=CASE WHEN ?=1 THEN ? ELSE comp_min END, "
+                        "comp_max=CASE WHEN ?=1 THEN ? ELSE comp_max END, "
+                        "comp_text=CASE WHEN ?=1 THEN ? "
+                        "ELSE COALESCE(NULLIF(?,''),comp_text) END, "
+                        "comp_source=CASE WHEN ?=1 THEN ? "
+                        "WHEN comp_min IS NULL AND comp_max IS NULL AND ?='absent' "
+                        "THEN 'absent' ELSE comp_source END, "
                         "location=COALESCE(NULLIF(?,''),location), "
                         # The BODY is a scorer input too - lanes fall back to
                         # matching it when the title does not - so leaving it out
@@ -591,20 +840,33 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
                         "rails_exempt=COALESCE(?,rails_exempt), "
                         "remote_flag=CASE WHEN ? IS NULL THEN remote_flag "
                         "WHEN ? = 1 THEN 1 "
-                        "WHEN remote_flag IS NULL THEN ? ELSE remote_flag END "
-                        "WHERE uid=? AND status NOT IN ('applied','rejected','ignored')",
+                        "WHEN ? = 1 THEN 0 "
+                        "WHEN remote_flag IS NULL THEN 0 ELSE remote_flag END, "
+                        "url_direct=CASE WHEN ? IS NULL THEN url_direct "
+                        "WHEN ? <> '' THEN ? WHEN url_direct IS NULL THEN '' "
+                        "ELSE url_direct END, "
+                        "company_site=CASE WHEN ? IS NULL THEN company_site "
+                        "WHEN ? <> '' THEN ? WHEN company_site IS NULL THEN '' "
+                        "ELSE company_site END WHERE uid=?",
                         (score, gate, reasons, today,
-                         dj.employer_tier, dj.department, dj.comp_text, dj.location,
+                         dj.employer_tier, dj.department,
+                         _resolved_comp(dj), dj.comp_min,
+                         _resolved_comp(dj), dj.comp_max,
+                         _resolved_comp(dj), dj.comp_text, dj.comp_text,
+                         _resolved_comp(dj), dj.comp_source, dj.comp_source,
+                         dj.location,
                          (dj.description or "")[:DESCRIPTION_LIMIT], dj.url,
                          dj.registry_lane,
                          None if dj.rails_exempt is None else int(dj.rails_exempt),
-                         *((None,) * 3 if dj.remote_flag is None
-                           else (int(dj.remote_flag),) * 3),
+                         *_remote_sql_args(dj.remote_flag, dj.source, dj.board),
+                         dj.url_direct, dj.url_direct, dj.url_direct,
+                         dj.company_site, dj.company_site, dj.company_site,
                          uid))
-            if cur.rowcount and dj.source:
+            updated = cur.rowcount
+            if updated and dj.source:
                 cur.execute("INSERT OR REPLACE INTO sightings (uid, source, url, seen_on) "
                             "VALUES (?,?,?,?)", (uid, dj.source, dj.url, today))
-            dem += cur.rowcount
+            dem += updated
         if not healthy_boards and not healthy_feeds:
             con.commit()
             return 0, dem
@@ -720,8 +982,9 @@ def record_health(con: sqlite3.Connection, source: str, count: int, error: str |
 
 
 def start_run(con: sqlite3.Connection) -> int:
-    cur = con.execute("INSERT INTO runs (started) VALUES (?)",
-                      (datetime.now().isoformat(timespec="seconds"),))
+    cur = con.execute("INSERT INTO runs (started, state) VALUES (?,?)",
+                      (datetime.now().isoformat(timespec="seconds"),
+                       f"running:{os.getpid()}"))
     con.commit()
     return cur.lastrowid
 
@@ -729,7 +992,8 @@ def start_run(con: sqlite3.Connection) -> int:
 def finish_run(con: sqlite3.Connection, run_id: int, pulled: int, new: int,
                qualified: int, detail: dict) -> None:
     con.execute(
-        "UPDATE runs SET finished=?, pulled=?, new=?, qualified=?, detail=? WHERE run_id=?",
+        "UPDATE runs SET finished=?, pulled=?, new=?, qualified=?, detail=?, state='finished' "
+        "WHERE run_id=?",
         (datetime.now().isoformat(timespec="seconds"), pulled, new, qualified,
          json.dumps(detail)[:60000], run_id),
     )
@@ -738,7 +1002,7 @@ def finish_run(con: sqlite3.Connection, run_id: int, pulled: int, new: int,
 
 def query(con: sqlite3.Connection, *, gates: tuple[str, ...] = ("QUALIFIED", "VERIFY"),
           min_score: int = 0, new_only: bool = False, since: str | None = None,
-          limit: int = 200) -> list[sqlite3.Row]:
+          limit: int | None = None) -> list[sqlite3.Row]:
     sql = ("SELECT * FROM jobs WHERE gate IN (%s) AND score >= ? AND status NOT IN "
            "('rejected','ignored','applied') AND delisted_on IS NULL"
            % ",".join("?" * len(gates)))
@@ -748,8 +1012,12 @@ def query(con: sqlite3.Connection, *, gates: tuple[str, ...] = ("QUALIFIED", "VE
     if since:
         sql += " AND first_seen >= ?"
         params.append(since)
-    sql += " ORDER BY score DESC, first_seen DESC LIMIT ?"
-    params.append(limit)
+    sql += " ORDER BY score DESC, first_seen DESC"
+    if limit is not None:
+        if limit < 0:
+            raise ValueError("limit must be non-negative or None")
+        sql += " LIMIT ?"
+        params.append(limit)
     return list(con.execute(sql, params))
 
 
@@ -827,7 +1095,6 @@ def record_application_stage(con: sqlite3.Connection, uid: str, stage: str, *,
         raise ValueError(f"unknown application stage {stage!r}. Use one of: "
                          f"{', '.join(APPLICATION_STAGES)}")
     event_at = _event_time(on)
-    set_status(con, uid, _APPLICATION_DB_STATUS[stage], notes, at=event_at)
     kind = f"application:{stage}"
     event_detail = notes if detail is None else detail
     exists = con.execute(
@@ -835,6 +1102,17 @@ def record_application_stage(con: sqlite3.Connection, uid: str, stage: str, *,
         "AND detail=? LIMIT 1", (uid, kind, event_at, event_detail or "")).fetchone()
     if exists:
         return False
+    latest = con.execute(
+        "SELECT at FROM events WHERE uid=? AND kind LIKE 'application:%' "
+        "ORDER BY at DESC, event_id DESC LIMIT 1", (uid,)).fetchone()
+    # Evidence files are often backfilled out of order. Keep every historical
+    # event, but only the chronologically newest one may drive the row's CURRENT
+    # suppression status. Replaying an old applied entry after a later rejection
+    # used to regress rejected -> applied before discovering it was a duplicate.
+    if latest is None or event_at >= latest["at"]:
+        set_status(con, uid, _APPLICATION_DB_STATUS[stage], notes, at=event_at)
+    elif con.execute("SELECT 1 FROM jobs WHERE uid=?", (uid,)).fetchone() is None:
+        raise KeyError(f"no posting with uid {uid!r} (check the id in the report)")
     con.execute("INSERT INTO events (uid, at, kind, detail) VALUES (?,?,?,?)",
                 (uid, event_at, kind, event_detail or ""))
     con.commit()

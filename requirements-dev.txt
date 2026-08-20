@@ -9,3 +9,8 @@ pytest>=8.0
 # nothing. It was installed by hand locally and absent in CI, so the suite passed
 # here and failed there for four commits.
 pyflakes>=3.0
+# CI audits the declared runtime graph separately from whichever unrelated
+# packages happen to be installed in a developer's long-lived virtualenv.
+pip-audit==2.10.1
+# tomllib joined the standard library in 3.11; the CI matrix still supports 3.10.
+tomli>=2.0; python_version < "3.11"

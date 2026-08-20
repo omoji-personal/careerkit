@@ -66,6 +66,7 @@ check, break the thing it watches and confirm it fails.
 ## The guide
 
 `guide/careerkit-guide.html` is the source; `guide/Careerkit-Guide.pdf` is built
-from it with `node guide/build-pdf.mjs` (needs `npm install`). System fonts
-only, so it renders identically offline. If you change the guide, rebuild the
+with Node 20 or newer: `npm ci`, `npx playwright install chromium`, then
+`npm run guide`. The lockfile pins Playwright and its matching Chromium build;
+local assets keep the print itself offline. If you change the guide, rebuild the
 PDF in the same commit.

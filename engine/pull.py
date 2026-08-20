@@ -17,11 +17,14 @@ be applied twice and being wrong the second time looks exactly like working.
 from __future__ import annotations
 
 from collections import Counter
+from copy import copy
+from datetime import date
 
 from . import adapters as _adapters
 from . import store
 from .adapters import run_adapter
 from .aggregators import run_feed
+from .models import ATS_SOURCES
 from .report import write_report
 
 
@@ -106,6 +109,10 @@ def fetch_all(reg: dict, keys: dict, con=None, *, employers_only: bool = False,
 #: only the user's own preference stopped it; EXCLUDED means a rail killed it.
 _DEMOTION_ORDER = {"EXCLUDED": 0, "SLOT-BLOCKED": 1}
 
+# Surfaced verdicts, weakest first.  A QUALIFIED sighting is the stronger
+# decision even when a VERIFY copy happens to carry a numerically higher score.
+_SURFACE_ORDER = {"VERIFY": 0, "QUALIFIED": 1}
+
 
 def clip_description(job) -> None:
     """Cut the body to what will actually be stored, BEFORE it is scored.
@@ -146,6 +153,120 @@ def pick_demoted(scored: list, kept_uids: set) -> dict:
     return best
 
 
+def _surface_rank(job) -> tuple:
+    """Deterministic preference for two surfaced copies of one posting.
+
+    Gate and score are the verdict.  Everything after them chooses the richest
+    whole sighting without allowing fetch order to decide which location,
+    description, compensation claim, or source reaches the database.  The
+    final textual tuple is only a stable tie-breaker; no two unequal records
+    are left to Python's stable (and therefore input-order-sensitive) ``max``.
+    """
+    source = (job.source or "").lower().split(":", 1)[0]
+    authoritative = source in ATS_SOURCES and bool((job.board or "").strip())
+    comp_known = job.comp_min is not None or job.comp_max is not None
+    evidence_fields = (
+        job.location, job.description, job.posted_at, job.department,
+        job.comp_text, job.url_direct, job.company_site, job.board,
+        job.registry_lane, job.employer_tier,
+    )
+    richness = sum(value not in (None, "") for value in evidence_fields)
+    stable = tuple(str(value or "") for value in (
+        job.source, job.url, job.company, job.title, job.location,
+        job.description, job.posted_at, job.department, job.remote_flag,
+        job.comp_min, job.comp_max, job.comp_text, job.comp_source,
+        job.external_id, job.url_direct, job.company_site, job.lane,
+        job.registry_lane, job.rails_exempt, job.employer_tier, job.board,
+        " | ".join(job.reasons or []),
+    ))
+    return (
+        _SURFACE_ORDER[job.gate], job.score,
+        int(authoritative), richness, int(comp_known),
+        int(job.remote_flag is not None), len(job.description or ""), stable,
+    )
+
+
+def pick_surfaced(scored: list) -> list:
+    """Collapse surfaced sightings to one deterministic record per uid.
+
+    ``store.upsert`` updates a duplicate uid once per list item, so its former
+    input was effectively last-write-wins.  Feed response order then decided
+    whether the stored row was QUALIFIED or VERIFY and which copy supplied its
+    evidence.  Select the strongest verdict first and the richest whole
+    sighting within that verdict.  Direct-apply and company-site URLs are
+    provenance rather than scorer inputs, so complementary values may safely be
+    filled from another copy without creating a synthetic scoring verdict.
+
+    Copies are shallow-cloned so enriching the winner cannot mutate an adapter's
+    object (or make a second call with the reverse order observe different data).
+    """
+    grouped: dict[str, list] = {}
+    for job in scored:
+        if job.gate in _SURFACE_ORDER:
+            grouped.setdefault(job.uid, []).append(job)
+
+    collapsed = []
+    for uid in sorted(grouped):
+        sightings = grouped[uid]
+        winner = max(sightings, key=_surface_rank)
+        merged = copy(winner)
+        merged.reasons = list(winner.reasons or [])
+        merged.raw = dict(winner.raw or {})
+
+        # These are tri-state evidence fields: None means not checked, empty
+        # means checked without a result, and a URL is positive evidence.  A
+        # positive value wins; otherwise preserve an explicit checked-empty
+        # result rather than degrading it back to unknown.
+        for field in ("url_direct", "company_site"):
+            candidates = [j for j in sightings if getattr(j, field, None)]
+            if candidates:
+                setattr(merged, field,
+                        getattr(max(candidates, key=_surface_rank), field))
+            elif any(getattr(j, field, None) == "" for j in sightings):
+                setattr(merged, field, "")
+
+        collapsed.append(merged)
+    return collapsed
+
+
+def record_surfaced_sightings(con, scored: list, kept_uids: set[str]) -> None:
+    """Keep every source's provenance after duplicate UIDs are collapsed.
+
+    The jobs table needs one canonical row per UID, but the sightings table is
+    explicitly source provenance.  Passing only the canonical record to upsert
+    must not make corroborating feeds disappear.  Its schema stores one URL per
+    ``(uid, source)``, so repeated copies from the same source are reduced with
+    a stable key while distinct sources all survive.
+    """
+    per_source: dict[tuple[str, str], object] = {}
+
+    def rank(job) -> tuple:
+        surfaced = job.gate in _SURFACE_ORDER
+        return (
+            int(surfaced), _SURFACE_ORDER.get(job.gate, -1), job.score,
+            int(bool(job.url_direct)), int(bool(job.company_site)),
+            len(job.description or ""), job.url or "",
+        )
+
+    for job in scored:
+        if job.uid not in kept_uids:
+            continue
+        key = (job.uid, job.source or "")
+        current = per_source.get(key)
+        if current is None or rank(job) > rank(current):
+            per_source[key] = job
+
+    today = date.today().isoformat()
+    con.executemany(
+        "INSERT INTO sightings (uid,source,url,seen_on) VALUES (?,?,?,?) "
+        "ON CONFLICT(uid,source) DO UPDATE SET url=excluded.url, "
+        "seen_on=MAX(sightings.seen_on,excluded.seen_on)",
+        [(uid, source, per_source[(uid, source)].url, today)
+         for uid, source in sorted(per_source)],
+    )
+    con.commit()
+
+
 def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = False,
              feeds_only: bool = False, tier=None, min_score: int = 0,
              discovered=(), echo=print) -> dict:
@@ -173,11 +294,17 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
             label = j.reasons[0].split(":")[0].strip()
             excluded[label if len(label) <= 60 else label[:59] + "…"] += 1
 
-    keep = [j for j in scored if j.gate in ("QUALIFIED", "VERIFY")]
+    # A UID can be surfaced by several feeds with different verdicts and
+    # different amounts of evidence.  Collapse them before upsert; otherwise
+    # the final fetched copy silently wins and the database changes when an API
+    # returns the same records in a different order.
+    keep = pick_surfaced(scored)
     # run_id is what makes "new" mean "first seen THIS run" rather than "first
     # seen today". Omitting it is silent: rows land with no run stamp and the
     # report falls back to the date comparison for the rest of their life.
     new, _again = store.upsert(con, keep, run_id=run_id)
+    kept_uids = {j.uid for j in keep}
+    record_surfaced_sightings(con, scored, kept_uids)
 
     # Close the loop: a posting that STOPPED qualifying is written back, and a
     # posting that vanished from a healthy board is marked delisted. Without
@@ -186,7 +313,6 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
     # copy listed under a foreign location scores EXCLUDED while the clean copy
     # scores QUALIFIED. Writing the demotion back blindly overwrote the row
     # upsert had just created and deleted the role on the run it was found.
-    kept_uids = {j.uid for j in keep}
     demoted = pick_demoted(scored, kept_uids)
     n_delisted, n_demoted = store.reconcile(
         con, demoted, fetched["healthy_boards"], fetched["healthy_feeds"],
@@ -198,7 +324,10 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
         known_boards={(e.get("ats"), e.get("name") or e.get("slug", ""))
                       for e in reg.get("employers", []) if e.get("active", True)})
 
-    rows = store.query(con, min_score=min_score, limit=300)
+    # Reports and exports are the user's complete decision queue.  A fixed LIMIT
+    # silently dropped every active row below 300, precisely the low-scoring tail
+    # the audit workflow needs in order to find false negatives.
+    rows = store.query(con, min_score=min_score)
     health = list(con.execute(
         "SELECT * FROM source_health ORDER BY consecutive_failures DESC, source"))
     detail = {"pulled": len(all_jobs), "sources_ok": fetched["sources_ok"],
@@ -243,7 +372,7 @@ def rebuild_report(con, *, min_score: int = 0, echo=print):
     heuristic there and announced week-old postings as new. Third time this
     class of duplication has cost something, so it lives here now."""
     import json as _json
-    rows = store.query(con, min_score=min_score, limit=300)
+    rows = store.query(con, min_score=min_score)
     health = list(con.execute(
         "SELECT * FROM source_health ORDER BY consecutive_failures DESC, source"))
     last = con.execute("SELECT run_id, detail FROM runs WHERE finished IS NOT NULL "
@@ -274,6 +403,13 @@ def job_from_row(r):
                description=r["description"] or "", posted_at=r["posted_at"] or "",
                department=r["department"] or "", comp_min=r["comp_min"],
                comp_max=r["comp_max"], comp_text=r["comp_text"] or "",
+               # A migrated row with figures but no recorded provenance must
+               # remain honest: rescore may normalize it, but cannot retroactively
+               # claim the board supplied a value that may have come from prose.
+               comp_source=((r["comp_source"] or "unknown")
+                            if "comp_source" in keys and (r["comp_min"] or r["comp_max"])
+                            else ((r["comp_source"] or "") if "comp_source" in keys else
+                                  ("unknown" if (r["comp_min"] or r["comp_max"]) else ""))),
                lane=r["lane"] or "", employer_tier=r["employer_tier"] or "",
                registry_lane=(r["registry_lane"] or "") if "registry_lane" in keys else "",
                board=r["board"] if "board" in keys else "",
@@ -283,7 +419,8 @@ def job_from_row(r):
                company_site=r["company_site"] if "company_site" in keys else "")
 
 
-def rescore(con, profile, *, echo=print) -> dict:
+def rescore(con, profile, *, registry_exempt_boards: set[str] | None = None,
+            echo=print) -> dict:
     """Re-judge every stored posting against the CURRENT profile.
 
     Changing your criteria only affected postings that happened to be re-sighted
@@ -307,15 +444,28 @@ def rescore(con, profile, *, echo=print) -> dict:
     # and history is not subject to the current profile.
     rows = list(con.execute(
         "SELECT * FROM jobs WHERE status NOT IN ('applied','rejected','ignored')"))
+    authoritative_exemptions = (
+        {str(board).lower() for board in registry_exempt_boards}
+        if registry_exempt_boards is not None else None
+    )
     changed, dropped = 0, 0
     for r in rows:
         j = job_from_row(r)
+        # Released builds persisted a profile-derived dream-company exemption
+        # into this registry field. When the caller supplies the current registry,
+        # repair that ambiguity before scoring: only an explicit board carve-out
+        # may survive a criteria change. ``None`` preserves the library API's
+        # historical behavior for callers that do not have registry context.
+        if authoritative_exemptions is not None:
+            j.rails_exempt = (j.board or "").lower() in authoritative_exemptions
+        exempt_changed = int(bool(j.rails_exempt)) != int(bool(r["rails_exempt"]))
         score(j, profile)
         # score() resolves comp (parsing the body, annualising hourly figures), so
         # persist it here too. Leaving it out of the UPDATE meant a rescore could
         # never repair a row whose comp had been dropped, and the report kept
         # printing "Comp not stated" above a reasons line quoting the band.
-        comp_changed = (j.comp_min, j.comp_max) != (r["comp_min"], r["comp_max"])
+        comp_changed = ((j.comp_min, j.comp_max, j.comp_source)
+                        != (r["comp_min"], r["comp_max"], r["comp_source"] or ""))
         # Reasons are part of the verdict, not decoration. A row whose gate and
         # score are unchanged can still be explained differently under new rules,
         # and skipping the write left the database asserting a reason the current
@@ -323,16 +473,18 @@ def rescore(con, profile, *, echo=print) -> dict:
         # the row it was rendered from, one layer earlier.
         reasons_changed = " | ".join(j.reasons) != (r["reasons"] or "")
         if (j.gate == r["gate"] and j.score == r["score"]
-                and not comp_changed and not reasons_changed):
+                and not comp_changed and not reasons_changed and not exempt_changed):
             continue
         if j.gate != r["gate"] or j.score != r["score"]:
             changed += 1
             if r["gate"] in ("QUALIFIED", "VERIFY") and j.gate not in ("QUALIFIED", "VERIFY"):
                 dropped += 1
-        con.execute("UPDATE jobs SET gate=?, score=?, reasons=?, lane=?, comp_min=?, comp_max=? "
+        con.execute("UPDATE jobs SET gate=?, score=?, reasons=?, lane=?, comp_min=?, comp_max=?, "
+                    "comp_source=?, rails_exempt=? "
                     "WHERE uid=?",
                     (j.gate, j.score, " | ".join(j.reasons), j.lane or r["lane"],
-                     j.comp_min, j.comp_max, r["uid"]))
+                     j.comp_min, j.comp_max, j.comp_source,
+                     int(bool(j.rails_exempt)), r["uid"]))
     con.commit()
     echo(f"  re-scored {len(rows)} stored postings against the current profile")
     echo(f"  {changed} changed verdict, {dropped} no longer surface")

@@ -1,9 +1,9 @@
 # CareerKit, the guide
 
 **A job search engine you operate by talking to it.** It polls 18 employer
-applicant tracking platforms directly plus 14 public job feeds, scores every
-posting against rules you wrote yourself, and helps you evaluate, apply, prepare
-and track from there.
+applicant tracking platforms directly plus 13 usable public job feeds (and one
+security-gated dormant adapter), scores every posting against rules you wrote
+yourself, and helps you evaluate, apply, prepare and track from there.
 
 Against one set of criteria it read 19,550 postings and surfaced 161.
 
@@ -26,8 +26,8 @@ folder.** This file is the short version, and the map.
    `/ingest` for anything you found elsewhere.
 6. **Calibration.** Why `/audit` exists, and why a filter you never review will
    quietly cost you jobs.
-7. **What leaves your machine.** Precisely, including the one feed that carries
-   your email.
+7. **What leaves your machine.** Precisely, including keyed-feed credentials
+   and the USAJobs email header.
 8. **Failure modes worth knowing.** How the engine tells a dead board from a
    quiet one, and why zero results is a claim that has to be earned.
 9. **Reference.** Every CLI command, the layout, how to share it.
@@ -66,10 +66,15 @@ is aimed at that failure mode rather than at the happy path.
 
 ## Rebuilding the PDF
 
+Requires Node 20 or newer.
+
 ```
-npm install
-node guide/build-pdf.mjs
+npm ci
+npx playwright install chromium
+npm run guide
 ```
 
-Source is `careerkit-guide.html`. System fonts only, so it renders identically
-offline. If you change the guide, rebuild the PDF in the same commit.
+Source is `careerkit-guide.html`. The lockfile pins the renderer library and its
+matching Chromium build; the guide uses local assets and makes no network
+requests while printing. If you change the guide, rebuild the PDF in the same
+commit.

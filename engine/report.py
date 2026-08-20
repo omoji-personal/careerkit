@@ -13,8 +13,26 @@ from pathlib import Path
 import os
 import datetime as _dt
 
-from .models import ATS_SOURCES, sanitize_external
+from .models import ATS_SOURCES, sanitize_external, sanitize_external_url
 OUT_DIR = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "out"
+
+_URL_OMITTED = "URL omitted (invalid or unsafe external target)"
+
+
+def _display_url(value: str) -> str:
+    """A URL safe to place in Markdown, or an explicit non-link placeholder."""
+    return sanitize_external_url(value) or _URL_OMITTED
+
+
+def _field(value, limit: int = 120) -> str:
+    """Sanitize an inline metadata value, including structural pipe syntax."""
+    text = "" if value is None else str(value)
+    return sanitize_external(text, limit).replace("|", "&#124;")
+
+
+def _table_cell(value, limit: int = 120) -> str:
+    """Flatten untrusted text and prevent it from opening a Markdown table cell."""
+    return _field(value, limit)
 
 
 def is_new(r, current_run: int | None = None) -> bool:
@@ -65,10 +83,13 @@ def _sighting_rank(r) -> tuple:
     carrying the most usable detail, then uid so the result is total and two
     runs over unchanged data produce byte-identical reports."""
     src = (r["source"] or "").lower()
+    keys = set(r.keys()) if hasattr(r, "keys") else set()
+    comp_min = r["comp_min"] if "comp_min" in keys else None
+    comp_max = r["comp_max"] if "comp_max" in keys else None
     return (
         -(r["score"] or 0),
         0 if src in ATS_SOURCES else 1,
-        0 if r["comp_min"] else 1,
+        0 if comp_min is not None or comp_max is not None else 1,
         0 if (r["location"] or "").strip() else 1,
         -len(r["description"] or "") if "description" in r.keys() else 0,
         r["uid"] or "",
@@ -97,13 +118,30 @@ def _group(rows: list[sqlite3.Row]) -> list[list[sqlite3.Row]]:
     return out
 
 
+def _comp_display(r: sqlite3.Row) -> str:
+    """Render both the band and the confidence of its provenance."""
+    lo, hi = r["comp_min"], r["comp_max"]
+    if lo is None and hi is None:
+        return "not stated"
+    if lo is None:
+        comp = f"up to ${hi:,}"
+    elif hi is None:
+        comp = f"${lo:,}+"
+    else:
+        comp = f"${lo:,} - ${hi:,}"
+    keys = r.keys() if hasattr(r, "keys") else ()
+    source = (r["comp_source"] or "unknown") if "comp_source" in keys else "unknown"
+    label = {
+        "board": "board field",
+        "body": "parsed from body",
+        "unknown": "source unknown",
+    }.get(source, "source unknown")
+    return f"{comp} ({label})"
+
+
 def _row_block(rows: list[sqlite3.Row], idx: int, new_uids: set | None = None) -> str:
     r = rows[0]
-    comp = ""
-    if r["comp_min"]:
-        comp = f"${r['comp_min']:,}" + (f" - ${r['comp_max']:,}" if r["comp_max"] else "+")
-    else:
-        comp = "not stated"
+    comp = _comp_display(r)
     age = ("NEW" if (r["uid"] in new_uids if new_uids is not None else is_new(r))
            else f"first seen {r['first_seen']}")
     lines = [
@@ -121,10 +159,12 @@ def _row_block(rows: list[sqlite3.Row], idx: int, new_uids: set | None = None) -
         + (" \u26a0 STALE (not sighted in 2+ days - verify live before acting)"
            if str(r["last_seen"] or "")[:10] < (_dt.date.today() - _dt.timedelta(days=2)).isoformat() else ""),
         f"- **Score** {r['score']} | **{r['gate']}** | {age}",
+        f"- **UID** `{r['uid']}`",
         f"- **Location** {sanitize_external(r['location'], 80) or 'not stated'} | **Comp** {comp}",
-        f"- **Source** {r['source']}" + (f" | lane: {r['lane']}" if r["lane"] else ""),
+        f"- **Source** {_field(r['source'], 80)}"
+        + (f" | lane: {_field(r['lane'], 80)}" if r["lane"] else ""),
         f"- **Why** {sanitize_external(r['reasons'], 300)}",
-        f"- {r['url']}",
+        f"- {_display_url(r['url'])}",
     ]
     # Surfaced, never used to drop a row: a ghost listing and a small employer
     # with a thin web presence look the same from here, and silently discarding
@@ -145,7 +185,7 @@ def _row_block(rows: list[sqlite3.Row], idx: int, new_uids: set | None = None) -
             lines.append(
                 f"  - {sanitize_external(o['location'], 40) or 'location not stated'} "
                 f"| {o['gate'].lower()} {o['score']} | `{o['uid']}`\n"
-                f"    {o['url']}")
+                f"    {_display_url(o['url'])}")
         if len(rows) > 12:
             lines.append(f"  - ...and {len(rows) - 12} more")
     return "\n".join(lines)
@@ -172,9 +212,10 @@ def _tail_line(rows: list[sqlite3.Row]) -> str:
     else:
         miss = m.split(" | ")[0]
     sib = f" (+{len(rows) - 1} reqs)" if len(rows) > 1 else ""
-    return (f"- {r['score']:>3} · {sanitize_external(r['title'], 70)} - "
-            f"{sanitize_external(r['company'], 40) or 'employer not named'}{sib} · "
-            f"{sanitize_external(miss, 70)} · `{r['uid']}`\n  {r['url']}")
+    return (f"- {r['score']} · **Title** {sanitize_external(r['title'], 70)} · "
+            f"**Company** {sanitize_external(r['company'], 40) or 'employer not named'}{sib} · "
+            f"**Check** {sanitize_external(miss, 70)} · **UID** `{r['uid']}`\n"
+            f"  {_display_url(r['url'])}")
 
 
 def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
@@ -210,7 +251,8 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
 
     if run_detail.get("excluded_breakdown"):
         eb = run_detail["excluded_breakdown"]
-        L += ["**Screened out:** " + ", ".join(f"{k} {v}" for k, v in
+        L += ["**Screened out:** " + ", ".join(
+              f"{_field(k, 80)} {_field(v, 20)}" for k, v in
               sorted(eb.items(), key=lambda x: -x[1])[:8]), ""]
 
     L += ["---", "", "## Qualified", ""]
@@ -238,8 +280,10 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
           "|---|---|---|---|---|"]
     for h in health:
         L.append(
-            f"| {h['source']} | {h['last_ok'] or '-'} | {h['last_count'] or 0} | "
-            f"{h['consecutive_failures']} | {(h['last_error'] or '')[:70]} |"
+            f"| {_table_cell(h['source'], 80)} | {_table_cell(h['last_ok'] or '-', 40)} | "
+            f"{_table_cell(h['last_count'] or 0, 20)} | "
+            f"{_table_cell(h['consecutive_failures'], 20)} | "
+            f"{_table_cell(h['last_error'] or '', 70)} |"
         )
     L += ["",
           "_A source at 0 with no error is live but had nothing in family. A source "
@@ -253,7 +297,8 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
                       and _policy(h["source"][5:])["kind"] == "scraping"
                       and (h["last_count"] or 0) > 0})
     if scraped:
-        L += [f"_Results above include {', '.join(scraped)}, which read public "
+        L += [f"_Results above include {', '.join(_field(s, 60) for s in scraped)}, "
+              "which read public "
               "search pages rather than an official API._", ""]
 
     if run_detail.get("discovered"):
@@ -261,9 +306,26 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
               "_Found by search, resolved to a pollable board, and added to the "
               "registry. These now get polled every run._", ""]
         for d in run_detail["discovered"][:40]:
-            L.append(f"- **{d.get('name')}** - {d.get('ats')}:`{d.get('slug', d.get('tenant',''))}`"
-                     f" ({d.get('open_roles', '?')} open)")
+            name = _field(d.get("name") or "", 100)
+            ats = _field(d.get("ats") or "", 40)
+            slug = _field(d.get("slug", d.get("tenant", "")) or "", 80)
+            count = _field(d.get("open_roles", "?"), 20)
+            L.append(f"- **{name}** - {ats}:`{slug}` ({count} open)")
         L.append("")
+
+    # A hidden logical-state marker lets consistency distinguish a real
+    # post-report database change from SQLite checkpointing identical WAL data
+    # into jobs.db after this file is written.
+    from .consistency import report_state_fingerprint
+    try:
+        state = report_state_fingerprint(con)
+    except sqlite3.OperationalError:
+        # write_report is also a small reusable renderer and its unit fixtures
+        # intentionally pass rows without constructing CareerKit's full schema.
+        # Real CLI connections have already run store.connect() migrations.
+        state = None
+    if state:
+        L += [f"<!-- careerkit-report-state-v1: {state} -->", ""]
 
     path.write_text("\n".join(L))
     # latest.md follows the report EVERY time one is written, not just on a pull.

@@ -84,7 +84,7 @@ search_terms: ["marketing operations", "revenue operations", "marketing automati
                "lifecycle marketing"]
 
 autonomy:
-  submit: ask_each         # ask_each | per_batch  (no standing auto-submit exists)
+  submit: ask_each         # every specific application requires fresh approval
   outreach: draft_only     # draft_only | ask_each
   linkedin_edits: confirm_each
 

@@ -15,9 +15,9 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import median
-from urllib.parse import urlsplit
 
 from . import applied
+from .models import sanitize_external_url
 from .report import OUT_DIR
 
 
@@ -355,11 +355,8 @@ def format_text(snapshot: dict) -> str:
 
 
 def _safe_url(value: str) -> str:
-    try:
-        parsed = urlsplit(value or "")
-    except ValueError:
-        return ""
-    return value if parsed.scheme in {"http", "https"} and parsed.netloc else ""
+    """Use the same untrusted-link policy as the Markdown report."""
+    return sanitize_external_url(value)
 
 
 def write_dashboard(con: sqlite3.Connection, snapshot: dict,
@@ -473,8 +470,19 @@ def write_dashboard(con: sqlite3.Connection, snapshot: dict,
         title = esc(r["title"])
         title_cell = (f'<a href="{esc(url)}" rel="noreferrer noopener">{title}'
                       '<span class="external" aria-hidden="true">↗</span></a>' if url else title)
-        if r["comp_min"]:
-            comp = f'${r["comp_min"]:,}' + (f'–${r["comp_max"]:,}' if r["comp_max"] else '+')
+        lo, hi = r["comp_min"], r["comp_max"]
+        if lo is not None or hi is not None:
+            if lo is None:
+                comp = f'Up to ${hi:,}'
+            elif hi is None:
+                comp = f'${lo:,}+'
+            else:
+                comp = f'${lo:,}-${hi:,}'
+            comp_source = ((r["comp_source"] or "unknown")
+                           if "comp_source" in r.keys() else "unknown")
+            comp += {"board": " · board field", "body": " · parsed from body",
+                     "unknown": " · source unknown"}.get(
+                         comp_source, " · source unknown")
         else:
             comp = "Not stated"
         related = history_by_company.get(applied._norm(r["company"]), [])

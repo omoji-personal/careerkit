@@ -3,8 +3,11 @@
 ## Reporting something
 
 Open a GitHub issue for anything that is not itself sensitive. For a report you
-would rather not publish first, use GitHub's private vulnerability reporting on
-this repository.
+would rather not publish first, do not put exploit details, credentials, or
+personal data in an issue: GitHub private vulnerability reporting is not
+currently enabled for this repository. Open a minimal, non-sensitive issue
+asking the maintainer to provide a private reporting channel. Until one is
+configured, this project does not claim to offer confidential intake.
 
 ## What the threat model actually is
 
@@ -41,8 +44,11 @@ boundary before you start.
 
 Set in `CLAUDE.md` and enforced by the model, not by code:
 
-- Never submits an application. It fills the form and stops; the certification
-  on an application is yours to make.
+- Stops at every submit button by default. An agent click is allowed only while
+  the user is present and gives fresh, explicit approval for that one completed
+  application; no batch or standing submission permission exists. The user
+  handles certification, captcha, and OTP steps directly; the agent never asks
+  to receive, store, or enter an OTP code.
 - Never creates accounts, enters or stores passwords, or solves "prove you are
   human" checks.
 - Never states a fact about you that is not in `profile/claims.md`.
@@ -51,9 +57,11 @@ Set in `CLAUDE.md` and enforced by the model, not by code:
 ### Your data
 
 `profile/`, `data/` and `out/` are gitignored and never leave your machine
-except as described in the README's "What actually leaves your machine". The one
-outbound request carrying anything personal is the USAJobs feed, which requires
-your registered email in a header; that feed is off unless you add a key.
+except as described in the README's "What actually leaves your machine".
+Enabled keyed feeds transmit their configured API credentials or account
+identifiers to their provider; USAJobs additionally requires your registered
+email in a header. Deleting these directories removes CareerKit-owned local
+state, but cannot retract provider requests or erase backups and exports.
 
 Everything the agent reads goes to Anthropic under your own Claude plan's data
 terms. That is inherent to using Claude Code and is stated plainly rather than
@@ -61,10 +69,12 @@ buried.
 
 ### Scraping
 
-Two feeds (`linkedin_guest`, `jobspy`) read public search pages rather than
-official APIs. They are off by default. Enabling them is your decision and the
-terms of use of those sites are yours to read. `SOURCE_POLICY` in
-`engine/aggregators.py` declares what every feed is.
+The optional `linkedin_guest` feed reads public search pages rather than an
+official API and is off by default. The `jobspy` adapter has no supported
+installation while its released dependency graph requires a vulnerable
+`markdownify`; CareerKit refuses that combination before import. Enabling a
+scraper is your decision and the applicable terms are yours to read.
+`SOURCE_POLICY` in `engine/aggregators.py` declares what every feed is.
 
 ## What is not claimed
 

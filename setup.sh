@@ -11,17 +11,21 @@ cd "$(dirname "$0")"
 
 echo "CareerKit setup"
 
-command -v python3 >/dev/null || {
-  echo "MISSING: python3"
+# shellcheck source=scripts/select-python.sh
+. ./scripts/select-python.sh
+careerkit_select_bootstrap_python || {
+  echo "MISSING: Python 3.10 or newer"
   echo "  macOS:   brew install python3      (or download from python.org)"
   echo "  Windows: install from python.org, then run this from Git Bash or WSL"
   exit 1
 }
 
-PYV=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' || {
+PYV=$("${CAREERKIT_BOOTSTRAP_PYTHON[@]}" -c \
+  'import sys; print("%d.%d" % sys.version_info[:2])')
+"${CAREERKIT_BOOTSTRAP_PYTHON[@]}" -c \
+  'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' || {
   echo "MISSING: Python 3.10 or newer (you have $PYV)"; exit 1; }
-echo "  python3 $PYV"
+echo "  ${CAREERKIT_BOOTSTRAP_PYTHON[*]} $PYV"
 
 command -v git >/dev/null || {
   echo "MISSING: git"
@@ -47,32 +51,48 @@ fi
 # The README tells Windows users to run this from Git Bash, where the shell is
 # POSIX but the Python is native, so hardcoding bin/ broke setup for exactly the
 # users least able to diagnose it.
-venv_bin() { [ -d .venv/Scripts ] && echo .venv/Scripts || echo .venv/bin; }
+venv_python() {
+  if [ -x .venv/Scripts/python.exe ]; then
+    echo .venv/Scripts/python.exe
+  elif [ -x .venv/Scripts/python ]; then
+    echo .venv/Scripts/python
+  else
+    echo .venv/bin/python
+  fi
+}
 
-# Gating on "does the folder exist" can never repair a BROKEN venv - the
-# common case after `brew upgrade python`, which leaves the interpreter a
-# dangling symlink. Test that it actually runs, and rebuild if it does not.
-if [ -d .venv ] && ! "$(venv_bin)/python" -c "import sys" >/dev/null 2>&1; then
-  echo "  .venv is broken (interpreter will not run); rebuilding ..."
+# Gating on "does the folder exist" can never repair a broken or obsolete venv.
+# A long-lived 3.9 venv still runs, but keeping it would bypass the >=3.10 floor
+# verified above and let pip silently choose old dependency releases.
+if [ -d .venv ] && ! "$(venv_python)" -c \
+    'import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)' \
+    >/dev/null 2>&1; then
+  echo "  .venv is broken or uses Python older than 3.10; rebuilding ..."
   rm -rf .venv
 fi
 if [ ! -d .venv ]; then
   echo "  creating .venv ..."
-  python3 -m venv .venv || {
+  "${CAREERKIT_BOOTSTRAP_PYTHON[@]}" -m venv .venv || {
     echo "FAILED to create a virtual environment."
     echo "  On Debian/Ubuntu: sudo apt install python3-venv"
     exit 1; }
 fi
-# shellcheck disable=SC1091
-. "$(venv_bin)/activate"
-python -m pip install --quiet --upgrade pip
-python -m pip install --quiet -r requirements-dev.txt
+VENV_PY="$(venv_python)"
+"$VENV_PY" -m pip install --quiet --upgrade pip
+"$VENV_PY" -m pip install --quiet -r requirements-dev.txt
+
+# pip installs and upgrades declared requirements but never removes an optional
+# dependency that disappeared from the file. Migrate the retired vulnerable
+# JobSpy graph out of this CareerKit-owned venv; a future compatible graph with
+# markdownify>=0.14.1 is deliberately left alone.
+"$VENV_PY" scripts/remove_unsafe_jobspy.py
+"$VENV_PY" -m pip check
 echo "  dependencies installed into .venv"
 
 mkdir -p profile data out
 [ -f profile/employers.yaml ] || printf 'employers: []\nfeeds:\n- {name: remotive, active: true}\n- {name: remoteok, active: true}\n- {name: himalayas, active: true}\n- {name: jobicy, active: true}\n- {name: themuse, active: true}\n- {name: weworkremotely, active: true}\n- {name: workingnomads, active: true}\n- {name: arbeitnow, active: true}\n' > profile/employers.yaml
 
-python -c "import sys; sys.path.insert(0,'.'); import engine.score, engine.adapters" \
+"$VENV_PY" -c "import sys; sys.path.insert(0,'.'); import engine.score, engine.adapters" \
   && echo "  engine OK"
 
 cat <<'EOF'

@@ -9,16 +9,20 @@ description = "A job search run by Claude Code, with a real sourcing engine unde
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-dependencies = ["PyYAML>=6.0", "requests>=2.31"]
+dependencies = ["PyYAML>=6.0", "packaging>=24.0", "requests>=2.33.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
-# Adds Indeed / ZipRecruiter / Glassdoor / Google. Optional on purpose: these
-# read public search pages rather than official APIs.
-scrape = ["python-jobspy>=1.1.80"]
+dev = [
+  "pytest>=8.0",
+  "pyflakes>=3.0",
+  "pip-audit==2.10.1",
+  "tomli>=2.0; python_version < '3.11'",
+]
 
-[project.scripts]
-careerkit = "careerkit:main"
+# CareerKit is intentionally clone-only. A wheel cannot include the Claude
+# skills, setup workflow, guide, and private-state layout that make up the
+# product, so publishing a console entry point would create an unsafe partial
+# install that writes state inside site-packages.
 
 [tool.setuptools]
 py-modules = ["careerkit"]

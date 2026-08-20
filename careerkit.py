@@ -1,5 +1,8 @@
-#!/usr/bin/env python3
-"""CareerKit sourcing CLI. Personal state lives in profile/ (gitignored).
+#!/bin/sh
+''''exec /bin/sh "${0%/*}/scripts/run-careerkit.sh" "$0" "$@" # '''
+from __future__ import annotations
+
+__doc__ = """CareerKit sourcing CLI. Personal state lives in profile/ (gitignored).
 
     ./careerkit.py pull                poll every registered employer + feed, score, report
     ./careerkit.py pull --employers    employer ATS boards only
@@ -10,9 +13,9 @@
     ./careerkit.py queries             print that matrix for a better search tool
     ./careerkit.py verify              confirm each board belongs to the right company
     ./careerkit.py ingest-urls FILE    resolve pasted job URLs -> employers, register
-    ./careerkit.py audit [--grep RX]   re-fetch + re-score, show every kill and why
+    ./careerkit.py audit [--grep RX]   re-score sources, group kills and show samples
     ./careerkit.py report [--format md|json|csv|html]   report, export, or dashboard
-./careerkit.py profile-lint        lint lanes and exclusions against shipped failure classes
+    ./careerkit.py profile-lint        lint lanes and exclusions against shipped failure classes
     ./careerkit.py analytics          conversion, timing, aging, follow-up queue
     ./careerkit.py progress UID STAGE record applied/interview/offer/outcome dates
     ./careerkit.py rescore             re-judge stored postings after a criteria change
@@ -20,7 +23,6 @@
     ./careerkit.py tracker-sync        preview tracker/database differences; --apply writes
     ./careerkit.py status | mark UID STATUS
 """
-from __future__ import annotations
 
 import argparse
 import json
@@ -28,11 +30,13 @@ import os
 from datetime import date, datetime
 import re
 import sqlite3
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+ENGINE_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ENGINE_ROOT))
 
 
 def _use_venv() -> None:
@@ -94,6 +98,97 @@ from engine.verify import verify_entry  # noqa: E402
 ROOT = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent)
 
 
+def require_source_checkout(root: Path = ENGINE_ROOT) -> None:
+    """Refuse to run a partial wheel as though it were the CareerKit product.
+
+    CareerKit is distributed as a source checkout because its Claude skills,
+    operating contract, setup script, and profile examples are part of the
+    product.  A Python wheel contains only importable engine code.  Older
+    releases exposed a console entry point anyway, which then wrote private
+    state under site-packages.  Fail before any command can create that state.
+    """
+    root = Path(root)
+    required = (
+        root / "CLAUDE.md",
+        root / "setup.sh",
+        root / ".claude" / "skills" / "setup" / "SKILL.md",
+    )
+    if all(path.exists() for path in required):
+        return
+    raise SystemExit(
+        "CareerKit must run from a complete cloned checkout, not an installed "
+        "Python package.\nClone https://github.com/omoji-personal/careerkit, "
+        "run ./setup.sh there, then use ./careerkit.py."
+    )
+
+
+def engine_checkout_notes(repo: Path = ENGINE_ROOT) -> list[str]:
+    """Describe engine checkout state that can silently change live behavior.
+
+    CareerAI and other instances may keep their private state elsewhere while
+    executing this checkout directly.  If it is on a feature branch or has
+    uncommitted files, every instance is using unreleased code even though its
+    own state directory looks healthy.  This is advisory: developers are
+    allowed to work on branches, but `doctor` must make the condition visible.
+    Installed wheels and source trees without Git metadata simply opt out.
+    """
+    repo = Path(repo)
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(repo), *args], capture_output=True, text=True,
+                timeout=3, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return subprocess.CompletedProcess(args, 1, "", "")
+
+    top = git("rev-parse", "--show-toplevel")
+    if top.returncode or not top.stdout.strip():
+        return []
+    # `git -C child rev-parse --is-inside-work-tree` also succeeds when child is
+    # merely inside some unrelated repository.  That made a wheel in a project's
+    # .venv report the project's branch as if it controlled the installed engine.
+    if Path(top.stdout.strip()).resolve() != repo.resolve():
+        return []
+
+    notes: list[str] = []
+    head_result = git("symbolic-ref", "--quiet", "--short", "HEAD")
+    head = head_result.stdout.strip() if head_result.returncode == 0 else ""
+    remote_default = git("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    if remote_default.returncode == 0 and remote_default.stdout.strip():
+        default = remote_default.stdout.strip().split("/", 1)[-1]
+    elif git("show-ref", "--verify", "--quiet", "refs/heads/main").returncode == 0:
+        default = "main"
+    elif git("show-ref", "--verify", "--quiet", "refs/heads/master").returncode == 0:
+        default = "master"
+    else:
+        default = ""
+
+    if not head:
+        notes.append(f"engine checkout is detached at {repo}; instances execute this exact tree")
+    elif default and head != default:
+        notes.append(
+            f"engine checkout is on {head}, not default branch {default}; "
+            "instances execute this unreleased branch"
+        )
+
+    status_result = git("status", "--porcelain", "--untracked-files=normal")
+    if status_result.returncode:
+        notes.append(
+            f"engine checkout status could not be inspected at {repo}; "
+            "instances still execute this exact tree"
+        )
+        return notes
+    dirty = [line for line in status_result.stdout.splitlines() if line.strip()]
+    if dirty:
+        notes.append(
+            f"engine checkout has {len(dirty)} uncommitted path(s) at {repo}; "
+            "instances execute these local changes"
+        )
+    return notes
+
+
 def _configured_path(name: str, default: Path) -> Path:
     """One shared engine, without forcing every instance into one folder shape.
 
@@ -118,6 +213,92 @@ def load_yaml(p: Path, default):
     if not p.exists():
         return default
     return yaml.safe_load(p.read_text()) or default
+
+
+class RegistryError(ValueError):
+    """The employer registry parsed as YAML but cannot be used safely."""
+
+
+ATS_ADDRESS_FIELDS = {
+    **{name: ("slug",) for name in (
+        "greenhouse", "lever", "ashby", "smartrecruiters", "workable",
+        "recruitee", "bamboohr", "rippling", "teamtailor", "icims",
+        "jobvite", "hrmdirect", "personio",
+    )},
+    "workday": ("tenant", "dc", "site"),
+    "oracle_orc": ("host", "site"),
+    "eightfold": ("domain",),
+    "phenom": ("host",),
+    "paylocity": ("guid",),
+}
+
+
+def load_registry(*, required: bool = False) -> dict:
+    """Load and validate the shared employer/feed registry once.
+
+    Missing keys previously reached whichever command indexed them first.
+    `doctor`, the command meant to explain a broken setup, could therefore die
+    with a raw `KeyError`.  Validate the small common schema at the boundary and
+    name the exact file, collection, entry, and field instead.
+    """
+    exists = EMPLOYERS.exists()
+    if required and not exists:
+        raise RegistryError(
+            f"{EMPLOYERS}: registry file is missing; run ./setup.sh to restore "
+            "the starter registry, then review it before running this command"
+        )
+    # Do not use load_yaml here: its convenient ``or default`` intentionally
+    # treats an empty document as absent, but an existing empty registry is a
+    # damaged config that should be named rather than silently replaced.
+    reg = (yaml.safe_load(EMPLOYERS.read_text()) if exists
+           else {"employers": [], "feeds": []})
+    if not isinstance(reg, dict):
+        raise RegistryError(f"{EMPLOYERS}: expected a YAML mapping at the top level")
+    for collection, required in (("employers", ("name", "ats")),
+                                 ("feeds", ("name",))):
+        if exists and collection not in reg:
+            raise RegistryError(f"{EMPLOYERS}: missing required '{collection}' list")
+        entries = reg.get(collection, [])
+        if not isinstance(entries, list):
+            raise RegistryError(f"{EMPLOYERS}: {collection} must be a YAML list")
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                raise RegistryError(
+                    f"{EMPLOYERS}: {collection}[{index}] must be a YAML mapping")
+            for field in required:
+                value = entry.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise RegistryError(
+                        f"{EMPLOYERS}: {collection}[{index}].{field} is required "
+                        "and must be non-empty text")
+                entry[field] = value.strip()
+            if "active" in entry and not isinstance(entry["active"], bool):
+                raise RegistryError(
+                    f"{EMPLOYERS}: {collection}[{index}].active must be true or false")
+            if collection == "employers":
+                if "rails_exempt" in entry and not isinstance(entry["rails_exempt"], bool):
+                    raise RegistryError(
+                        f"{EMPLOYERS}: employers[{index}].rails_exempt must be true or false")
+                ats = entry["ats"]
+                if ats not in ATS_ADDRESS_FIELDS or ats not in _adapters.REGISTRY:
+                    raise RegistryError(
+                        f"{EMPLOYERS}: employers[{index}].ats names unknown adapter "
+                        f"{ats!r}")
+                for field in ATS_ADDRESS_FIELDS[ats]:
+                    value = entry.get(field)
+                    if not isinstance(value, str) or not value.strip():
+                        raise RegistryError(
+                            f"{EMPLOYERS}: employers[{index}].{field} is required "
+                            f"for ats {ats!r} and must be non-empty text")
+                    entry[field] = value.strip()
+            else:
+                name = entry["name"]
+                if name not in aggregators.FEEDS:
+                    raise RegistryError(
+                        f"{EMPLOYERS}: feeds[{index}].name names unknown feed {name!r}")
+    reg.setdefault("employers", [])
+    reg.setdefault("feeds", [])
+    return reg
 
 
 def load_profile() -> Profile:
@@ -168,7 +349,7 @@ def cmd_pull(args) -> None:
     while the loop was copied into both they drifted without a symptom."""
     _http.set_cache_enabled(not getattr(args, "no_cache", False))
     profile = load_profile()
-    reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
+    reg = load_registry(required=True)
     keys = load_yaml(KEYS, {})
     con = store.connect()
 
@@ -218,16 +399,19 @@ def cmd_audit(args) -> None:
     audits the scoring rules against the data a pull would see. Pass --no-cache
     to really re-fetch, which is what you want when auditing whether a posting
     is still live rather than whether the gates judged it correctly."""
-    # This assignment used to sit ABOVE the string, which made the string an
-    # expression statement rather than a docstring: --help showed nothing.
+    try:
+        flt = re.compile(args.grep, re.I) if args.grep else None
+    except re.error as e:
+        # Validate before profile loading or source polling. A typo in a display
+        # filter must not spend minutes making outbound requests and then blame
+        # an unrelated regex in profile.yaml.
+        sys.exit(f"Invalid --grep regex: {e}")
     _http.set_cache_enabled(not getattr(args, "no_cache", False))
     profile = load_profile()
-    reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
+    reg = load_registry(required=True)
     keys = load_yaml(KEYS, {})
     all_jobs = _pull.fetch_all(reg, keys, None, employers_only=args.employers,
                                feeds_only=False)["jobs"]
-    import re as _re
-    flt = _re.compile(args.grep, _re.I) if args.grep else None
     kills = Counter()
     samples: dict[str, list] = {}
     for j in all_jobs:
@@ -252,13 +436,13 @@ def cmd_audit(args) -> None:
 
 
 def cmd_discover(args) -> None:
-    reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
+    reg = load_registry()
     known = {_registry_key(e) for e in reg["employers"]}
     known_names = {e["name"].lower() for e in reg["employers"]}
     names = list(args.names)
     if args.file:
-        names += [l.strip() for l in Path(args.file).read_text().splitlines()
-                  if l.strip() and not l.startswith("#")]
+        lines = [line.strip() for line in Path(args.file).read_text().splitlines()]
+        names += [line for line in lines if line and not line.startswith("#")]
     todo = [n for n in names if n.lower() not in known_names]
     print(f"Probing {len(todo)} companies across {_discover.PROBEABLE} ATS platforms...",
           flush=True)
@@ -382,7 +566,7 @@ def cmd_ingest_urls(args) -> None:
 
 
 def _ingest(raw_urls: list[str]) -> list[dict]:
-    reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
+    reg = load_registry()
     known = {_registry_key(e) for e in reg["employers"]}
     added, skipped = [], []
     for raw in raw_urls:
@@ -437,7 +621,7 @@ def _ingest(raw_urls: list[str]) -> list[dict]:
 
 def cmd_verify(args) -> None:
     from concurrent.futures import ThreadPoolExecutor
-    reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
+    reg = load_registry(required=True)
     emps = [e for e in reg["employers"] if args.all or e.get("verified") is None]
     print(f"Verifying {len(emps)} employer boards...", flush=True)
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -453,9 +637,26 @@ def cmd_verify(args) -> None:
           f"{counts.get('bad',0)} deactivated as wrong company.")
 
 
+_CSV_FORMULA = re.compile(r"^[\s\u200b\u200c\u200d\u2060\ufeff]*[=+\-@]")
+
+
+def csv_safe_cell(value):
+    """Neutralize text a spreadsheet could execute as a formula.
+
+    CSV quoting protects the file's structure, not the person who opens it in
+    Excel, Numbers, or Sheets. Job titles, employers, locations, and URLs all
+    originate outside CareerKit and may begin with a formula trigger (including
+    after whitespace or an invisible format character). A leading apostrophe is
+    the portable spreadsheet convention for forcing such a cell to plain text.
+    """
+    if isinstance(value, str) and _CSV_FORMULA.match(value):
+        return "'" + value
+    return value
+
+
 def cmd_report(args) -> None:
     con = store.connect()
-    rows = store.query(con, min_score=args.min_score, limit=300)
+    rows = store.query(con, min_score=args.min_score)
 
     fmt = getattr(args, "format", "md")
     if fmt == "html":
@@ -475,7 +676,8 @@ def cmd_report(args) -> None:
         out = OUT_DIR_FOR_EXPORT()
         out.mkdir(parents=True, exist_ok=True)
         cols = ["uid", "company", "title", "location", "score", "gate", "status",
-                "source", "comp_min", "comp_max", "first_seen", "last_seen", "url"]
+                "source", "comp_min", "comp_max", "comp_source", "first_seen",
+                "last_seen", "url"]
         path = out / f"export-{date.today().isoformat()}.{fmt}"
         if fmt == "json":
             path.write_text(json.dumps([{c: r[c] for c in cols} for r in rows], indent=1))
@@ -485,7 +687,7 @@ def cmd_report(args) -> None:
                 w = csv.writer(fh)
                 w.writerow(cols)
                 for r in rows:
-                    w.writerow([r[c] for c in cols])
+                    w.writerow([csv_safe_cell(r[c]) for c in cols])
         print(f"Exported {len(rows)} rows: {path}")
         return
 
@@ -504,7 +706,11 @@ def cmd_analytics(args) -> None:
     snapshot = _analytics.build_snapshot(
         con, _applied.load_evidence(APPLICATIONS), as_of=as_of,
         follow_up_days=args.follow_up_days, weeks=args.weeks)
-    if args.format == "json":
+    # --output is itself an unambiguous request for the machine-readable
+    # artifact advertised in the README.  Requiring callers to also remember
+    # `--format json` made the documented command exit successfully while
+    # silently creating no file.
+    if args.format == "json" or args.output:
         payload = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
         if args.output:
             path = Path(args.output).expanduser()
@@ -626,8 +832,23 @@ def cmd_rescore(args) -> None:
 
     Without this, editing your profile only affects postings the boards happen
     to show you again afterwards."""
+    # Criteria and the authoritative carve-out registry must both be valid
+    # before opening (and potentially migrating) the database.  A missing
+    # registry is not an empty registry: treating it as one would silently
+    # clear every stored rails_exempt flag during this rescore.
+    registry = load_registry(required=True)
+    profile = load_profile()
+    registry_exempt_boards = {
+        _adapters.board_id(entry)
+        for entry in registry["employers"]
+        if entry.get("rails_exempt") is True
+    }
     con = store.connect()
-    _pull.rescore(con, load_profile())
+    _pull.rescore(
+        con,
+        profile,
+        registry_exempt_boards=registry_exempt_boards,
+    )
     _pull.rebuild_report(con, min_score=getattr(args, "min_score", 0))
 
 
@@ -640,8 +861,11 @@ def cmd_profile_lint(args) -> None:
     2026-08-14). Exit 1 on a failure so it can gate a criteria change."""
     import yaml as _yaml
     from engine import profile_lint as _plint
+    # Let the normal first-run check explain how to create the file before
+    # attempting a direct read.  The previous order exposed a raw ENOENT path.
+    profile = load_profile()
     raw = _yaml.safe_load(PROFILE.read_text()) or {}
-    findings = _plint.lint(raw, load_profile())
+    findings = _plint.lint(raw, profile)
     fails = [m for sev, m in findings if sev == "fail"]
     notes = [m for sev, m in findings if sev != "fail"]
     if not findings:
@@ -681,6 +905,13 @@ def cmd_consistency(args) -> None:
         print(f"{len(fixed)} row(s) cleared; run `rescore` to re-derive them.\n"
               if fixed else "Nothing to repair.\n")
         db_problems = _cons.check_db(con)
+        if fixed and rpt:
+            # The comparison above described the pre-repair database. Once a
+            # repair commits, that report is necessarily stale even when every
+            # internal DB invariant is now clean. Do not finish by claiming the
+            # old artifact still agrees with the repaired rows.
+            stale = "the report predates the database repairs"
+            rpt_problems = []
 
     if not db_problems and not rpt_problems:
         if stale:
@@ -818,9 +1049,11 @@ def cmd_doctor(args) -> None:
     The signals existed but were scattered across status, the report footer and
     the tail of a pull, so a broken feed or a stale database was only noticed by
     someone already looking for it."""
+    reg = load_registry(required=True)
     con = store.connect()
-    reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     problems, notes = [], []
+
+    notes.extend(engine_checkout_notes())
 
     if not PROFILE.exists():
         problems.append("no profile/profile.yaml - run /setup in Claude Code")
@@ -898,10 +1131,20 @@ def cmd_doctor(args) -> None:
 
     scrapers = [f["name"] for f in reg.get("feeds", [])
                 if f.get("active", True)
-                and aggregators.policy(f["name"])["kind"] == "scraping"]
+                and aggregators.policy(f["name"])["kind"] == "scraping"
+                and aggregators.policy(f["name"]).get("supported", True)]
     if scrapers:
         notes.append(f"enabled scrapers (read public HTML, can be blocked): "
                      f"{', '.join(scrapers)}")
+
+    unsupported = [f["name"] for f in reg.get("feeds", [])
+                   if f.get("active", True)
+                   and not aggregators.policy(f["name"]).get("supported", True)]
+    for name in unsupported:
+        problems.append(
+            f"{name} feed is active but has no supported secure installation; "
+            f"set its active value to false in {EMPLOYERS}"
+        )
 
     ok = con.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"]
     print(f"CareerKit check: {ok} postings, {n_emp} active employers, "
@@ -920,6 +1163,8 @@ def cmd_doctor(args) -> None:
 
 
 def cmd_status(args) -> None:
+    # Validate config before printing a partial "healthy" database summary.
+    reg = load_registry(required=True)
     con = store.connect()
     s = store.stats(con)
     print(f"Database: {store.DB_PATH}")
@@ -927,7 +1172,6 @@ def cmd_status(args) -> None:
     print(f"  completed runs   : {s['runs']}")
     print("  by gate          :", ", ".join(f"{k} {v}" for k, v in s["by_gate"].items()))
     print("  top sources      :", ", ".join(f"{k} {v}" for k, v in list(s["by_source"].items())[:8]))
-    reg = load_yaml(EMPLOYERS, {"employers": [], "feeds": []})
     print(f"\nRegistry: {len(reg.get('employers', []))} employers, "
           f"{len(reg.get('feeds', []))} feeds")
     dropped = store.dropped_to_zero(con)
@@ -1303,31 +1547,41 @@ def cmd_mark(args) -> None:
     print(f"{args.uid} -> {args.status}")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser separately so argument contracts are testable."""
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("pull"); sp.set_defaults(fn=cmd_pull)
+    sp = sub.add_parser("pull", help="poll sources, score postings, and write a report")
+    sp.set_defaults(fn=cmd_pull)
     sp.add_argument("--no-cache", action="store_true",
                     help="bypass the 6h HTTP cache and really re-fetch")
-    sp.add_argument("--employers", action="store_true")
-    sp.add_argument("--feeds", action="store_true")
-    sp.add_argument("--tier", nargs="*", choices=["A", "B", "C"],
+    source = sp.add_mutually_exclusive_group()
+    source.add_argument("--employers", action="store_true",
+                        help="poll employer ATS boards only")
+    source.add_argument("--feeds", action="store_true",
+                        help="poll aggregator feeds only")
+    sp.add_argument("--tier", nargs="+", choices=["A", "B", "C"],
                     help="poll only employers in these tiers")
-    sp.add_argument("--min-score", type=int, default=0)
+    sp.add_argument("--min-score", type=int, default=0,
+                    help="include report rows at or above this score (default: 0)")
 
-    sp = sub.add_parser("audit"); sp.set_defaults(fn=cmd_audit)
+    sp = sub.add_parser("audit", help="group exclusion reasons and show sample postings")
+    sp.set_defaults(fn=cmd_audit)
     sp.add_argument("--no-cache", action="store_true",
                     help="bypass the 6h HTTP cache and really re-fetch")
     sp.add_argument("--grep", help="only show kills whose title matches this regex")
-    sp.add_argument("--samples", type=int, default=6)
+    sp.add_argument("--samples", type=int, default=6,
+                    help="examples to show per exclusion reason (default: 6)")
     sp.add_argument("--employers", action="store_true", help="skip feeds (faster)")
 
-    sp = sub.add_parser("discover"); sp.set_defaults(fn=cmd_discover)
-    sp.add_argument("names", nargs="*")
-    sp.add_argument("--file")
-    sp.add_argument("--lane", default="discovered")
+    sp = sub.add_parser("discover", help="find and register employer ATS boards")
+    sp.set_defaults(fn=cmd_discover)
+    sp.add_argument("names", nargs="*", help="company names to probe")
+    sp.add_argument("--file", help="text file with one company name per line")
+    sp.add_argument("--lane", default="discovered",
+                    help="lane label to record on new boards")
     # NOT the same flag as `pull --tier`, which FILTERS which tiers to poll.
     # This one ASSIGNS a tier to the employers being registered, so it takes a
     # single value. One name for two operations read as an inconsistency and
@@ -1336,26 +1590,35 @@ def main() -> None:
                     choices=["A", "B", "C"],
                     help="tier to record for newly registered employers")
 
-    sp = sub.add_parser("search"); sp.set_defaults(fn=cmd_search)
+    sp = sub.add_parser("search", help="search the web for unregistered ATS boards")
+    sp.set_defaults(fn=cmd_search)
     sp.add_argument("--full", action="store_true",
                     help="use every configured title and ATS domain")
     sp.add_argument("--limit", type=int, default=60,
                     help="maximum RSS queries to run (default: 60; 0 means all)")
 
-    sp = sub.add_parser("queries"); sp.set_defaults(fn=cmd_queries)
-    sp.add_argument("--full", action="store_true")
+    sp = sub.add_parser("queries", help="print the ATS-domain search matrix")
+    sp.set_defaults(fn=cmd_queries)
+    sp.add_argument("--full", action="store_true",
+                    help="print every configured title and ATS-domain query")
 
-    sp = sub.add_parser("ingest-urls"); sp.set_defaults(fn=cmd_ingest_urls)
+    sp = sub.add_parser("ingest-urls", help="register employers from a file of job URLs")
+    sp.set_defaults(fn=cmd_ingest_urls)
     sp.add_argument("file")
 
-    sp = sub.add_parser("ingest-url"); sp.set_defaults(fn=cmd_ingest_url)
+    sp = sub.add_parser("ingest-url", help="register an employer from one job URL")
+    sp.set_defaults(fn=cmd_ingest_url)
     sp.add_argument("url", help="one job URL; pass after -- if it starts with a dash")
 
-    sp = sub.add_parser("verify"); sp.set_defaults(fn=cmd_verify)
-    sp.add_argument("--all", action="store_true")
+    sp = sub.add_parser("verify", help="verify registered boards belong to their employers")
+    sp.set_defaults(fn=cmd_verify)
+    sp.add_argument("--all", action="store_true",
+                    help="recheck verified boards as well as pending ones")
 
-    sp = sub.add_parser("report"); sp.set_defaults(fn=cmd_report)
-    sp.add_argument("--min-score", type=int, default=0)
+    sp = sub.add_parser("report", help="rebuild or export the current report")
+    sp.set_defaults(fn=cmd_report)
+    sp.add_argument("--min-score", type=int, default=0,
+                    help="include rows at or above this score (default: 0)")
     sp.add_argument("--format", choices=["md", "json", "csv", "html"], default="md",
                     help="md rebuilds the report; json/csv export; html is a local dashboard")
     sp.add_argument("--follow-up-days", type=int, default=14,
@@ -1363,18 +1626,21 @@ def main() -> None:
 
     sp = sub.add_parser("analytics", help="pipeline conversion, timing, and follow-ups")
     sp.set_defaults(fn=cmd_analytics)
-    sp.add_argument("--format", choices=["text", "json"], default="text")
+    sp.add_argument("--format", choices=["text", "json"], default="text",
+                    help="stdout format (default: text; --output implies JSON)")
     sp.add_argument("--output", help="write JSON here instead of stdout")
-    sp.add_argument("--follow-up-days", type=int, default=14)
+    sp.add_argument("--follow-up-days", type=int, default=14,
+                    help="days silent before a thread is due (default: 14)")
     sp.add_argument("--weeks", type=int, default=8, help="cadence window (default: 8)")
     sp.add_argument("--as-of", help=argparse.SUPPRESS)
 
     sp = sub.add_parser("progress", help="record a dated application pipeline stage")
     sp.set_defaults(fn=cmd_progress)
-    sp.add_argument("uid")
-    sp.add_argument("stage", choices=store.APPLICATION_STAGES)
+    sp.add_argument("uid", help="posting UID from the report or database")
+    sp.add_argument("stage", choices=store.APPLICATION_STAGES,
+                    help="confirmed pipeline stage")
     sp.add_argument("--on", help="event date, YYYY-MM-DD (default: today)")
-    sp.add_argument("--notes")
+    sp.add_argument("--notes", help="optional factual context for this event")
 
     sp = sub.add_parser("relationship", help="employer-level contacts and prior context")
     rel = sp.add_subparsers(dest="relationship_action", required=True)
@@ -1390,17 +1656,23 @@ def main() -> None:
     ls.set_defaults(fn=cmd_relationship_list)
     ls.add_argument("company", nargs="?")
 
-    sub.add_parser("status").set_defaults(fn=cmd_status)
+    sub.add_parser("status", help="show database, registry, and source health").set_defaults(
+        fn=cmd_status)
 
     sp = sub.add_parser("db", help="database integrity and backup")
     sp.set_defaults(fn=cmd_db)
     sp.add_argument("action", choices=["check", "backup"])
 
-    sp = sub.add_parser("rescore"); sp.set_defaults(fn=cmd_rescore)
-    sp = sub.add_parser("profile-lint"); sp.set_defaults(fn=cmd_profile_lint)
-    sp.add_argument("--min-score", type=int, default=0)
+    sp = sub.add_parser("rescore", help="re-judge stored postings after criteria changes")
+    sp.set_defaults(fn=cmd_rescore)
+    sp.add_argument("--min-score", type=int, default=0,
+                    help="rebuild the report at this score floor (default: 0)")
 
-    sp = sub.add_parser("doctor"); sp.set_defaults(fn=cmd_doctor)
+    sp = sub.add_parser("profile-lint", help="validate profile rules and failure shields")
+    sp.set_defaults(fn=cmd_profile_lint)
+
+    sp = sub.add_parser("doctor", help="check setup, source health, freshness, and drift")
+    sp.set_defaults(fn=cmd_doctor)
 
     sp = sub.add_parser("tracker-sync", help="preview tracker/database drift; "
                         "append and mark only with --apply")
@@ -1408,14 +1680,17 @@ def main() -> None:
     sp.add_argument("--apply", action="store_true",
                     help="perform the exact previewed changes (default: no writes)")
 
-    sp = sub.add_parser("enrich"); sp.set_defaults(fn=cmd_enrich)
+    sp = sub.add_parser("enrich", help="fetch fuller descriptions for thin live postings")
+    sp.set_defaults(fn=cmd_enrich)
     sp.add_argument("--limit", type=int, help="stop after N fetches")
 
-    sp = sub.add_parser("applied"); sp.set_defaults(fn=cmd_applied)
+    sp = sub.add_parser("applied", help="reconcile application evidence with the database")
+    sp.set_defaults(fn=cmd_applied)
     sp.add_argument("--file", help="default: profile/applications.jsonl")
     sp.add_argument("--apply", action="store_true", help="write the unambiguous matches")
 
-    sp = sub.add_parser("consistency"); sp.set_defaults(fn=cmd_consistency)
+    sp = sub.add_parser("consistency", help="compare report claims with database facts")
+    sp.set_defaults(fn=cmd_consistency)
     sp.add_argument("--report", help="default: the newest report in out/")
     sp.add_argument("--repair", action="store_true",
                     help="clear impossible comp values so rescore can re-derive them")
@@ -1425,30 +1700,64 @@ def main() -> None:
                                               "whole batch, not one at a time")
     sp.set_defaults(fn=cmd_voice_lint)
 
-    sp = sub.add_parser("claims-lint"); sp.set_defaults(fn=cmd_claims_lint)
+    sp = sub.add_parser("claims-lint", help="check a draft against verified claims")
+    sp.set_defaults(fn=cmd_claims_lint)
     sp.add_argument("draft", help="the resume, cover letter or answer to check")
     sp.add_argument("--register", help="default: profile/claims.md")
     sp.add_argument("--allow", help="extra authoritative text, e.g. the posting")
 
-    sp = sub.add_parser("history"); sp.set_defaults(fn=cmd_history)
+    sp = sub.add_parser("history", help="show recorded pipeline events in order")
+    sp.set_defaults(fn=cmd_history)
     sp.add_argument("uid", nargs="?", help="one posting, or omit for everything")
 
-    sp = sub.add_parser("mark"); sp.set_defaults(fn=cmd_mark)
+    sp = sub.add_parser("mark", help="set a posting status")
+    sp.set_defaults(fn=cmd_mark)
     # choices, not a free string: argparse rejects a typo before the database
     # is touched and prints the valid set, instead of failing later or silently.
-    sp.add_argument("uid"); sp.add_argument("status", choices=store.VALID_STATUS)
-    sp.add_argument("--notes")
+    sp.add_argument("uid", help="posting UID from the report or database")
+    sp.add_argument("status", choices=store.VALID_STATUS,
+                    help="new lifecycle status")
+    sp.add_argument("--notes", help="optional factual context for the change")
 
-    args = p.parse_args()
-    # Commands that write are serialized against each other; read-only ones stay
-    # usable while a long pull is running.
-    MUTATING = {"pull", "audit", "discover", "search", "ingest-url", "ingest-urls",
-                "verify", "mark", "progress", "applied", "enrich"}
-    mutating = (args.cmd in MUTATING or
-                (args.cmd == "tracker-sync" and args.apply) or
-                (args.cmd == "relationship" and args.relationship_action == "add"))
+    return p
+
+
+def command_writes(args: argparse.Namespace) -> bool:
+    """Return whether a parsed command can change durable local state.
+
+    The run lock protects the database, registry, report, and exports—not just
+    source polling.  Conditional writers remain readable without taking the
+    lock in preview/check/stdout modes.
+    """
+    always = {
+        "pull", "audit", "discover", "search", "ingest-url", "ingest-urls",
+        "verify", "mark", "progress", "enrich", "rescore", "report",
+    }
+    if args.cmd in always:
+        return True
+    if args.cmd == "applied":
+        return bool(args.apply)
+    if args.cmd == "consistency":
+        return bool(args.repair)
+    if args.cmd == "tracker-sync":
+        return bool(args.apply)
+    if args.cmd == "relationship":
+        return args.relationship_action == "add"
+    if args.cmd == "analytics":
+        return bool(args.output)
+    if args.cmd == "db":
+        return args.action == "backup"
+    return False
+
+
+def main(argv: list[str] | None = None) -> None:
+    require_source_checkout()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.cmd == "pull" and args.feeds and args.tier:
+        parser.error("pull --tier selects employer tiers and cannot be used with --feeds")
     try:
-        if mutating:
+        if command_writes(args):
             with store.RunLock():
                 args.fn(args)
         else:
@@ -1468,6 +1777,8 @@ def main() -> None:
         sys.exit(f"A pattern in your profile is not a valid regex: {e}\n"
                  "Check the /raw regex/ entries in profile/profile.yaml.")
     except ProfileError as e:
+        sys.exit(str(e))
+    except RegistryError as e:
         sys.exit(str(e))
     except sqlite3.DatabaseError as e:
         sys.exit(f"The database looks damaged: {e}\n"

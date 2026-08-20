@@ -102,6 +102,21 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
       font-size:9.2pt; margin:.1in 0 .5em; }
 .cmd dt{ font-family:var(--mono); font-size:8.4pt; color:var(--ink); }
 .cmd dd{ margin:0; color:#2A3036; }
+.cli-grid{ display:grid; grid-template-columns:1fr 1fr; gap:0 .2in;
+           max-width:var(--measure); margin:.07in 0 .3em; padding:.055in .12in;
+           border:1px solid var(--rule); background:var(--panel); }
+.cli-grid div{ min-width:0; padding:.017in 0; border-bottom:1px dotted var(--rule);
+               break-inside:avoid; }
+.cli-grid code{ display:block; font-size:7.1pt; line-height:1.15; white-space:nowrap; }
+.cli-grid span{ display:block; font-family:var(--body); color:#2A3036;
+                font-size:7.3pt; line-height:1.15; }
+.build-id{ font-family:var(--mono); font-size:6.4pt; letter-spacing:.08em;
+           color:var(--noise); margin:.06in 0 0; }
+/* Section three is the densest page. Keep its final fail-closed note clear of
+   the printed footer without shrinking the guide's general reading size. */
+.score-page h3{ margin:.17in 0 .035in; }
+.score-page .verdicts{ margin:.1in 0 .1em; }
+.score-page .note{ margin:.1in 0; }
 </style>
 </head>
 <body>
@@ -130,11 +145,11 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
     <div class="plate-h">Specification</div>
     <div class="spec">
       <div><b>ATS platforms polled</b><span>18</span></div>
-      <div><b>Public job feeds</b><span>14</span></div>
+      <div><b>Public job feeds</b><span>13 + 1 dormant</span></div>
       <div><b>Auto-discoverable</b><span>14 platforms</span></div>
       <div><b>One run</b><span>19,550 read, <em class="sig">161</em> passed</span></div>
-      <div><b>Regression suite</b><span>280+ cases</span></div>
-      <div><b>Continuous integration</b><span>3.10 / 3.12 / 3.13</span></div>
+      <div><b>Regression suite</b><span>500+ cases</span></div>
+      <div><b>Continuous integration</b><span>3.10 / 3.12 / 3.13 / 3.14</span></div>
       <div><b>Engine</b><span>Python, SQLite</span></div>
       <div><b>Licence</b><span>MIT</span></div>
     </div>
@@ -183,9 +198,10 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
   </div>
 
   <h3>What it is not</h3>
-  <p>It is not a mass-application tool. It fills a form completely and stops at the submit
-  button, because the certification on an application is yours to make. It does not create
-  accounts, handle passwords, or answer "prove you are human" checks.</p>
+  <p>It is not a mass-application tool. It fills a form and stops at submit for your
+  review. You handle every certification; any agent click requires fresh approval for
+  that one completed form. It does not create accounts, handle passwords, or answer
+  captcha or OTP checks; you complete those directly and never relay codes.</p>
 </section>
 
 <!-- ══ 2 ══ -->
@@ -222,7 +238,7 @@ claude              # open Claude Code in this folder
 </section>
 
 <!-- ══ 3 ══ -->
-<section class="sec">
+<section class="sec score-page">
   <p class="kicker">Three</p>
   <h2>How scoring works: lanes, rails, gates</h2>
   <hr class="gate fine">
@@ -267,9 +283,10 @@ claude              # open Claude Code in this folder
 
   <div class="note">
     <span class="h">If a rule is unusable</span>
-    The engine prints what it ignored and carries on, except in exclusion lists, where an
-    uncompilable rule raises instead. Dropping an exclusion fails open: the rail
-    disappears and everything you banned starts surfacing, silently.
+    Malformed structure or invalid values stop with the exact field named. Unknown keys
+    and unusable regexes in non-exclusion scoring terms are reported and skipped. An
+    unusable exclusion stops the run: dropping it would fail open and silently surface
+    everything it was meant to ban. Blank company-exclusion strings are filtered out.
   </div>
 </section>
 
@@ -282,36 +299,47 @@ claude              # open Claude Code in this folder
   <dl class="cmd">
     <dt>/search</dt><dd>Sweep every board and feed, report what is genuinely new since the last run.</dd>
     <dt>/evaluate &lt;url&gt;</dt><dd>An honest fit read on any posting, from anywhere. Names the real disqualifiers.</dd>
-    <dt>/apply &lt;url&gt;</dt><dd>Build the application pack and fill the form. You review and submit.</dd>
+    <dt>/apply &lt;url&gt;</dt><dd>Build and fill; you review and approve this one submission.</dd>
     <dt>/prep &lt;company&gt;</dt><dd>Interview preparation from your own story bank.</dd>
     <dt>/track</dt><dd>Where everything stands.</dd>
     <dt>/ingest &lt;url&gt;</dt><dd>Score and register anything you found elsewhere, so the engine knows about it.</dd>
     <dt>/compose</dt><dd>Resume, cover letter and profile work, gated by your claims register.</dd>
     <dt>/outreach</dt><dd>Referrals, thank-yous and nudges. Draft only by default.</dd>
-    <dt>/criteria</dt><dd>Change what surfaces. Follow it with <code>rescore</code>, which
-      re-judges postings already stored against the new rules.</dd>
+    <dt>/criteria</dt><dd>Change rules, then rescore stored postings and pull to recover
+      jobs the old gates excluded.</dd>
     <dt>/audit</dt><dd>Review what the gates killed. Run it monthly.</dd>
   </dl>
 
   <h3>Running the engine directly</h3>
-  <p>Claude does this for you, but it is an ordinary command line tool.</p>
-<pre>./careerkit.py pull            # poll everything, score, write a report
-./careerkit.py search          # discover postings across the open web
-./careerkit.py queries --full  # print the complete query matrix
-./careerkit.py rescore         # re-judge stored postings
-./careerkit.py doctor          # profile, source and drift health check
-./careerkit.py status          # database and source health
-./careerkit.py audit           # what the gates killed, and why
-./careerkit.py report          # rebuild or export the report
-./careerkit.py history         # every status change, in order
-./careerkit.py tracker-sync    # preview drift; --apply writes it
-./careerkit.py claims-lint out/cover.md
-./careerkit.py mark UID applied
-./careerkit.py ingest-url -- URL     # register one posting
-./careerkit.py ingest-urls FILE      # ... or a file of them
-./careerkit.py discover NAME         # find and register a company board
-./careerkit.py verify                # confirm each board belongs to the right company
-./careerkit.py db check|backup       # integrity check, manual backup</pre>
+  <p>Claude does this for you, but every operation is also available from a
+    CareerKit source checkout:</p>
+  <div class="cli-grid">
+    <div><code>./careerkit.py pull</code><span>poll, score, report</span></div>
+    <div><code>./careerkit.py audit</code><span>sample exclusions by reason</span></div>
+    <div><code>./careerkit.py discover</code><span>find employer boards</span></div>
+    <div><code>./careerkit.py search</code><span>open-web ATS discovery</span></div>
+    <div><code>./careerkit.py queries</code><span>print the query matrix</span></div>
+    <div><code>./careerkit.py ingest-url</code><span>register one pasted URL</span></div>
+    <div><code>./careerkit.py ingest-urls</code><span>register a URL file</span></div>
+    <div><code>./careerkit.py verify</code><span>confirm board ownership</span></div>
+    <div><code>./careerkit.py report</code><span>rebuild or export</span></div>
+    <div><code>./careerkit.py analytics</code><span>conversion and follow-ups</span></div>
+    <div><code>./careerkit.py progress</code><span>record a pipeline stage</span></div>
+    <div><code>./careerkit.py relationship</code><span>employer contacts and context</span></div>
+    <div><code>./careerkit.py status</code><span>database and source health</span></div>
+    <div><code>./careerkit.py db</code><span>integrity check or backup</span></div>
+    <div><code>./careerkit.py rescore</code><span>apply changed criteria</span></div>
+    <div><code>./careerkit.py profile-lint</code><span>validate profile rules</span></div>
+    <div><code>./careerkit.py doctor</code><span>setup and drift check</span></div>
+    <div><code>./careerkit.py tracker-sync</code><span>preview or repair tracker drift</span></div>
+    <div><code>./careerkit.py enrich</code><span>refresh thin postings</span></div>
+    <div><code>./careerkit.py applied</code><span>reconcile application evidence</span></div>
+    <div><code>./careerkit.py consistency</code><span>compare report and database</span></div>
+    <div><code>./careerkit.py voice-lint</code><span>flag machine-written patterns</span></div>
+    <div><code>./careerkit.py claims-lint</code><span>check claims in a draft</span></div>
+    <div><code>./careerkit.py history</code><span>show status events</span></div>
+    <div><code>./careerkit.py mark</code><span>set a posting status</span></div>
+  </div>
 </section>
 
 <!-- ══ 5 ══ -->
@@ -325,9 +353,9 @@ claude              # open Claude Code in this folder
   keep looking reasonable. This is the failure that costs the most and announces itself
   the least.</p>
 
-  <p><code>audit</code> is the answer. It re-scores and shows you every kill with its
-  reason, grouped, with examples. You argue with it, and what you disagree with becomes a
-  profile change.</p>
+  <p><code>audit</code> is the answer. It re-scores, groups every exclusion reason, and
+  shows representative postings from each. You argue with it, and what you disagree with
+  becomes a profile change.</p>
 
   <div class="note">
     <span class="h">Run it monthly</span>
@@ -354,22 +382,26 @@ claude              # open Claude Code in this folder
     <li><strong>To Anthropic:</strong> everything Claude reads. Your resume, your claims
     register, postings, your interview answers. Governed by your own Claude plan's data
     terms, the same as any other conversation.</li>
-    <li><strong>To job boards and feeds:</strong> ordinary outbound web requests from your
-    machine, throttled to one request per host every 0.7 seconds. Your identity is not
-    attached to them.</li>
-    <li><strong>One exception:</strong> the USAJobs feed requires your registered email in
-    a request header. That is their API's rule. Skip the feed if you would rather not.</li>
+    <li><strong>To public boards and feeds:</strong> ordinary outbound requests, throttled
+    to one per host every 0.7 seconds. CareerKit sends no profile identity fields to
+    unauthenticated endpoints; normal network metadata such as your IP is visible.</li>
+    <li><strong>To keyed feeds you enable:</strong> configured API keys, account IDs or
+    affiliate values go to that provider. USAJobs additionally requires your registered
+    email. Skip any keyed feed whose disclosure you do not accept.</li>
     <li><strong>No telemetry.</strong> Nothing is reported to the author or anyone else.</li>
   </ul>
 
-  <p>Delete <code>profile/</code>, <code>data/</code> and <code>out/</code> and nothing
-  personal remains locally.</p>
+  <p>Delete <code>profile/</code>, <code>data/</code> and <code>out/</code> to remove
+  CareerKit-owned local state. That cannot retract provider requests or erase backups,
+  exports or copies held by other tools.</p>
 
   <h3>On scraping</h3>
   <p>Every feed declares what it is: an official public API, one that needs your own key,
-  or a scraper. Two read public search pages rather than official APIs. They are off by
-  default, can be rate limited or blocked, and their terms of use are yours to read. Any
-  run whose results include a scraper says so in the report.</p>
+  or a scraper. The optional LinkedIn guest feed reads public search pages and is off by
+  default. The dormant JobSpy adapter has no supported installation until its dependency
+  graph can use the security-fixed Markdown converter. Scrapers can be rate limited or
+  blocked, and their terms of use are yours to read. Any run whose results include one
+  says so in the report.</p>
 </section>
 
 <!-- ══ 7 ══ -->
@@ -426,8 +458,10 @@ claude              # open Claude Code in this folder
   <h3>Sharing it</h3>
   <p><code>./new-instance.sh &lt;name&gt;</code> clones a fully separate instance with its
   own profile, database and reports. Instances never see each other's data. Use one per
-  person. Instances clone from the public repository, so <code>git pull</code> inside one
-  really does bring engine fixes.</p>
+  person. Instances clone from this checkout's HTTP(S) origin and print the exact URL;
+  confirm the recipient can access it. Update one with
+  <code>git pull &amp;&amp; ./setup.sh</code> so dependency migrations arrive with engine
+  fixes. Local or SSH-only origins require explicit <code>--local</code>.</p>
 
   <h3>Licence</h3>
   <p>MIT. Use it, fork it, change it. If you improve the engine, the improvement belongs
@@ -435,6 +469,7 @@ claude              # open Claude Code in this folder
 
   <hr class="gate">
   <p class="whoami" style="margin-top:.14in">github.com/omoji-personal/careerkit</p>
+  <p class="build-id" id="build-id"></p>
 </section>
 
 </body>

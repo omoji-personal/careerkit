@@ -103,6 +103,14 @@ def load_evidence(path: str | Path) -> list[dict]:
         except json.JSONDecodeError:
             out.append({"_bad": True, "_line": i, "_raw": line[:120]})
             continue
+        # JSONL evidence is one object per line.  Valid JSON scalars and arrays
+        # used to reach the assignment below and raw-crash with TypeError (or,
+        # for null, "NoneType does not support item assignment").  Treat a
+        # wrong-shaped JSON value exactly like malformed JSON so `applied` can
+        # report the bad line and continue reconciling the rest of the file.
+        if not isinstance(rec, dict):
+            out.append({"_bad": True, "_line": i, "_raw": line[:120]})
+            continue
         rec["_line"] = i
         out.append(rec)
     return out

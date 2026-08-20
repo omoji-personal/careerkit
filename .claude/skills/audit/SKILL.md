@@ -1,9 +1,9 @@
 ---
 name: audit
-description: Calibration sweep - re-fetch boards, re-score, review every kill so silent false negatives get caught. Run after /setup, after criteria changes, and monthly.
+description: Calibration sweep - freshly poll boards, re-score, and review representative kills from every reason group so silent false negatives get caught. Run after /setup, after criteria changes, and monthly.
 ---
 # /audit — catch the silent kills
-1. `./careerkit.py audit` (add --grep 'term' to focus).
+1. `./careerkit.py audit --no-cache` (add --grep 'term' to focus).
 2. Walk the kill groups with the user: for each reason bucket, sample titles;
    ask "any of these wrong?" A wrongly-killed role means profile.yaml needs a
    fix (lane pattern, metro, floor, exclusion too broad) - never engine code.

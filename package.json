@@ -7,5 +7,6 @@
   "scripts": { "guide": "node guide/build-pdf.mjs" },
   "author": "Omid Mojtahedi",
   "license": "MIT",
-  "devDependencies": { "playwright": "^1.62.1" }
+  "engines": { "node": ">=20" },
+  "devDependencies": { "playwright": "1.62.1" }
 }

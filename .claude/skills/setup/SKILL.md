@@ -6,6 +6,17 @@ description: First-run onboarding - Discovery + Search Criteria interviews that 
 
 Two interviews. Be thorough; everything downstream depends on this.
 
+## Privacy disclosure — before documents or network requests
+Explain plainly, and confirm the user wants to proceed: everything Claude reads
+is processed by Anthropic under the user's Claude plan terms. CareerKit also
+makes outbound requests to employer boards, feeds, and pasted URLs; USAJobs
+and other optional keyed feeds transmit the configured API credential or
+account identifier to their provider, and USAJobs also includes the registered
+email header.
+There is no CareerKit telemetry. Deleting `profile/`, `data/`, and `out/`
+removes CareerKit's local private state, but cannot retract data already sent to
+those services or remove copies saved elsewhere.
+
 ## Part 1 — Discovery (learn the person)
 1. Ask for their resume (PDF: READ IT VISUALLY with the Read tool, never
    text-extract - multi-column resumes mangle), LinkedIn (exported PDF or
@@ -34,16 +45,18 @@ constraints for later stages (leave windows, notice period).
 ## Part 3 — Write config + seed sources
 1. Write `profile/profile.yaml` per profile.example/profile.yaml schema:
    identity, location, comp, lanes, dream_lanes, exclusions, domain_terms,
-   signals, dream_companies, search_terms, autonomy, eeo, work_auth.
-2. Ask for their target-company list; run
+   signals, dream_companies, search_terms, autonomy, eeo, work_auth. Set
+   `autonomy.submit: ask_each`; CareerKit has no batch or standing submission
+   permission.
+2. After the privacy confirmation above, ask for their target-company list; run
    `./careerkit.py discover --file <list>` to find each company's ATS, then
    `./careerkit.py verify`.
-3. Privacy disclosure, plainly: profile content is processed by Anthropic
-   under their Claude plan's data terms; nothing else leaves the machine;
-   deleting profile/ + data/ removes all local state.
 
 ## Part 4 — Calibrate (MANDATORY)
-Run `./careerkit.py pull`, then `./careerkit.py audit`. Walk the user through
-the kill list: "these were excluded and why - correct me." Fix profile.yaml
-for anything wrongly killed and re-run until the user agrees with the gates.
-Derived rules WILL have false-negative classes until calibrated.
+Run `./careerkit.py profile-lint`, then `./careerkit.py pull`, then
+`./careerkit.py audit`. Walk the user through the kill list: "these were
+excluded and why - correct me." After each approved criteria correction, run
+`profile-lint`, `rescore`, `pull`, and `audit` again until the user agrees with
+the gates. `pull` is mandatory because previously screened-out postings were
+never stored for `rescore` to recover. Derived rules WILL have false-negative
+classes until calibrated.

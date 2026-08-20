@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import html
 import re
+from urllib.parse import urlsplit
 
-from .http import fetch
+from .http import UnsafeExternalURL, fetch
 
 # Headings that introduce what a candidate must have, as opposed to what they
 # will do. The distinction is the whole point: "you will design Apex triggers"
@@ -106,7 +107,7 @@ def _strip_html(raw: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", s).strip()
 
 
-_LINKEDIN_ID = re.compile(r"linkedin\.com/jobs/view/(?:[^/]*-)?(\d{6,})", re.I)
+_LINKEDIN_ID = re.compile(r"/jobs/view/(?:[^/]*-)?(\d{6,})(?:/|$)", re.I)
 
 
 def fetch_canonical(url: str) -> tuple[str, str]:
@@ -118,10 +119,20 @@ def fetch_canonical(url: str) -> tuple[str, str]:
     ATS boards that render server-side and fails harmlessly for the ones that do
     not: an empty result leaves the row exactly as it was.
     """
-    m = _LINKEDIN_ID.search(url or "")
+    try:
+        parsed = urlsplit(url or "")
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        hostname, parsed = "", None
+    m = (_LINKEDIN_ID.search(parsed.path) if parsed is not None
+         and (hostname == "linkedin.com" or hostname.endswith(".linkedin.com"))
+         else None)
     if m:
         api = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{m.group(1)}"
-        st, raw = fetch(api, tries=2)
+        try:
+            st, raw = fetch(api, tries=2, safe_external=True)
+        except UnsafeExternalURL as exc:
+            return "", f"refused unsafe URL: {exc}"
         if st == 200 and raw:
             block = re.search(r"description__text.*?</section>", raw, re.S)
             if block:
@@ -131,7 +142,10 @@ def fetch_canonical(url: str) -> tuple[str, str]:
             return "", "linkedin returned no description block"
         return "", f"linkedin guest endpoint returned {st}"
 
-    st, raw = fetch(url, tries=2)
+    try:
+        st, raw = fetch(url, tries=2, safe_external=True)
+    except UnsafeExternalURL as exc:
+        return "", f"refused unsafe URL: {exc}"
     if st != 200 or not raw:
         return "", f"fetch returned {st}"
     text = _from_jsonld(raw)

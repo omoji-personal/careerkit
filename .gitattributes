@@ -1,0 +1,4 @@
+# Executable entrypoints must retain Unix line endings in Git-for-Windows
+# checkouts; CRLF turns their shebang into /bin/bash^M before setup can run.
+*.sh text eol=lf
+*.py text eol=lf

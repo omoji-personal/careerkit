@@ -100,6 +100,7 @@ def test_the_engine_has_no_pyflakes_findings():
     # kept CI red for three days. Local and CI must lint the same files, or
     # "the suite is green" stops meaning "the push will be".
     files = ([str(p) for p in sorted(root.glob("engine/*.py"))]
+             + [str(p) for p in sorted(root.glob("scripts/*.py"))]
              + [str(root / "careerkit.py")]
              + [str(p) for p in sorted(root.glob("tests/*.py"))])
     r = subprocess.run([sys.executable, "-m", "pyflakes", *files],
