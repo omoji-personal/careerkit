@@ -45,19 +45,19 @@ def test_duplicate_surfaced_uids_collapse_to_strongest_richest_order_invariant(d
     from engine import store
     from engine.pull import pick_surfaced, record_surfaced_sightings
 
-    # Aggregators deliberately share the company/title UID even though each
-    # feed mints a different external id.  These are three sightings of one
-    # posting, not three requisitions.
-    verify = _job(source="jobspy:indeed", external_id="feed-1", gate="VERIFY",
-                  score=99, url="https://indeed.test/acme-pm",
+    # These are three copies of the same source-local opening, not three
+    # requisitions. Different feeds/opening IDs now remain distinct so a real
+    # sibling cannot disappear merely because its title matches.
+    verify = _job(source="remotive", external_id="same-opening", gate="VERIFY",
+                  score=99, url="https://remotive.test/acme-pm?card=verify",
                   location="", description="thin")
-    qualified_bare = _job(source="remotive", external_id="feed-2",
+    qualified_bare = _job(source="remotive", external_id="same-opening",
                           gate="QUALIFIED", score=82,
-                          url="https://remotive.test/acme-pm",
+                          url="https://remotive.test/acme-pm?card=bare",
                           location="Remote, US", description="short")
-    qualified_rich = _job(source="remoteok", external_id="feed-3",
+    qualified_rich = _job(source="remotive", external_id="same-opening",
                           gate="QUALIFIED", score=82,
-                          url="https://remoteok.test/acme-pm",
+                          url="https://remotive.test/acme-pm?card=rich",
                           location="Remote, US", description="rich body " * 100)
     qualified_rich.comp_min = 150_000
     qualified_rich.comp_max = 190_000
@@ -75,7 +75,7 @@ def test_duplicate_surfaced_uids_collapse_to_strongest_richest_order_invariant(d
         job = chosen[0]
         snapshots.append(job.to_row())
         assert (job.gate, job.score, job.source) == (
-            "QUALIFIED", 82, "remoteok")
+            "QUALIFIED", 82, "remotive")
         assert job.comp_min == 150_000 and "rich body" in job.description
         assert job.url_direct == "https://acme.test/jobs/pm/apply"
         assert job.company_site == "https://acme.test"
@@ -87,9 +87,7 @@ def test_duplicate_surfaced_uids_collapse_to_strongest_richest_order_invariant(d
                 "SELECT source,url FROM sightings WHERE uid=?", (job.uid,))
         }
         assert sources == {
-            "jobspy:indeed": "https://indeed.test/acme-pm",
-            "remotive": "https://remotive.test/acme-pm",
-            "remoteok": "https://remoteok.test/acme-pm",
+            "remotive": "https://remotive.test/acme-pm?card=bare",
         }
 
     assert snapshots[0] == snapshots[1]

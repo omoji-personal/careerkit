@@ -19,6 +19,7 @@ ATS_SOURCES = frozenset({
     "greenhouse", "lever", "ashby", "smartrecruiters", "workable", "recruitee",
     "bamboohr", "rippling", "teamtailor", "workday", "oracle_orc", "eightfold",
     "phenom", "icims", "jobvite", "paylocity", "personio", "hrmdirect",
+    "pinpoint", "neogov",
 })
 
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -123,18 +124,40 @@ class Job:
         Manager" reqs in different cities produced ONE row, the second req's URL
         and location were discarded, and marking the first 'applied' removed
         every sibling from the report permanently. Named-company aggregator
-        sightings keep the bare group_key because each aggregator mints its own
-        id, so they still collapse onto one another as before. Anonymous
-        aggregator rows retain the source + URL discriminator described by
-        ``group_key`` so unrelated blank-company postings cannot collapse.
+        openings now retain a source-specific posting discriminator too: two
+        same-title openings from one employer must not become one row.
+        ``group_key`` still groups related sightings for presentation.
+        Anonymous aggregator rows retain the source + URL discriminator
+        described by ``group_key`` so unrelated blank-company postings cannot
+        collapse.
 
         Built from the raw basis string, NOT from the group_key hash: hashing a
-        hash would make an aggregator's uid differ from its group_key, breaking
-        both the "aggregators still collapse" property and in-place migration
-        of an existing database."""
+        hash would obscure the migration basis and prevent exact adoption of
+        an existing database row."""
+        # A native ATS sighting and a Freehire discovery sighting can prove they
+        # are the same opening only when their canonical direct URLs agree
+        # exactly.  The pull/store integration resolves that relationship
+        # against the current batch and durable sightings, then assigns this
+        # in-memory override.  It is deliberately not a dataclass field: the
+        # assertion is contextual provenance, not another value an upstream
+        # payload may populate or ``to_row`` may accidentally export.
+        identity_override = getattr(self, "_identity_uid_override", "")
+        if identity_override:
+            return identity_override
+
         basis = self._identity_basis(_norm_title_strict(self.title))
         if self.external_id and self.source in ATS_SOURCES:
             basis = f"{basis}|{self.external_id}"
+        elif _norm_company(self.company) and self.source not in ATS_SOURCES:
+            basis = f"{basis}|aggregator:{_aggregator_opening_discriminator(self)}"
+        return hashlib.sha256(basis.encode()).hexdigest()[:20]
+
+    @property
+    def legacy_named_aggregator_uid(self) -> str:
+        """Pre-discriminator UID, eligible only for exact-URL adoption."""
+        if not _norm_company(self.company) or self.source in ATS_SOURCES:
+            return ""
+        basis = self._identity_basis(_norm_title_strict(self.title))
         return hashlib.sha256(basis.encode()).hexdigest()[:20]
 
     @property
@@ -410,6 +433,14 @@ def _blank_company_discriminator(job: Job) -> str:
     """Stable source/locator token for a posting that has no employer identity."""
     source = (job.source or "").strip().lower()
     locator = _identity_url(job.url) or (job.external_id or "").strip()
+    material = f"{len(source)}:{source}|{len(locator)}:{locator}"
+    return hashlib.sha256(material.encode()).hexdigest()[:20]
+
+
+def _aggregator_opening_discriminator(job: Job) -> str:
+    """Stable source-local identity for a named aggregator opening."""
+    source = (job.source or "").strip().lower()
+    locator = (job.external_id or "").strip() or _identity_url(job.url)
     material = f"{len(source)}:{source}|{len(locator)}:{locator}"
     return hashlib.sha256(material.encode()).hexdigest()[:20]
 

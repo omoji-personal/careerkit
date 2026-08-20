@@ -21,11 +21,66 @@ from copy import copy
 from datetime import date
 
 from . import adapters as _adapters
+from . import aggregators as _aggregators
 from . import store
 from .adapters import run_adapter
 from .aggregators import run_feed
 from .models import ATS_SOURCES
 from .report import write_report
+
+
+def _feed_active(feed: dict) -> bool:
+    """One activation rule shared by polling, health, and retirement.
+
+    Most legacy feeds default to enabled when ``active`` is omitted. Freehire is
+    intentionally opt-in and its runner requires the literal boolean ``true``;
+    classifying an omitted flag as active here would skip both polling and
+    inactive-feed retirement, stranding every prior ``freehire:*`` row.
+    """
+    name = str(feed.get("name") or "").strip().casefold()
+    if name == "freehire":
+        return feed.get("active") is True
+    return bool(feed.get("active", True))
+
+
+def _health_identity_counts(employers: list[dict]) -> tuple[Counter, Counter]:
+    """Counts needed to prove a legacy health-key migration is unambiguous."""
+    legacy = Counter(f"{e.get('ats')}:{e.get('name')}" for e in employers)
+    stable = Counter(_adapters.board_id(e) for e in employers)
+    return legacy, stable
+
+
+def _migrate_source_health_keys(con, employers: list[dict]) -> int:
+    """Rename legacy ``ats:Display Name`` health rows to stable board ids.
+
+    The row contains the previous count used by the truncation guard, so merely
+    starting a second stable-key row loses exactly the baseline needed on the
+    first hardened pull. Rename the existing row in place before counts are
+    loaded. Both sides must be unique: two sites with one display name or two
+    registry entries for one endpoint make attribution unknowable and are left
+    untouched rather than guessed.
+    """
+    legacy_counts, stable_counts = _health_identity_counts(employers)
+    existing = {r["source"] for r in con.execute("SELECT source FROM source_health")}
+    migrated = 0
+    with con:
+        for entry in employers:
+            legacy = f"{entry.get('ats')}:{entry.get('name')}"
+            stable = _adapters.board_id(entry)
+            if (legacy == stable or legacy not in existing or
+                    legacy_counts[legacy] != 1 or stable_counts[stable] != 1):
+                continue
+            if stable in existing:
+                # A prior hardened run already owns the current state. The old
+                # display-key row is now only duplicate report noise.
+                con.execute("DELETE FROM source_health WHERE source=?", (legacy,))
+            else:
+                con.execute("UPDATE source_health SET source=? WHERE source=?",
+                            (stable, legacy))
+                existing.add(stable)
+            existing.discard(legacy)
+            migrated += 1
+    return migrated
 
 
 def fetch_all(reg: dict, keys: dict, con=None, *, employers_only: bool = False,
@@ -35,28 +90,59 @@ def fetch_all(reg: dict, keys: dict, con=None, *, employers_only: bool = False,
     Returns the jobs plus the health facts reconcile() needs: which boards and
     feeds answered well enough that their missing rows can be treated as
     genuinely closed."""
+    active_employer_rows = [
+        e for e in reg.get("employers", []) if e.get("active", True)]
+    if con is not None:
+        _migrate_source_health_keys(con, active_employer_rows)
     prev_counts = {}
     if con is not None:
-        prev_counts = {r["source"]: r["last_count"]
-                       for r in con.execute("SELECT source, last_count FROM source_health")}
+        # An incomplete attempt keeps its usable rows in last_count, but that
+        # number is not a completeness baseline. record_health() freezes the
+        # last complete count in prev_count until a genuinely healthy response.
+        prev_counts = {
+            r["source"]: (r["last_count"] if r["last_error"] is None
+                          else r["prev_count"])
+            for r in con.execute(
+                "SELECT source,last_count,last_error,prev_count FROM source_health")
+        }
     all_jobs, ok, errors = [], 0, {}
     healthy_boards, healthy_feeds = set(), set()
 
     if not feeds_only:
-        emps = [e for e in reg.get("employers", []) if e.get("active", True)]
+        emps = list(active_employer_rows)
         if tier:
             # A missing tier defaults to C rather than vanishing. Filtering on
             # `e.get("tier") in tier` silently excluded every employer that had
             # no tier key, so `--tier C` polled fewer boards than plain `pull`.
             emps = [e for e in emps if (e.get("tier") or "C") in tier]
+        # A duplicated endpoint is a configuration problem, but polling it
+        # twice is worse: one success followed by one partial response used to
+        # leave the same board both healthy and failed. Keep the first registry
+        # row deterministically; coverage/doctor tells the user to remove the
+        # duplicate.
+        unique_emps, seen_boards = [], set()
+        for employer in emps:
+            board = _adapters.board_id(employer).casefold()
+            if board in seen_boards:
+                continue
+            seen_boards.add(board)
+            unique_emps.append(employer)
+        emps = unique_emps
         echo(f"Polling {len(emps)} employer boards...")
         for e in emps:
             jobs, err = run_adapter(e)
             label = f"{e.get('ats')}:{e.get('name')}"
+            source_key = _adapters.board_id(e)
+            prev = prev_counts.get(source_key)
+            collapsed = (not err and prev is not None and prev >= 10
+                         and len(jobs) < prev * 0.5)
+            if collapsed:
+                err = (f"partial: count fell {prev} -> {len(jobs)}; below 50% "
+                       "of the last complete baseline")
             if con is not None:
-                store.record_health(con, label, len(jobs), err)
+                store.record_health(con, source_key, len(jobs), err)
             if err:
-                errors[label] = err
+                errors[source_key] = err
             else:
                 ok += 1
                 # Board identity, not platform identity. And a board whose count
@@ -64,13 +150,10 @@ def fetch_all(reg: dict, keys: dict, con=None, *, employers_only: bool = False,
                 # truncating board (broken pagination, an API that starts
                 # capping) reports success with a short list, and its missing
                 # rows would otherwise be retired as closed.
-                prev = prev_counts.get(label)
-                collapsed = prev and prev >= 10 and len(jobs) < prev * 0.5
-                if not collapsed:
-                    healthy_boards.add((e.get("ats"), e.get("name") or e.get("slug", ""),
-                                        _adapters.board_id(e)))
-                else:
-                    echo(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
+                healthy_boards.add((e.get("ats"), e.get("name") or e.get("slug", ""),
+                                    _adapters.board_id(e)))
+            if collapsed:
+                echo(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
             all_jobs.extend(jobs)
             capped = _adapters.at_page_ceiling(e.get("ats"), len(jobs))
             echo(f"  {label:<46} {len(jobs):>4}"
@@ -78,28 +161,43 @@ def fetch_all(reg: dict, keys: dict, con=None, *, employers_only: bool = False,
                  + ("  !! at page ceiling, likely truncated" if capped else ""))
 
     if not employers_only:
-        feeds = [f for f in reg.get("feeds", []) if f.get("active", True)]
+        feeds, seen_feeds = [], set()
+        for feed_cfg in reg.get("feeds", []):
+            if not _feed_active(feed_cfg):
+                continue
+            feed_name = str(feed_cfg.get("name") or "").strip().casefold()
+            if feed_name in seen_feeds:
+                continue
+            seen_feeds.add(feed_name)
+            feeds.append(feed_cfg)
         echo(f"\nPolling {len(feeds)} aggregator feeds...")
         for f in feeds:
+            feed_name = str(f["name"]).strip().casefold()
             cfg = dict(f)
-            cfg.update(keys.get(f["name"], {}) or {})
-            jobs, err = run_feed(f["name"], cfg)
+            cfg["name"] = feed_name
+            cfg.update(keys.get(feed_name, {}) or {})
+            jobs, err = run_feed(feed_name, cfg)
+            health_key = f"feed:{feed_name}"
+            prev = prev_counts.get(health_key)
+            collapsed = (not err and prev is not None and prev >= 10
+                         and len(jobs) < prev * 0.5)
+            if collapsed:
+                err = (f"partial: count fell {prev} -> {len(jobs)}; below 50% "
+                       "of the last complete baseline")
             if con is not None:
-                store.record_health(con, f"feed:{f['name']}", len(jobs), err)
+                store.record_health(con, health_key, len(jobs), err)
             if err:
-                errors[f["name"]] = err
+                errors[feed_name] = err
             else:
                 ok += 1
                 # Same collapse guard as employer boards: a feed that loops over
                 # several search terms can have most of them throttled, succeed
                 # on one, and report success with a fraction of its usual rows.
-                prev = prev_counts.get(f"feed:{f['name']}")
-                if not (prev and prev >= 10 and len(jobs) < prev * 0.5):
-                    healthy_feeds.add(f["name"])
-                else:
-                    echo(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
+                healthy_feeds.add(feed_name)
+            if collapsed:
+                echo(f"      (count fell {prev} -> {len(jobs)}; not retiring its rows)")
             all_jobs.extend(jobs)
-            echo(f"  feed:{f['name']:<41} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
+            echo(f"  feed:{feed_name:<41} {len(jobs):>4}" + (f"  [{err}]" if err else ""))
 
     return {"jobs": all_jobs, "sources_ok": ok, "errors": errors,
             "healthy_boards": healthy_boards, "healthy_feeds": healthy_feeds}
@@ -130,8 +228,8 @@ def clip_description(job) -> None:
 def pick_demoted(scored: list, kept_uids: set) -> dict:
     """One demotion per uid, best gate winning.
 
-    Aggregator sightings of one role share a uid, so a copy listed under a
-    foreign location scores EXCLUDED while the clean US copy scores
+    Repeated sightings that resolve to one opening uid can disagree: a copy
+    listed under a foreign location scores EXCLUDED while a richer copy scores
     SLOT-BLOCKED. "Best gate wins" was already implemented between a SURFACED
     and a demoted sighting; between two demoted ones this was a dict
     comprehension, which is plain last-write-wins. Iteration order then decided
@@ -141,15 +239,24 @@ def pick_demoted(scored: list, kept_uids: set) -> dict:
     Rare until the company floor arrived: the floor turns the formerly-surfaced
     clean copy into a demotion, which is exactly the case that exposes it.
     """
-    best: dict = {}
+    grouped: dict[str, list] = {}
     for j in scored:
-        if j.gate not in _DEMOTION_ORDER or j.uid in kept_uids:
+        if j.uid in kept_uids:
             continue
-        current = best.get(j.uid)
-        if current is None or (
-                (_DEMOTION_ORDER[j.gate], j.score) >
-                (_DEMOTION_ORDER[current.gate], current.score)):
-            best[j.uid] = j
+        grouped.setdefault(j.uid, []).append(j)
+
+    best: dict = {}
+    for uid, sightings in grouped.items():
+        authoritative = [job for job in sightings
+                         if _authoritative_sighting(job)]
+        candidates = [job for job in (authoritative or sightings)
+                      if job.gate in _DEMOTION_ORDER]
+        for j in candidates:
+            current = best.get(uid)
+            if current is None or (
+                    (_DEMOTION_ORDER[j.gate], j.score) >
+                    (_DEMOTION_ORDER[current.gate], current.score)):
+                best[uid] = j
     return best
 
 
@@ -186,6 +293,12 @@ def _surface_rank(job) -> tuple:
     )
 
 
+def _authoritative_sighting(job) -> bool:
+    """Employer ATS evidence outranks a third-party copy of the same URL."""
+    source = str(job.source or "").strip().casefold()
+    return source in ATS_SOURCES
+
+
 def pick_surfaced(scored: list) -> list:
     """Collapse surfaced sightings to one deterministic record per uid.
 
@@ -202,12 +315,23 @@ def pick_surfaced(scored: list) -> list:
     """
     grouped: dict[str, list] = {}
     for job in scored:
-        if job.gate in _SURFACE_ORDER:
-            grouped.setdefault(job.uid, []).append(job)
+        grouped.setdefault(job.uid, []).append(job)
 
     collapsed = []
     for uid in sorted(grouped):
-        sightings = grouped[uid]
+        all_sightings = grouped[uid]
+        authoritative = [job for job in all_sightings
+                         if _authoritative_sighting(job)]
+        # Exact direct-URL coalescing can put a stale/thin Freehire copy beside
+        # an employer-published sighting. The employer ATS owns the verdict,
+        # including EXCLUDED and SLOT-BLOCKED. Otherwise a third-party VERIFY
+        # copy could keep an opening surfaced after the canonical body failed a
+        # hard requirement.
+        decision_sightings = authoritative or all_sightings
+        sightings = [job for job in decision_sightings
+                     if job.gate in _SURFACE_ORDER]
+        if not sightings:
+            continue
         winner = max(sightings, key=_surface_rank)
         merged = copy(winner)
         merged.reasons = list(winner.reasons or [])
@@ -282,6 +406,11 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
         clip_description(_j)
     echo(f"\nScoring {len(all_jobs)} postings...")
     scored = score_all(all_jobs, profile)
+    # Freehire and a configured employer adapter can sight the same opening
+    # under different source-local IDs.  Resolve only an exact canonical direct
+    # URL match before surfaced/demoted selection, so both verdicts and both
+    # provenance rows operate on one opening regardless of fetch order.
+    store.coalesce_exact_direct_url_identities(con, scored)
     excluded: Counter = Counter()
     for j in scored:
         if j.gate in ("EXCLUDED", "SLOT-BLOCKED") and j.reasons:
@@ -294,10 +423,10 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
             label = j.reasons[0].split(":")[0].strip()
             excluded[label if len(label) <= 60 else label[:59] + "…"] += 1
 
-    # A UID can be surfaced by several feeds with different verdicts and
-    # different amounts of evidence.  Collapse them before upsert; otherwise
-    # the final fetched copy silently wins and the database changes when an API
-    # returns the same records in a different order.
+    # A UID can have repeated sightings with different verdicts and different
+    # amounts of evidence. Collapse them before upsert; otherwise the final
+    # fetched copy silently wins and the database changes when an API returns
+    # the same records in a different order.
     keep = pick_surfaced(scored)
     # run_id is what makes "new" mean "first seen THIS run" rather than "first
     # seen today". Omitting it is silent: rows land with no run stamp and the
@@ -309,10 +438,9 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
     # Close the loop: a posting that STOPPED qualifying is written back, and a
     # posting that vanished from a healthy board is marked delisted. Without
     # this, both kept surfacing as live qualified roles indefinitely.
-    # Best gate wins. Aggregator sightings of one role all share a uid, so a
-    # copy listed under a foreign location scores EXCLUDED while the clean copy
-    # scores QUALIFIED. Writing the demotion back blindly overwrote the row
-    # upsert had just created and deleted the role on the run it was found.
+    # Best gate wins for repeated sightings of the same opening. Writing a
+    # weaker demotion back blindly overwrote the surfaced row upsert had just
+    # created and deleted the role on the run it was found.
     demoted = pick_demoted(scored, kept_uids)
     n_delisted, n_demoted = store.reconcile(
         con, demoted, fetched["healthy_boards"], fetched["healthy_feeds"],
@@ -321,8 +449,21 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
         # polled, its non-empty stable board id matched no healthy source, and the
         # orphan rule refused to retire it because the inactive registry entry
         # still counted as known.
-        known_boards={(e.get("ats"), e.get("name") or e.get("slug", ""))
-                      for e in reg.get("employers", []) if e.get("active", True)})
+        known_boards={(e.get("ats"), e.get("name") or e.get("slug", ""),
+                       _adapters.board_id(e))
+                      for e in reg.get("employers", []) if e.get("active", True)},
+        # Keep configured and active feed identities distinct.  An explicitly
+        # disabled feed is orphan-eligible after the ordinary two-day guard;
+        # an absent/unconfigured source is not evidence of closure, and an
+        # active source that this filtered run did not poll must stay live.
+        known_feeds={str(f.get("name") or "").strip().casefold()
+                     for f in reg.get("feeds", [])
+                     if (str(f.get("name") or "").strip().casefold()
+                         in _aggregators.FEEDS)},
+        active_feeds={str(f.get("name") or "").strip().casefold()
+                      for f in reg.get("feeds", [])
+                      if (str(f.get("name") or "").strip().casefold()
+                          in _aggregators.FEEDS) and _feed_active(f)})
 
     # Reports and exports are the user's complete decision queue.  A fixed LIMIT
     # silently dropped every active row below 300, precisely the low-scoring tail
@@ -354,10 +495,22 @@ def broken_sources(con, reg: dict, threshold: int = 2) -> list:
 
     Lives here rather than in a CLI for the same reason the pull loop does:
     both front ends print this and one of them had already drifted."""
-    active = {f"{e.get('ats')}:{e.get('name')}"
-              for e in reg.get("employers", []) if e.get("active", True)}
+    employers = [e for e in reg.get("employers", []) if e.get("active", True)]
+    existing = {r["source"] for r in con.execute("SELECT source FROM source_health")}
+    legacy_counts, stable_counts = _health_identity_counts(employers)
+    active = {_adapters.board_id(e) for e in employers}
+    # Before stable board keys shipped, health used the display label. Continue
+    # reporting an unambiguous legacy row only until this board has produced its
+    # first stable-key health record. Same-name boards never share that fallback.
+    active |= {
+        label for e in employers
+        if (label := f"{e.get('ats')}:{e.get('name')}")
+        and legacy_counts[label] == 1
+        and stable_counts[_adapters.board_id(e)] == 1
+        and _adapters.board_id(e) not in existing
+    }
     active |= {f"feed:{f.get('name')}"
-               for f in reg.get("feeds", []) if f.get("active", True)}
+               for f in reg.get("feeds", []) if _feed_active(f)}
     return [b for b in con.execute(
         "SELECT * FROM source_health WHERE consecutive_failures >= ? "
         "ORDER BY consecutive_failures DESC", (threshold,))

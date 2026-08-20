@@ -614,14 +614,75 @@ def fetch(
 
 
 def reset_status() -> None:
-    """Clear the recorded status before a source runs.
+    """Clear request and integrity state before one source runs.
 
     Without this a source that returns nothing WITHOUT making a request - a
     config guard, a missing tenant id, an early return - inherits whatever the
     previously polled board left behind. A healthy 200 from the last employer
-    then reports the next one as "fine, nothing open" when it never ran at all."""
+    then reports the next one as "fine, nothing open" when it never ran at all.
+
+    Partial/capped diagnostics are source-scoped for the same reason.  A source
+    may retain useful rows after page two fails, but that failure must neither
+    disappear merely because rows exist nor leak into the next source."""
     _local.last_status = None
     _local.last_parse_ok = None
+    _local.partial_reasons = []
+    _local.capped_reasons = []
+
+
+def _mark_integrity(kind: str, reason: str) -> None:
+    """Record one bounded, de-duplicated source-integrity reason."""
+    reason = " ".join(str(reason or "").split())[:180]
+    if not reason:
+        return
+    attr = f"{kind}_reasons"
+    reasons = getattr(_local, attr, None)
+    if reasons is None:
+        reasons = []
+        setattr(_local, attr, reasons)
+    # A term-driven feed can fail dozens of searches in one run. Eight distinct
+    # examples prove the source is incomplete without making health rows and
+    # run artifacts unbounded.
+    if reason not in reasons and len(reasons) < 8:
+        reasons.append(reason)
+
+
+def mark_partial(reason: str) -> None:
+    """Mark a source response incomplete while allowing useful rows to survive."""
+    _mark_integrity("partial", reason)
+
+
+def mark_capped(reason: str) -> None:
+    """Mark a source that stopped at a configured or hard pagination ceiling."""
+    _mark_integrity("capped", reason)
+
+
+def source_diagnostics() -> dict[str, tuple[str, ...]]:
+    """Return immutable diagnostics for the source currently being dispatched."""
+    return {
+        "partial": tuple(getattr(_local, "partial_reasons", ())),
+        "capped": tuple(getattr(_local, "capped_reasons", ())),
+    }
+
+
+def source_integrity_error() -> str | None:
+    """Render diagnostics into the existing ``(jobs, error)`` source contract.
+
+    Keeping the public two-tuple avoids breaking other CareerKit front ends.
+    The non-None value makes ``fetch_all`` ingest retained rows while excluding
+    this source from both ``sources_ok`` and missing-row retirement.
+    """
+    diagnostics = source_diagnostics()
+    partial = list(diagnostics["partial"])
+    capped = list(diagnostics["capped"])
+    if partial:
+        detail = "; ".join(partial)
+        if capped:
+            detail += "; capped: " + "; ".join(capped)
+        return f"partial: {detail}"
+    if capped:
+        return "capped: " + "; ".join(capped)
+    return None
 
 
 def last_status() -> int | None:

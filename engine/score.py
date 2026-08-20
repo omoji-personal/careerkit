@@ -724,6 +724,7 @@ def extract_comp(job: Job) -> tuple[int | None, int | None]:
     source `unknown`; preserve that honest uncertainty instead of laundering
     them into board-supplied values during a rescore.
     """
+    structured_fallback: tuple[int | None, int | None] | None = None
     if job.comp_min or job.comp_max:
         lo, hi = job.comp_min, job.comp_max
         if job.comp_source not in ("board", "body", "unknown"):
@@ -734,9 +735,19 @@ def extract_comp(job: Job) -> tuple[int | None, int | None]:
         # reporting a band of $2,080 to $520,000,000. The top of the range settles
         # it - nobody is paid $250,000 an hour - so only annualise when the whole
         # band looks hourly, not just its floor.
+        if lo and hi and lo > hi:
+            lo, hi = hi, lo
         if lo and lo < 1000 and (hi is None or hi < 1000):
             lo, hi = lo * 2080, (hi * 2080 if hi else None)
-        return lo, hi
+            return lo, hi
+        if lo and lo < 1000 and hi and hi >= 40_000:
+            # Mixed units/junk from an aggregator are not a usable band. Keep
+            # the credible annual ceiling only if the posting body has no
+            # explicit range; otherwise prefer the employer's own prose.
+            structured_fallback = (None, hi)
+            job.comp_min, job.comp_max = None, hi
+        else:
+            return lo, hi
     def parse_text(text: str) -> tuple[int | None, int | None]:
         best: list[int] = []
         for m in _RANGE_CTX.finditer(text):
@@ -794,6 +805,9 @@ def extract_comp(job: Job) -> tuple[int | None, int | None]:
             job.comp_source = source
             return lo, hi
     job.comp_source = "absent"
+    if structured_fallback is not None:
+        job.comp_source = "board"
+        return structured_fallback
     return None, None
 
 
@@ -1063,6 +1077,24 @@ def score(job: Job, p: Profile) -> Job:
     passes through.
     """
     job = _score_uncapped(job, p)
+
+    # Freehire is a discovery bridge, not durable first-party provenance.  Even
+    # when its hydrated copy contains enough text to clear every ordinary rail,
+    # the employer ATS must still be checked before the role is treated as fully
+    # qualified.  Apply this only to verdicts that already surface: provenance
+    # uncertainty must never promote a posting killed by a hard rail or blocked
+    # by the user's role preferences.
+    if ((job.source or "").strip().casefold().startswith("freehire:")
+            and job.gate in ("QUALIFIED", "VERIFY")):
+        job.gate = "VERIFY"
+        verification = (
+            "source verification required: Freehire discovery must be "
+            "confirmed on the direct employer posting"
+        )
+        if not any("source verification required" in reason.casefold()
+                   for reason in (job.reasons or [])):
+            job.reasons = [verification] + list(job.reasons or [])
+
     if not p.company_floors and not p.excluded_companies:
         return job
     key = _company_key(job.company)

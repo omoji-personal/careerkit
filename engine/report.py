@@ -236,11 +236,16 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
         f"# Sourcing run - {today}",
         "",
         f"**Pulled** {run_detail.get('pulled', 0)} postings from "
-        f"{run_detail.get('sources_ok', 0)} live sources | "
+        f"{run_detail.get('sources_ok', 0)} complete sources | "
         f"**{len(new_rows)} new** | **{len(qual)} qualified roles** "
         f"({sum(len(g) for g in qual)} reqs) | {len(verify)} need a check",
         "",
     ]
+    errors = run_detail.get("errors") or {}
+    if errors:
+        L += [f"**Coverage gaps:** {len(errors)} source(s) were partial, capped, "
+              "dormant, or failed; their retained jobs remain usable, but they "
+              "are not counted as complete. See Source health below.", ""]
     # A strong fit missing one rail can outscore everything in Qualified, and
     # the section order buries it. Name the best one where it cannot be missed.
     if strong:
@@ -286,8 +291,9 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
             f"{_table_cell(h['last_error'] or '', 70)} |"
         )
     L += ["",
-          "_A source at 0 with no error is live but had nothing in family. A source "
-          "with rising consecutive failures has broken and is silently costing coverage._",
+          "_A source at 0 with no error completed but had nothing in family. "
+          "Partial or capped sources may still contribute jobs, but cannot prove "
+          "that missing postings closed. Rising failures are coverage loss._",
           ""]
 
     # Which of the feeds that ran are scrapers rather than APIs. Worth stating in

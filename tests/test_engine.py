@@ -113,12 +113,27 @@ def test_distinct_requisitions_do_not_collapse():
     assert a.group_key == b.group_key, "report can still show them as one entry"
 
 
-def test_same_role_from_an_aggregator_still_dedupes():
-    """Aggregators mint their own ids, so they must NOT split a role into
-    duplicates. This is the property the original key existed to protect."""
+def test_distinct_aggregator_openings_do_not_collapse():
+    """A feed's IDs distinguish siblings while the report grouping remains."""
     a = J(source="remotive", external_id="agg-1")
     b = J(source="remotive", external_id="agg-2")
+    assert a.uid != b.uid
+    assert a.group_key == b.group_key
+
+
+def test_same_aggregator_opening_is_stable():
+    a = J(source="remotive", external_id="agg-1", url="https://feed/old")
+    b = J(source="remotive", external_id="agg-1", url="https://feed/new")
     assert a.uid == b.uid
+
+
+def test_applying_to_one_aggregator_opening_leaves_sibling_visible(db):
+    from engine import store
+    a = J(source="remotive", external_id="agg-1", url="https://feed/1")
+    b = J(source="remotive", external_id="agg-2", url="https://feed/2")
+    store.upsert(db, [a, b])
+    store.set_status(db, a.uid, "applied")
+    assert any(r["uid"] == b.uid for r in store.query(db))
 
 
 def test_applying_to_one_req_leaves_siblings_visible(db):
@@ -287,7 +302,20 @@ def test_a_junk_floor_does_not_annualise_a_salary_band():
     from engine.score import extract_comp
     j = J()
     j.comp_min, j.comp_max = 1, 250_000
-    assert extract_comp(j) == (1, 250_000)
+    assert extract_comp(j) == (None, 250_000)
+    assert j.comp_min is None and j.comp_max == 250_000
+
+
+def test_a_mixed_scale_structured_band_prefers_the_employer_body_range():
+    from engine.score import extract_comp
+    j = J(description=(
+        "The typical base salary range for this position is "
+        "$171,200 - $273,000 annually."
+    ))
+    j.comp_min, j.comp_max = 273, 171_200
+
+    assert extract_comp(j) == (171_200, 273_000)
+    assert j.comp_source == "body"
 
 
 def test_a_genuine_hourly_band_still_annualises():
@@ -435,17 +463,20 @@ def test_only_one_sibling_adopts_the_legacy_row(db):
     assert rows[b.uid]["status"] == "new", "sibling wrongly inherited applied"
 
 
-def test_aggregator_rows_need_no_adoption(db):
+def test_aggregator_legacy_row_adopts_on_exact_url(db):
     from engine import store
     j = J(source="remotive", external_id="agg-1")
-    assert j.uid == j.group_key
+    assert j.uid != j.group_key
     db.execute("INSERT INTO jobs (uid, group_key, company, title, url, source, gate, "
                "score, status, first_seen, last_seen, schema_v) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
-               (j.group_key, j.group_key, j.company, j.title, "u", "remotive",
+               (j.legacy_named_aggregator_uid, j.group_key, j.company, j.title,
+                j.url, "remotive",
                 "QUALIFIED", 70, "reviewed", "2026-07-01", "2026-07-30"))
     db.commit()
     new, again = store.upsert(db, [j])
     assert len(new) == 0 and len(again) == 1
+    row = db.execute("SELECT uid,status FROM jobs").fetchone()
+    assert (row["uid"], row["status"]) == (j.uid, "reviewed")
 
 
 def test_titleless_posting_is_rejected():
@@ -578,11 +609,10 @@ def test_a_tier_filtered_run_does_not_retire_unpolled_employers(db):
 
 
 def test_a_modern_aggregator_row_cannot_be_hijacked(db):
-    """An aggregator uid IS the bare group_key, which the old adoption probe
-    also matched. An ATS req could steal that live row and leave a permanent
-    duplicate behind."""
+    """A modern aggregator row is never generic ATS-migration material."""
     from engine import store
     agg = J(source="remotive", external_id="agg1")
+    assert agg.uid != agg.group_key
     store.upsert(db, [agg])
     ats = J(source="greenhouse", external_id="777")
     assert ats.group_key == agg.group_key and ats.uid != agg.uid
@@ -665,14 +695,14 @@ def test_a_regex_matching_everything_is_rejected():
 
 
 def test_a_foreign_copy_of_a_role_does_not_delete_the_qualified_one(db):
-    """Aggregator sightings of one role share a uid. A copy listed under a
-    foreign location scores EXCLUDED while the clean copy scores QUALIFIED;
+    """Two sightings of the same feed opening share a uid. A copy listed under
+    a foreign location scores EXCLUDED while the clean copy scores QUALIFIED;
     writing the demotion back blindly deleted the role on the run it was found.
     Best gate must win."""
     from engine import store
-    good = J(source="remotive", location="Remote, US")
-    bad = J(source="remoteok", location="Toronto, Canada")
-    assert good.uid == bad.uid, "precondition: aggregator copies share a uid"
+    good = J(source="remotive", external_id="same", location="Remote, US")
+    bad = J(source="remotive", external_id="same", location="Toronto, Canada")
+    assert good.uid == bad.uid, "precondition: resightings share a uid"
     bad.gate, bad.score, bad.reasons = "EXCLUDED", 52, ["non-US: Toronto, Canada"]
 
     keep = [good]
@@ -1608,6 +1638,31 @@ def test_report_renders_the_discovered_section(tmp_path, monkeypatch):
         filename="t.md")
     body = path.read_text()
     assert "Newly discovered employers" in body and "Acme" in body
+
+
+def test_report_calls_partial_sources_coverage_gaps_not_live(tmp_path, monkeypatch):
+    from engine import report as _report
+    monkeypatch.setattr(_report, "OUT_DIR", tmp_path)
+    con = sqlite3.connect(":memory:")
+    con.row_factory = sqlite3.Row
+    con.execute("CREATE TABLE source_health (source,last_ok,last_count,last_error,"
+                "consecutive_failures)")
+    con.execute("INSERT INTO source_health VALUES "
+                "('workday:acme/wd1/external',NULL,120,'capped: 120 of 1000',1)")
+    health = list(con.execute("SELECT * FROM source_health"))
+
+    path = _report.write_report(
+        con, [], health=health,
+        run_detail={"pulled": 120, "sources_ok": 0,
+                    "errors": {"workday:acme/wd1/external":
+                               "capped: 120 of 1000"}},
+        filename="partial.md")
+    body = path.read_text()
+
+    assert "0 complete sources" in body
+    assert "**Coverage gaps:** 1 source(s)" in body
+    assert "0 live sources" not in body
+    assert "cannot prove that missing postings closed" in body
 
 
 def test_profile_lint_catches_a_lane_that_admits_a_competing_platform(tmp_path):
@@ -2775,8 +2830,8 @@ def test_identity_distinguishes_while_grouping_collapses():
     from engine.models import Job
 
     def pair(a, b):
-        ja = Job(company="Salesforce", title=a, url="1", source="s")
-        jb = Job(company="Salesforce", title=b, url="2", source="s")
+        ja = Job(company="Salesforce", title=a, url="https://feed/1", source="s")
+        jb = Job(company="Salesforce", title=b, url="https://feed/1", source="s")
         return ja.uid == jb.uid, ja.group_key == jb.group_key
 
     same_uid, same_group = pair("Success Architect (Agentforce)", "Success Architect (Data Cloud)")

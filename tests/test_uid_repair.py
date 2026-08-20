@@ -84,3 +84,63 @@ def test_same_url_uid_change_merges_an_existing_fresh_duplicate(tmp_path, monkey
     assert row["first_seen"] == "2026-07-01"
     assert row["seen_count"] >= 6
     assert con.execute("SELECT uid FROM events").fetchone()["uid"] == job.uid
+
+
+def test_named_aggregator_identity_adopts_only_the_exact_legacy_url(
+        tmp_path, monkeypatch):
+    """A collapsed legacy row's history follows only its real opening."""
+    from engine import store
+    from engine.models import Job
+
+    first = Job(company="Acme", title="Program Manager",
+                url="https://feed.example/jobs/one", source="remotive",
+                external_id="one")
+    sibling = Job(company="Acme", title="Program Manager",
+                  url="https://feed.example/jobs/two", source="remotive",
+                  external_id="two")
+    con = _db(tmp_path, monkeypatch)
+    store.upsert(con, [first], run_id=1)
+    legacy_uid = first.legacy_named_aggregator_uid
+    assert legacy_uid == sibling.legacy_named_aggregator_uid
+    con.execute("UPDATE jobs SET uid=?, url='HTTPS://Feed.Example:443/jobs/one#old', "
+                "status='applied', notes='confirmation', first_seen='2026-07-01' "
+                "WHERE uid=?", (legacy_uid, first.uid))
+    con.execute("UPDATE sightings SET uid=? WHERE uid=?", (legacy_uid, first.uid))
+    con.execute("INSERT INTO events(uid,at,kind,detail) VALUES "
+                "(?,'2026-07-02','status:applied','confirmation')", (legacy_uid,))
+    con.commit()
+
+    # Reverse order proves the nonmatching sibling cannot hijack the old row.
+    store.upsert(con, [sibling, first], run_id=2)
+
+    rows = {r["uid"]: r for r in con.execute("SELECT * FROM jobs")}
+    assert set(rows) == {first.uid, sibling.uid}
+    assert rows[first.uid]["status"] == "applied"
+    assert rows[first.uid]["notes"] == "confirmation"
+    assert rows[sibling.uid]["status"] == "new"
+    assert con.execute("SELECT uid FROM events").fetchone()["uid"] == first.uid
+
+
+def test_cross_source_opening_cannot_inherit_legacy_status(tmp_path, monkeypatch):
+    from engine import store
+    from engine.models import Job
+
+    old = Job(company="Acme", title="Program Manager",
+              url="https://remotive.example/jobs/one", source="remotive",
+              external_id="one")
+    other = Job(company="Acme", title="Program Manager",
+                url="https://linkedin.example/jobs/one", source="linkedin_guest",
+                external_id="one")
+    con = _db(tmp_path, monkeypatch)
+    store.upsert(con, [old])
+    con.execute("UPDATE jobs SET uid=?, status='rejected' WHERE uid=?",
+                (old.legacy_named_aggregator_uid, old.uid))
+    con.execute("UPDATE sightings SET uid=? WHERE uid=?",
+                (old.legacy_named_aggregator_uid, old.uid))
+    con.commit()
+
+    store.upsert(con, [other])
+
+    rows = list(con.execute("SELECT source,status FROM jobs ORDER BY source"))
+    assert [(r["source"], r["status"]) for r in rows] == [
+        ("linkedin_guest", "new"), ("remotive", "rejected")]

@@ -23,6 +23,19 @@ from these official public endpoints:
   `career.teamtailor.com/jobs.json`.
 - `oracle_orc.json` — the public Oracle Recruiting Cloud board at
   `ejov.fa.ca2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/`.
+- `oracle_orc_detail.json` — a trimmed, employer-name-sanitized response from
+  Oracle Candidate Experience's public requisition-detail resource.
+- `pinpoint.json` — a trimmed, employer-name-sanitized response using fields
+  observed on Pinpoint's documented public Sensiba and JED `postings.json`
+  endpoints.
+- `neogov.xml` — a trimmed, agency-name-sanitized response from NEOGOV's
+  official per-agency GovernmentJobs RSS endpoint for `agency=fulton`.
+- `freehire_search_page1.json`, `freehire_search_page2.json`,
+  `freehire_detail_greenhouse.json`, and `freehire_detail_workday.json` —
+  sanitized, reduced examples of Freehire's public `{data, meta}` search and
+  detail contract as documented and tested by the reviewed upstream v1.6.0
+  client. Employer names, requisition values, and posting prose are synthetic;
+  endpoint paths and field shapes follow that public contract.
 
 The cache used here contains only ordinary public board responses. Fixture
 records contain no applicant, profile, authentication, or personal data.

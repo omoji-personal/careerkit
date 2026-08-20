@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"
+     xmlns:joblisting="http://www.neogov.com/namespaces/JobListing"
+     xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Example Public Agency</title>
+    <link>https://www.governmentjobs.com/careers/exampleagency</link>
+    <description>Latest Employment Information</description>
+    <item>
+      <guid isPermaLink="true">https://www.governmentjobs.com/careers/exampleagency/jobs/410001</guid>
+      <link>https://www.governmentjobs.com/careers/exampleagency/jobs/410001</link>
+      <title>Enterprise Applications Manager</title>
+      <description>&lt;p&gt;Lead the agency applications portfolio.&lt;/p&gt;</description>
+      <pubDate>Wed, 19 Aug 2026 23:10:38 GMT</pubDate>
+      <joblisting:jobId>410001</joblisting:jobId>
+      <joblisting:advertiseFromDateUTC>Wed, 19 Aug 2026 05:00:00:0</joblisting:advertiseFromDateUTC>
+      <joblisting:advertiseToDateTimeUTC>Sun, 20 Sep 2026 04:59:00:0</joblisting:advertiseToDateTimeUTC>
+      <joblisting:minimumSalary>135000</joblisting:minimumSalary>
+      <joblisting:maximumSalary>175000</joblisting:maximumSalary>
+      <joblisting:salaryCurrency>USD</joblisting:salaryCurrency>
+      <joblisting:salaryInterval>Year</joblisting:salaryInterval>
+      <joblisting:department>Information Technology</joblisting:department>
+      <joblisting:location>Atlanta, Georgia</joblisting:location>
+      <joblisting:examplesofduties>&lt;p&gt;Own architecture and delivery governance.&lt;/p&gt;</joblisting:examplesofduties>
+      <joblisting:qualifications>&lt;p&gt;Five years of enterprise systems leadership.&lt;/p&gt;</joblisting:qualifications>
+      <joblisting:supplementalinformation>&lt;p&gt;A background check is required.&lt;/p&gt;</joblisting:supplementalinformation>
+      <joblisting:categories>
+        <joblisting:category>Information Technology</joblisting:category>
+      </joblisting:categories>
+    </item>
+    <item>
+      <guid isPermaLink="true">https://www.governmentjobs.com/careers/exampleagency/jobs/410002</guid>
+      <link>https://www.governmentjobs.com/careers/exampleagency/jobs/410002</link>
+      <title>CRM Project Consultant</title>
+      <description>&lt;p&gt;Support a time-limited CRM implementation.&lt;/p&gt;</description>
+      <pubDate>Tue, 18 Aug 2026 14:00:00 GMT</pubDate>
+      <joblisting:jobId>410002</joblisting:jobId>
+      <joblisting:minimumSalary>65</joblisting:minimumSalary>
+      <joblisting:maximumSalary>85</joblisting:maximumSalary>
+      <joblisting:salaryCurrency>USD</joblisting:salaryCurrency>
+      <joblisting:salaryInterval>Hour</joblisting:salaryInterval>
+      <joblisting:location>Remote</joblisting:location>
+      <joblisting:categories>
+        <joblisting:category>Project Management</joblisting:category>
+      </joblisting:categories>
+      <joblisting:qualifications>&lt;p&gt;CRM delivery experience.&lt;/p&gt;</joblisting:qualifications>
+    </item>
+  </channel>
+</rss>

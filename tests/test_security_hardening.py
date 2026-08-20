@@ -569,7 +569,7 @@ def test_blank_company_source_is_part_of_the_disambiguator():
     assert indeed.group_key != linkedin.group_key
 
 
-def test_named_company_identity_still_collapses_aggregator_urls():
+def test_named_company_aggregator_openings_keep_distinct_uids_but_group():
     first = Job(
         company="Acme Inc.", title="Program Manager",
         url="https://feed.example/jobs/1", source="jobspy:indeed",
@@ -579,7 +579,7 @@ def test_named_company_identity_still_collapses_aggregator_urls():
         url="https://other.example/jobs/99", source="linkedin_guest",
     )
 
-    assert first.uid == second.uid
+    assert first.uid != second.uid
     assert first.group_key == second.group_key
     assert first.legacy_blank_company_uid == ""
     assert first.legacy_blank_company_group_key == ""

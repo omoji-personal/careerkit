@@ -12,11 +12,12 @@ import errno
 import json
 import os
 import sqlite3
+from collections import defaultdict
 from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 
-from .models import Job, ATS_SOURCES, _norm_company
+from .models import Job, ATS_SOURCES, _identity_url, _norm_company
 
 DB_PATH = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "data" / "jobs.db"
 
@@ -476,6 +477,234 @@ def _repair_blank_company_identity(cur: sqlite3.Cursor, job: Job) -> None:
         _merge_duplicate_job_row(cur, job.uid, old)
 
 
+def _repair_named_aggregator_identity(cur: sqlite3.Cursor, job: Job) -> None:
+    """Adopt a collapsed legacy aggregator row only for its exact opening.
+
+    The old company-and-title UID may hold an applied/rejected status.  Copying
+    that status to every newly distinct sibling would be as damaging as losing
+    it, so only a source and canonical-URL match may claim the legacy row.
+    """
+    legacy_uid = job.legacy_named_aggregator_uid
+    if not legacy_uid or legacy_uid == job.uid:
+        return
+    cur.execute(
+        "SELECT * FROM jobs WHERE uid=? AND group_key=? AND lower(source)=lower(?)",
+        (legacy_uid, job.group_key, job.source),
+    )
+    old = cur.fetchone()
+    if old is None or _identity_url(old["url"] or "") != _identity_url(job.url):
+        return
+
+    cur.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,))
+    current = cur.fetchone()
+    if current is None:
+        try:
+            cur.execute(
+                "UPDATE jobs SET uid=?, group_key=?, schema_v=2 WHERE uid=?",
+                (job.uid, job.group_key, old["uid"]),
+            )
+            cur.execute("UPDATE sightings SET uid=? WHERE uid=?",
+                        (job.uid, old["uid"]))
+            cur.execute("UPDATE events SET uid=? WHERE uid=?",
+                        (job.uid, old["uid"]))
+            return
+        except sqlite3.IntegrityError:
+            cur.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,))
+            current = cur.fetchone()
+
+    if current is not None:
+        _merge_duplicate_job_row(cur, job.uid, old)
+
+
+def _cross_source_key(company: str, source: str, direct_url: str,
+                      *, freehire: bool) -> tuple[str, str, str] | None:
+    """Return the deliberately narrow native/Freehire identity assertion.
+
+    The bridge is allowed to collapse only a named employer, an allowlisted ATS
+    provider, and an exact canonical direct URL.  Title similarity, a Freehire
+    public slug, or an upstream requisition id are not durable enough to carry a
+    user's status history across sources.
+    """
+    company_key = _norm_company(company)
+    source_key = (source or "").strip().casefold()
+    if not company_key:
+        return None
+    if freehire:
+        if not source_key.startswith("freehire:"):
+            return None
+        provider = source_key.split(":", 1)[1]
+        # Freehire's public taxonomy calls Oracle Recruiting Cloud `oracle`,
+        # while CareerKit's native adapter is deliberately named oracle_orc.
+        # Normalize only aliases that map to a real native ATS; unsupported
+        # Freehire-only providers must remain independent discovery rows.
+        provider = {"oracle": "oracle_orc"}.get(provider, provider)
+    else:
+        provider = source_key
+    if provider not in ATS_SOURCES:
+        return None
+    canonical = _identity_url(direct_url)
+    if not canonical:
+        return None
+    return provider, company_key, canonical
+
+
+def _stored_cross_source_indexes(con: sqlite3.Connection):
+    """Index durable native rows and Freehire sightings by exact direct URL."""
+    native: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    freehire: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    native_groups: dict[str, str] = {}
+    rows = list(con.execute(
+        "SELECT uid,group_key,company,source,url,url_direct FROM jobs"))
+    by_uid = {row["uid"]: row for row in rows}
+
+    for row in rows:
+        source = (row["source"] or "").strip().casefold()
+        if source.startswith("freehire:"):
+            # url_direct is the durable assertion that this was the employer's
+            # ATS destination, rather than Freehire's own public job page.
+            key = _cross_source_key(
+                row["company"], source, row["url_direct"] or "", freehire=True)
+            if key:
+                freehire[key].add(row["uid"])
+        elif source in ATS_SOURCES:
+            key = _cross_source_key(
+                row["company"], source, row["url_direct"] or row["url"] or "",
+                freehire=False)
+            if key:
+                native[key].add(row["uid"])
+                native_groups[row["uid"]] = row["group_key"] or ""
+
+    # A canonical native row normally remains the jobs-table winner, but source
+    # sightings are the durable provenance contract.  Index Freehire sightings
+    # too so a later Freehire-only pull keeps using the already-collapsed UID.
+    for sighting in con.execute("SELECT uid,source,url FROM sightings"):
+        row = by_uid.get(sighting["uid"])
+        if row is None:
+            continue
+        source = (sighting["source"] or "").strip().casefold()
+        if not source.startswith("freehire:"):
+            continue
+        key = _cross_source_key(
+            row["company"], source, sighting["url"] or "", freehire=True)
+        if key:
+            freehire[key].add(sighting["uid"])
+    return native, freehire, native_groups
+
+
+def coalesce_exact_direct_url_identities(con: sqlite3.Connection,
+                                         jobs: list[Job]) -> None:
+    """Give native + Freehire copies of one exact opening one runtime UID.
+
+    Native ATS identity remains canonical.  A Freehire row is redirected only
+    when there is exactly one native requisition for the same normalized
+    employer, provider, and canonical direct URL.  If two native requisitions
+    share a generic URL, ambiguity wins and nothing is collapsed.  With no
+    native sighting in the current batch, an existing Freehire sighting may
+    retain its already-chosen UID; that makes the relationship stable across a
+    later Freehire-only run without treating an unconfigured feed as authority.
+    """
+    if not jobs:
+        return
+    existing_native, existing_freehire, native_groups = \
+        _stored_cross_source_indexes(con)
+    batch_native: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    batch_freehire: dict[tuple[str, str, str], set[str]] = defaultdict(set)
+    descriptors: list[tuple[Job, str, tuple[str, str, str], str]] = []
+
+    for job in jobs:
+        source = (job.source or "").strip().casefold()
+        intrinsic_uid = job.uid
+        if source.startswith("freehire:"):
+            # Do not fall back to ``url`` here.  The explicit direct field is
+            # what proves the bridge resolved an employer-owned destination.
+            key = _cross_source_key(
+                job.company, source, job.url_direct or "", freehire=True)
+            kind = "freehire"
+        elif source in ATS_SOURCES:
+            key = _cross_source_key(
+                job.company, source, job.url_direct or job.url, freehire=False)
+            kind = "native"
+        else:
+            continue
+        if key is None:
+            continue
+        descriptors.append((job, kind, key, intrinsic_uid))
+        if kind == "native":
+            batch_native[key].add(intrinsic_uid)
+            native_groups[intrinsic_uid] = job.group_key
+        else:
+            batch_freehire[key].add(intrinsic_uid)
+
+    for key in {descriptor[2] for descriptor in descriptors}:
+        native_uids = set(existing_native.get(key, ())) | set(batch_native.get(key, ()))
+        freehire_uids = (set(existing_freehire.get(key, ())) |
+                         set(batch_freehire.get(key, ())))
+        matching = [descriptor for descriptor in descriptors if descriptor[2] == key]
+
+        if len(native_uids) == 1:
+            target_uid = next(iter(native_uids))
+            aliases = tuple(sorted(set(existing_freehire.get(key, ())) - {target_uid}))
+            group_key = native_groups.get(target_uid, "")
+            for job, kind, _key, _intrinsic_uid in matching:
+                if kind == "freehire":
+                    setattr(job, "_identity_uid_override", target_uid)
+                # The repair marker is placed on both kinds.  That lets a
+                # native-only re-sighting migrate a Freehire row written by an
+                # earlier opt-in run, whichever source arrived first.
+                if freehire_uids:
+                    setattr(job, "_cross_source_alias_uids", aliases)
+                    setattr(job, "_cross_source_group_key", group_key)
+            continue
+
+        if native_uids:
+            # Two native requisitions share the locator.  It is likely a generic
+            # apply page, and choosing either would attach history arbitrarily.
+            continue
+
+        # A prior collapsed row may have Freehire as its jobs-table winner.  Its
+        # sighting URL is sufficient only to preserve that existing identity,
+        # never to merge two different existing rows.
+        prior = set(existing_freehire.get(key, ()))
+        if len(prior) == 1:
+            target_uid = next(iter(prior))
+            for job, kind, _key, _intrinsic_uid in matching:
+                if kind == "freehire":
+                    setattr(job, "_identity_uid_override", target_uid)
+
+
+def _repair_exact_direct_url_identity(cur: sqlite3.Cursor, job: Job) -> None:
+    """Move pre-existing Freehire aliases under the unique native ATS UID."""
+    aliases = tuple(getattr(job, "_cross_source_alias_uids", ()))
+    if not aliases:
+        return
+    target_uid = job.uid
+    target_group = getattr(job, "_cross_source_group_key", "") or job.group_key
+    for old_uid in aliases:
+        if not old_uid or old_uid == target_uid:
+            continue
+        old = cur.execute("SELECT * FROM jobs WHERE uid=?", (old_uid,)).fetchone()
+        if old is None:
+            continue
+        current = cur.execute(
+            "SELECT * FROM jobs WHERE uid=?", (target_uid,)).fetchone()
+        if current is None:
+            try:
+                cur.execute(
+                    "UPDATE jobs SET uid=?, group_key=?, schema_v=2 WHERE uid=?",
+                    (target_uid, target_group, old_uid),
+                )
+                cur.execute("UPDATE sightings SET uid=? WHERE uid=?",
+                            (target_uid, old_uid))
+                cur.execute("UPDATE events SET uid=? WHERE uid=?",
+                            (target_uid, old_uid))
+                continue
+            except sqlite3.IntegrityError:
+                current = cur.execute(
+                    "SELECT * FROM jobs WHERE uid=?", (target_uid,)).fetchone()
+        if current is not None:
+            _merge_duplicate_job_row(cur, target_uid, old)
+
+
 def _repair_same_url_identity(cur: sqlite3.Cursor, job: Job) -> None:
     """Collapse rows stranded by an earlier ATS UID algorithm.
 
@@ -568,6 +797,10 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
     """Insert or refresh. Returns (new_jobs, seen_again)."""
     today = date.today().isoformat()
     new, again = [], []
+    # Library callers may invoke upsert directly instead of going through the
+    # pull loop. Resolve exact native/Freehire identities here as well so both
+    # entry points preserve the same opening count and status history.
+    coalesce_exact_direct_url_identities(con, jobs)
     # A legacy row can be adopted by exactly one requisition, and the batch
     # order decides which. Put the req whose URL matches the stored row first,
     # so the user's "applied" status follows the job they actually applied to
@@ -578,9 +811,12 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
         jobs = sorted(jobs, key=lambda j: 0 if legacy_urls.get(j.group_key) == j.url else 1)
     with closing(con.cursor()) as cur:
         for j in jobs:
+            _repair_exact_direct_url_identity(cur, j)
+            _repair_named_aggregator_identity(cur, j)
             _repair_blank_company_identity(cur, j)
             _repair_same_url_identity(cur, j)
-            cur.execute("SELECT uid, status, first_seen_run FROM jobs WHERE uid=?", (j.uid,))
+            cur.execute("SELECT uid,status,first_seen_run,source FROM jobs WHERE uid=?",
+                        (j.uid,))
             row = cur.fetchone()
             if row is None and j.uid != j.group_key:
                 # No row under the new uid. Look for a LEGACY row in this group
@@ -608,13 +844,22 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                                     (j.uid, legacy["uid"]))
                         cur.execute("UPDATE OR REPLACE sightings SET uid=? WHERE uid=?",
                                     (j.uid, legacy["uid"]))
-                        cur.execute("SELECT uid, status, first_seen_run FROM jobs WHERE uid=?",
-                                    (j.uid,))
+                        cur.execute(
+                            "SELECT uid,status,first_seen_run,source FROM jobs WHERE uid=?",
+                            (j.uid,))
                         row = cur.fetchone()
                     except sqlite3.IntegrityError:
                         row = None
             if row:
                 recovered_new = _recover_abandoned_newness(cur, row, run_id)
+                incoming_freehire = ((j.source or "").strip().casefold()
+                                     .startswith("freehire:"))
+                stored_source = (
+                    row["source"]
+                    if incoming_freehire and
+                    (row["source"] or "").strip().casefold() in ATS_SOURCES
+                    else j.source
+                )
                 # url/title/location/description are REFRESHED, not frozen at
                 # first sighting. A board that edits a title or re-issues a
                 # posting under a new URL used to leave the row pointing at a
@@ -700,7 +945,7 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
                     (today, j.score, j.gate, " | ".join(j.reasons),
                      _resolved_comp(j), j.comp_min, _resolved_comp(j), j.comp_max,
                      j.url, j.title, j.location,
-                     j.description[:DESCRIPTION_LIMIT], j.source, j.board, j.group_key,
+                     j.description[:DESCRIPTION_LIMIT], stored_source, j.board, j.group_key,
                      int(recovered_new), run_id, run_id,
                      j.registry_lane,
                      *_remote_sql_args(j.remote_flag, j.source, j.board),
@@ -751,7 +996,9 @@ rescore. Truncate once, judge what you keep."""
 def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
               healthy_boards: set[tuple[str, str]],
               healthy_feeds: set[str],
-              known_boards: set[tuple[str, str]] | None = None) -> tuple[int, int]:
+              known_boards: set[tuple[str, ...]] | None = None,
+              known_feeds: set[str] | None = None,
+              active_feeds: set[str] | None = None) -> tuple[int, int]:
     """Close the loop after a run. Returns (delisted, demoted).
 
     Two holes this fills, both of which surfaced dead or wrong rows as live:
@@ -770,7 +1017,10 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
     because one company answered would retire the jobs of every company that
     404'd, and `pull --tier A` would retire everything from the tiers it did
     not poll. Feeds have no per-employer identity, so they match on source
-    alone; employer boards match on source AND company.
+    alone; employer boards match on source AND company.  ``known_feeds`` and
+    ``active_feeds`` distinguish an explicitly disabled configured feed from an
+    arbitrary source that is merely absent from the current registry.  Only the
+    former is orphan-eligible, under the same two-day miss guard.
     """
     today = date.today().isoformat()
     dem = 0
@@ -867,9 +1117,6 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
                 cur.execute("INSERT OR REPLACE INTO sightings (uid, source, url, seen_on) "
                             "VALUES (?,?,?,?)", (uid, dj.source, dj.url, today))
             dem += updated
-        if not healthy_boards and not healthy_feeds:
-            con.commit()
-            return 0, dem
         # Two matching paths, deliberately. `board` is the stable id
         # (platform:slug) and survives an employer being renamed in the
         # registry. Rows written before that column existed carry none, so they
@@ -890,7 +1137,11 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
                            "(source || x'00' || company) IN (%s))"
                            % ",".join("?" * len(pairs)))
             params += pairs
-        if healthy_feeds:
+        healthy_feed_names = sorted({
+            str(feed).strip().casefold() for feed in healthy_feeds
+            if str(feed).strip()
+        })
+        if healthy_feed_names:
             # A feed may namespace its rows ("jobspy:indeed") while the registry
             # knows it as "jobspy", so compare the part before the colon.
             # Without this those rows never accumulate a miss and dead postings
@@ -898,8 +1149,33 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
             clauses.append(
                 "(CASE WHEN instr(source, ':') > 0 "
                 "THEN substr(source, 1, instr(source, ':') - 1) ELSE source END) IN (%s)"
-                % ",".join("?" * len(healthy_feeds)))
-            params += sorted(healthy_feeds)
+                % ",".join("?" * len(healthy_feed_names)))
+            params += healthy_feed_names
+        if known_feeds is not None and active_feeds is not None:
+            known_feed_names = {
+                str(feed).strip().casefold() for feed in known_feeds
+                if str(feed).strip()
+            }
+            active_feed_names = {
+                str(feed).strip().casefold() for feed in active_feeds
+                if str(feed).strip()
+            }
+            # Never let a future/unchecked feed configuration collide with an
+            # employer ATS namespace (for example an inactive feed literally
+            # named ``greenhouse``). Canonical registry validation already
+            # rejects it; this keeps the lower-level reconciliation API safe too.
+            inactive_feed_names = sorted(
+                (known_feed_names - active_feed_names) - set(ATS_SOURCES))
+            if inactive_feed_names:
+                # Namespaced rows such as ``freehire:greenhouse`` belong to the
+                # configured ``freehire`` feed.  Explicitly disabling that feed
+                # is enough to begin the conservative miss clock; a source not
+                # named in known_feeds remains untouched.
+                clauses.append(
+                    "(CASE WHEN instr(source, ':') > 0 "
+                    "THEN substr(source, 1, instr(source, ':') - 1) ELSE source END) IN (%s)"
+                    % ",".join("?" * len(inactive_feed_names)))
+                params += inactive_feed_names
         # Orphaned employer rows. Renaming a company in the registry changes the
         # board identity, so the rows written under the OLD name match no
         # healthy board and would never be retired - they would accumulate as
@@ -909,12 +1185,30 @@ def reconcile(con: sqlite3.Connection, demoted: dict[str, tuple[int, str, str]],
         # excluded: their company is the employer named by the feed and is not
         # expected in the registry.
         if known_boards is not None:
-            known = [f"{a}\x00{b}" for a, b in known_boards]
+            known_norm = [
+                (entry[0], entry[1], entry[2] if len(entry) > 2 else "")
+                for entry in known_boards
+            ]
+            known = sorted({f"{a}\x00{b}" for a, b, _ in known_norm})
+            known_ids = sorted({board for _, _, board in known_norm if board})
             ats = sorted(ATS_SOURCES)
-            orphan = ("(source IN (%s) AND (source || x'00' || company) NOT IN (%s))"
-                      % (",".join("?" * len(ats)), ",".join("?" * len(known)) or "''"))
+            # Current rows own a stable board id, so a provider-authoritative
+            # company name (for example NEOGOV's channel title) must not make
+            # the row look orphaned merely because the registry's display name
+            # differs. Legacy rows without board still use source+company.
+            orphan = (
+                "(source IN (%s) AND (((board IS NOT NULL AND board <> '') "
+                "AND board NOT IN (%s)) OR ((board IS NULL OR board = '') AND "
+                "(source || x'00' || company) NOT IN (%s))))"
+                % (",".join("?" * len(ats)),
+                   ",".join("?" * len(known_ids)) or "''",
+                   ",".join("?" * len(known)) or "''")
+            )
             clauses.append(orphan)
-            params += ats + known
+            params += ats + known_ids + known
+        if not clauses:
+            con.commit()
+            return 0, dem
         # Count the miss first; only retire on the SECOND consecutive one.
         # Board counts are stable run to run (15,879 / 15,932 / 15,935 across
         # three real runs), so a single absence is decent evidence - but not
@@ -959,21 +1253,34 @@ def dropped_to_zero(con: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def record_health(con: sqlite3.Connection, source: str, count: int, error: str | None) -> None:
+    """Record an attempt without replacing the last complete-count baseline.
+
+    ``prev_count`` is deliberately the most recent complete baseline whenever
+    the current row is incomplete.  A partial 100 -> 10 attempt followed by a
+    nominally clean 10-row attempt must still be compared with 100; otherwise
+    one truncated response teaches the retirement guard that truncation is the
+    new normal.
+    """
     now = datetime.now().isoformat(timespec="seconds")
     with closing(con.cursor()) as cur:
-        cur.execute("UPDATE source_health SET prev_count = last_count WHERE source = ?", (source,))
         if error:
             cur.execute(
-                "INSERT INTO source_health (source,last_ok,last_count,last_error,consecutive_failures) "
-                "VALUES (?,NULL,?,?,1) ON CONFLICT(source) DO UPDATE SET "
+                "INSERT INTO source_health "
+                "(source,last_ok,last_count,last_error,consecutive_failures,prev_count) "
+                "VALUES (?,NULL,?,?,1,NULL) ON CONFLICT(source) DO UPDATE SET "
+                "prev_count=CASE WHEN source_health.last_error IS NULL "
+                "THEN source_health.last_count ELSE source_health.prev_count END, "
                 "last_count=excluded.last_count, last_error=excluded.last_error, "
                 "consecutive_failures=source_health.consecutive_failures+1",
                 (source, count, error[:300]),
             )
         else:
             cur.execute(
-                "INSERT INTO source_health (source,last_ok,last_count,last_error,consecutive_failures) "
-                "VALUES (?,?,?,NULL,0) ON CONFLICT(source) DO UPDATE SET "
+                "INSERT INTO source_health "
+                "(source,last_ok,last_count,last_error,consecutive_failures,prev_count) "
+                "VALUES (?,?,?,NULL,0,NULL) ON CONFLICT(source) DO UPDATE SET "
+                "prev_count=CASE WHEN source_health.last_error IS NULL "
+                "THEN source_health.last_count ELSE source_health.prev_count END, "
                 "last_ok=excluded.last_ok, last_count=excluded.last_count, "
                 "last_error=NULL, consecutive_failures=0",
                 (source, now, count),

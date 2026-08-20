@@ -19,6 +19,7 @@ __doc__ = """CareerKit sourcing CLI. Personal state lives in profile/ (gitignore
     ./careerkit.py analytics          conversion, timing, aging, follow-up queue
     ./careerkit.py progress UID STAGE record applied/interview/offer/outcome dates
     ./careerkit.py rescore             re-judge stored postings after a criteria change
+    ./careerkit.py coverage            configured, unique, dormant, and capped sources
     ./careerkit.py doctor              one check: profile, sources, freshness, drift
     ./careerkit.py tracker-sync        preview tracker/database differences; --apply writes
     ./careerkit.py status | mark UID STATUS
@@ -86,7 +87,8 @@ from engine import pull as _pull
 from engine.score import Profile, ProfileError, score  # noqa: E402
 from engine import score as _score_mod
 from engine import search as _search
-from engine.search import resolve, workday_parts  # noqa: E402
+from engine import coverage as _coverage
+from engine.search import resolve  # noqa: E402
 from engine.verify import verify_entry  # noqa: E402
 
 # CAREERKIT_HOME is what makes `new-instance.sh` work: several instances share
@@ -224,7 +226,7 @@ ATS_ADDRESS_FIELDS = {
     **{name: ("slug",) for name in (
         "greenhouse", "lever", "ashby", "smartrecruiters", "workable",
         "recruitee", "bamboohr", "rippling", "teamtailor", "icims",
-        "jobvite", "hrmdirect", "personio",
+        "jobvite", "hrmdirect", "personio", "pinpoint", "neogov",
     )},
     "workday": ("tenant", "dc", "site"),
     "oracle_orc": ("host", "site"),
@@ -474,11 +476,11 @@ def cmd_discover(args) -> None:
         for m in missed:
             print(f"  {m}")
         # "Not found" reads as "this employer has no public board", which is
-        # wrong for the four platforms addressed by an opaque tenant id. There
-        # is nothing to guess from a company name, but a posting URL contains
-        # the id, so the path forward exists and should be said out loud.
+        # wrong for platforms whose board address cannot be inferred safely.
+        # A posting URL carries the address, so the path forward still exists
+        # without registering guessed boards belonging to a different employer.
         print(f"\n  {', '.join(_discover.UNPROBEABLE)} cannot be probed from a name "
-              f"(they use opaque tenant ids).\n"
+              f"(their board address cannot be inferred safely).\n"
               f"  If one of these is the employer's board, paste any posting URL:\n"
               f"    ./careerkit.py ingest-urls FILE")
 
@@ -494,16 +496,29 @@ def cmd_search(args) -> None:
     queries = _search.build_query_matrix(full=args.full)
     if not queries:
         sys.exit("No discovery queries can be built: add search_terms to your profile.")
-    print(f"Running {min(len(queries), args.limit or len(queries))} of "
-          f"{len(queries)} search queries...")
-    hits, stats = _search.run_matrix(queries, limit=args.limit)
+    requested_limit = args.limit
+    if requested_limit is not None and requested_limit < 0:
+        sys.exit("--limit must be 0 or a positive integer")
+    # A normal search remains a bounded bootstrap. `--full` means the complete
+    # matrix unless the caller explicitly supplies a limit; the former argparse
+    # default of 60 silently made `--full` partial too.
+    limit = (None if requested_limit == 0 else requested_limit)
+    if requested_limit is None and not args.full:
+        limit = 60
+    will_run = min(len(queries), limit) if limit is not None else len(queries)
+    print(f"Running {will_run} of {len(queries)} search queries...")
+    hits, stats = _search.run_matrix(queries, limit=limit)
     live = sum(1 for n in stats.values() if n)
+    coverage = _search.query_coverage(queries, list(stats))
     print(f"  {len(hits)} unique result(s) from {live}/{len(stats)} productive queries")
+    print(f"  attempted {coverage['queries_attempted']}/{coverage['queries_planned']} "
+          f"queries; ATS-family coverage "
+          f"{coverage['families_attempted']}/{coverage['families_planned']}")
 
     # Let _ingest construct each complete board config before deduplicating it.
     # A Workday tenant can expose several sites; comparing only tenant + ATS
     # silently dropped every site after the first.
-    urls = [h.url for h in hits if h.ats and h.slug]
+    urls = [h.url for h in hits if h.ats]
     added = _ingest(urls)
 
     qpath = ROOT / "out" / "search-queries.txt"
@@ -570,7 +585,10 @@ def cmd_ingest_urls(args) -> None:
 
 def _ingest(raw_urls: list[str]) -> list[dict]:
     reg = load_registry()
-    known = {_registry_key(e) for e in reg["employers"]}
+    known_entries: dict[str, list[dict]] = {}
+    for existing in reg["employers"]:
+        known_entries.setdefault(_registry_key(existing), []).append(existing)
+    known = set(known_entries)
     added, skipped = [], []
     for raw in raw_urls:
         u, why = _safe_url(raw)
@@ -578,43 +596,52 @@ def _ingest(raw_urls: list[str]) -> list[dict]:
             skipped.append((raw, why))
             continue
         h = resolve(u)
-        if not h.ats or not h.slug:
+        if not h.ats:
             # Was a silent `continue`, so the documented LinkedIn/Indeed coverage
             # path dropped exactly the platforms resolve() cannot parse and the
             # user believed the employer had been registered.
             skipped.append((u, "no adapter recognises this URL shape"))
             continue
-        entry = {"name": h.company_guess or h.slug, "ats": h.ats, "slug": h.slug,
+        if h.ats not in _adapters.REGISTRY or h.ats not in ATS_ADDRESS_FIELDS:
+            skipped.append((u, f"{h.ats} URL recognised, but CareerKit has no "
+                               "pollable adapter for that platform"))
+            continue
+
+        # Resolve supplies the full platform-specific address. Validate against
+        # the same map load_registry uses so resolver and registry requirements
+        # cannot drift apart again.
+        need = ATS_ADDRESS_FIELDS[h.ats]
+        missing = [field for field in need if not h.address.get(field)]
+        if missing:
+            detail = ("use the employer's /Recruiting/Jobs/All/<board-guid> URL"
+                      if h.ats == "paylocity" and "guid" in missing
+                      else f"URL does not expose {', '.join(missing)}")
+            skipped.append((u, f"{h.ats} URL recognised but is not pollable: {detail}"))
+            continue
+
+        entry = {"name": h.company_guess or h.slug or h.ats, "ats": h.ats,
                  "lane": "url-ingested", "tier": "C", "active": True}
-        if h.ats == "workday":
-            parts = workday_parts(u)
-            if not parts:
-                skipped.append((u, "workday URL missing tenant/datacenter/site"))
-                continue
-            entry.update(parts)
-            entry.pop("slug", None)
-        else:
-            # Some platforms need config a job URL does not carry. Writing a
-            # partial entry produces a KeyError at poll time, so say what is
-            # missing and let the user add it rather than registering a board
-            # that cannot be polled.
-            need = _search.EXTRA_CONFIG.get(h.ats, ())
-            missing = [k for k in need if k not in entry]
-            if missing:
-                skipped.append((u, f"{h.ats} board found (slug {h.slug}) but needs "
-                                   f"{', '.join(missing)} added by hand in "
-                                   f"profile/employers.yaml"))
-                continue
+        entry.update(h.address)
         key = _registry_key(entry)
         if key in known:
-            skipped.append((u, f"already registered ({key})"))
+            existing = known_entries.get(key, [])
+            if existing and all(item.get("active", True) is False for item in existing):
+                skipped.append((
+                    u,
+                    f"already registered but inactive ({key}); review why it was disabled "
+                    "before setting active: true",
+                ))
+            else:
+                skipped.append((u, f"already registered ({key})"))
             continue
         known.add(key)
+        known_entries[key] = [entry]
         reg["employers"].append(entry)
         added.append(entry)
-        print(f"  + {entry['name']:<34} {h.ats}:{h.slug}")
-    save_employers(reg)
-    queue_discovered(added)
+        print(f"  + {entry['name']:<34} {_registry_key(entry)}")
+    if added:
+        save_employers(reg)
+        queue_discovered(added)
     for u, why in skipped:
         print(f"  - skipped: {why}\n      {u[:110]}")
     print(f"\n{len(added)} new employer(s) from {len(raw_urls)} URL(s); "
@@ -1061,25 +1088,26 @@ def cmd_doctor(args) -> None:
     the tail of a pull, so a broken feed or a stale database was only noticed by
     someone already looking for it."""
     reg = load_registry(required=True)
+    keys = load_yaml(KEYS, {})
     con = store.connect()
     problems, notes = [], []
 
     notes.extend(engine_checkout_notes())
 
+    raw_profile = {}
     if not PROFILE.exists():
         problems.append("no profile/profile.yaml - run /setup in Claude Code")
     else:
         try:
-            for w in _score_mod.validate_profile(
-                    yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}):
+            raw_profile = yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}
+            for w in _score_mod.validate_profile(raw_profile):
                 notes.append(f"profile: {w}")
         except ProfileError as e:
             problems.append(f"profile: {e}")
 
     try:
         from engine import profile_lint as _plint
-        raw = yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}
-        for sev, msg in _plint.lint(raw, load_profile()):
+        for sev, msg in _plint.lint(raw_profile, load_profile()):
             (problems if sev == "fail" else notes).append(f"profile lint: {msg}")
     except Exception:
         pass
@@ -1087,6 +1115,54 @@ def cmd_doctor(args) -> None:
     n_emp = len([e for e in reg.get("employers", []) if e.get("active", True)])
     if not n_emp:
         problems.append("no active employers registered - run discover or ingest-urls")
+
+    health_rows = list(con.execute("SELECT * FROM source_health"))
+    coverage = _coverage.build_coverage_ledger(
+        reg, health_rows, keys=keys, as_of=date.today(),
+        search_term_count=len(raw_profile.get("search_terms") or []))
+    employers = coverage["employers"]
+    feeds = coverage["feeds"]
+    if employers["duplicate_rows"]:
+        for duplicate in employers["duplicate_boards"]:
+            problems.append(
+                f"duplicate active board {duplicate['board_id']} appears in "
+                f"{duplicate['row_count']} registry rows: "
+                f"{', '.join(duplicate['labels'])}"
+            )
+    if feeds["duplicate_rows"]:
+        for duplicate in feeds["duplicate_feeds"]:
+            problems.append(
+                f"duplicate active feed {duplicate['feed_id']} appears in "
+                f"{duplicate['row_count']} registry rows: "
+                f"{', '.join(duplicate['labels'])}"
+            )
+    for capped in coverage["page_ceiling_sources"]:
+        problems.append(
+            f"source at page ceiling: {capped['label']} returned "
+            f"{capped['last_count']} (known ceiling {capped['ceiling']}); "
+            "coverage is incomplete"
+        )
+    ceiling_ids = {item["board_id"] for item in coverage["page_ceiling_sources"]}
+    for gap in coverage["health_gap_sources"]:
+        if gap["source_id"] in ceiling_ids and gap["state"] == "capped":
+            continue
+        problems.append(
+            f"current source coverage gap: {gap['label']} is {gap['state']} "
+            f"({gap['last_count']} usable postings retained)"
+        )
+    missing_families = coverage["ats_families"]["supported_unrepresented"]
+    if missing_families:
+        notes.append(
+            f"supported ATS families with no active registered board: "
+            f"{', '.join(missing_families)}"
+        )
+    if feeds["dormant"]:
+        problems.append(
+            "dormant or opt-in feeds: "
+            + ", ".join(
+                f"{item['name']} ({item['reason'].replace('_', ' ')})"
+                for item in feeds["dormant"])
+        )
 
     try:
         from engine import applied as _applied
@@ -1148,18 +1224,17 @@ def cmd_doctor(args) -> None:
         notes.append(f"enabled scrapers (read public HTML, can be blocked): "
                      f"{', '.join(scrapers)}")
 
-    unsupported = [f["name"] for f in reg.get("feeds", [])
-                   if f.get("active", True)
-                   and not aggregators.policy(f["name"]).get("supported", True)]
-    for name in unsupported:
+    for item in feeds["unsupported"]:
+        name = item["name"]
         problems.append(
             f"{name} feed is active but has no supported secure installation; "
             f"set its active value to false in {EMPLOYERS}"
         )
 
     ok = con.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"]
-    print(f"CareerKit check: {ok} postings, {n_emp} active employers, "
-          f"{len(reg.get('feeds', []))} feeds")
+    print(f"CareerKit check: {ok} postings, {n_emp} active employer rows "
+          f"({employers['unique_board_ids']} unique boards), "
+          f"{feeds['operational_count']} operational feeds")
     if problems:
         print(f"\n{len(problems)} problem(s):")
         for p in problems:
@@ -1171,6 +1246,81 @@ def cmd_doctor(args) -> None:
         for n in notes:
             print(f"  -  {n}")
     sys.exit(1 if problems else 0)
+
+
+def cmd_coverage(args) -> None:
+    """Show the configured sourcing surface without exposing credentials."""
+    reg = load_registry(required=True)
+    profile = load_profile()
+    keys = load_yaml(KEYS, {})
+    con = store.connect()
+    health = list(con.execute("SELECT * FROM source_health"))
+    ledger = _coverage.build_coverage_ledger(
+        reg, health, keys=keys, as_of=date.today(),
+        search_term_count=len(profile.search_terms))
+    if args.json:
+        print(json.dumps(ledger, indent=2, sort_keys=True))
+        return
+
+    employers = ledger["employers"]
+    ats = ledger["ats_families"]
+    feeds = ledger["feeds"]
+    print("Source coverage")
+    print(f"  employer rows       : {employers['active_rows']}")
+    print(f"  unique boards       : {employers['unique_board_ids']}")
+    print(f"  ATS families        : {len(ats['represented'])}/{len(ats['supported'])} represented")
+    print(f"  operational feeds   : {feeds['operational_count']}/{feeds['unique_count']} "
+          f"unique active ({feeds['active_rows']} rows)")
+    print(f"  inferred source set : {employers['unique_board_ids'] + feeds['operational_count']} "
+          "unique configured endpoints")
+
+    if employers["duplicate_boards"]:
+        print("\nDuplicate active boards (counts inflate coverage):")
+        for duplicate in employers["duplicate_boards"]:
+            print(f"  x  {duplicate['board_id']} - "
+                  f"{', '.join(duplicate['labels'])}")
+    if feeds["duplicate_feeds"]:
+        print("\nDuplicate active feeds (counts inflate coverage):")
+        for duplicate in feeds["duplicate_feeds"]:
+            print(f"  x  {duplicate['feed_id']} - "
+                  f"{', '.join(duplicate['labels'])}")
+    if ats["supported_unrepresented"]:
+        print("\nSupported ATS families with no active registered board:")
+        print("  " + ", ".join(ats["supported_unrepresented"]))
+    if feeds["dormant"]:
+        print("\nDormant or opt-in feeds:")
+        for item in feeds["dormant"]:
+            print(f"  -  {item['name']} (missing: {', '.join(item['missing_fields'])})")
+    if feeds["unsupported"]:
+        print("\nUnsupported active feeds:")
+        for item in feeds["unsupported"]:
+            print(f"  x  {item['name']}")
+    if ledger["page_ceiling_sources"]:
+        print("\nSources at a known page ceiling (incomplete coverage):")
+        for item in ledger["page_ceiling_sources"]:
+            print(f"  x  {item['label']}: {item['last_count']} / {item['ceiling']}")
+
+    ceiling_ids = {item["board_id"] for item in ledger["page_ceiling_sources"]}
+    other_health_gaps = [
+        item for item in ledger["health_gap_sources"]
+        if not (item["source_id"] in ceiling_ids and item["state"] == "capped")
+    ]
+    if other_health_gaps:
+        print("\nCurrent source health gaps (results are not complete):")
+        for item in other_health_gaps:
+            print(f"  x  {item['label']}: {item['state']} "
+                  f"({item['last_count']} usable postings retained)")
+
+    incomplete_ids = {item["source_id"] for item in ledger["health_gap_sources"]}
+    incomplete_ids.update(ceiling_ids)
+    gaps = (employers["duplicate_rows"] + feeds["duplicate_rows"]
+            + feeds["dormant_count"]
+            + feeds["unsupported_count"]
+            + len(incomplete_ids))
+    if gaps:
+        print(f"\n{gaps} blocking coverage gap(s). Run doctor for remediation context.")
+    else:
+        print("\nNo duplicate, unsupported, or known-ceiling source gaps found.")
 
 
 def cmd_status(args) -> None:
@@ -1605,9 +1755,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("search", help="search the web for unregistered ATS boards")
     sp.set_defaults(fn=cmd_search)
     sp.add_argument("--full", action="store_true",
-                    help="use every configured title and ATS domain")
-    sp.add_argument("--limit", type=int, default=60,
-                    help="maximum RSS queries to run (default: 60; 0 means all)")
+                    help="use every configured title and, unless limited, run the full matrix")
+    sp.add_argument("--limit", type=int,
+                    help="maximum RSS queries (default: 60; with --full: all; 0 means all)")
 
     sp = sub.add_parser("queries", help="print the ATS-domain search matrix")
     sp.set_defaults(fn=cmd_queries)
@@ -1667,6 +1817,11 @@ def build_parser() -> argparse.ArgumentParser:
     ls = rel.add_parser("list", help="show all context, optionally for one employer")
     ls.set_defaults(fn=cmd_relationship_list)
     ls.add_argument("company", nargs="?")
+
+    sp = sub.add_parser("coverage", help="show unique, dormant, unsupported, and capped sources")
+    sp.set_defaults(fn=cmd_coverage)
+    sp.add_argument("--json", action="store_true",
+                    help="emit the privacy-safe structured ledger")
 
     sub.add_parser("status", help="show database, registry, and source health").set_defaults(
         fn=cmd_status)

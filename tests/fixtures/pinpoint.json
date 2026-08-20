@@ -1,0 +1,51 @@
+{
+  "data": [
+    {
+      "id": "post-001",
+      "title": "Enterprise Applications Architect",
+      "url": "https://acme.pinpointhq.com/en/postings/post-001",
+      "path": "/en/postings/post-001",
+      "description": "<p>Lead the enterprise applications roadmap.</p>",
+      "key_responsibilities_header": "What you will do",
+      "key_responsibilities": "<ul><li>Own architecture decisions.</li></ul>",
+      "skills_knowledge_expertise_header": "What you bring",
+      "skills_knowledge_expertise": "<p>Experience with CRM platforms.</p>",
+      "benefits_header": "Benefits",
+      "benefits": "<p>Medical and retirement plans.</p>",
+      "workplace_type": "remote",
+      "workplace_type_text": "Fully remote",
+      "compensation": "$135,000 - $198,000 / year",
+      "compensation_minimum": 135000.0,
+      "compensation_maximum": 198000.0,
+      "compensation_currency": "USD",
+      "compensation_frequency": "year",
+      "compensation_visible": true,
+      "deadline_at": "2026-08-28T23:59:59-04:00",
+      "job": {
+        "id": "job-001",
+        "requisition_id": "REQ-001",
+        "department": {"id": "department-1", "name": "Technology"},
+        "division": null
+      },
+      "location": {"id": "location-1", "name": "United States"}
+    },
+    {
+      "id": "post-002",
+      "title": "CRM Program Consultant",
+      "path": "/postings/post-002",
+      "description": "<p>Deliver a fixed-term CRM program.</p>",
+      "key_responsibilities": "<p>Coordinate delivery teams.</p>",
+      "skills_knowledge_expertise": "<p>Program leadership experience.</p>",
+      "benefits": "",
+      "workplace_type": "hybrid",
+      "compensation": "$70 - $90 / hour",
+      "compensation_minimum": 70,
+      "compensation_maximum": 90,
+      "compensation_currency": "USD",
+      "compensation_frequency": "hour",
+      "compensation_visible": true,
+      "department": {"id": "department-2", "name": "Consulting"},
+      "location": {"id": "location-2", "name": "Atlanta, GA"}
+    }
+  ]
+}

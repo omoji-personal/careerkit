@@ -1,11 +1,19 @@
 # CareerKit, the guide
 
-**A job search engine you operate by talking to it.** It polls 18 employer
-applicant tracking platforms directly plus 13 usable public job feeds (and one
+**A job search engine you operate by talking to it.** It polls 20 employer
+applicant tracking platforms directly plus 14 usable public job feeds (and one
 security-gated dormant adapter), scores every posting against rules you wrote
 yourself, and helps you evaluate, apply, prepare and track from there.
 
-Against one set of criteria it read 19,550 postings and surfaced 161.
+That is supported-platform capacity, not a claim of comprehensive sourcing. A
+run reaches only the active employer boards and operational feeds you have
+configured. `./careerkit.py coverage` separates configured rows from unique
+endpoints and identifies dormant or capped gaps; partial or capped results are
+not evidence that a source was healthy or complete.
+
+In one August 2026 reference run it read 19,550 postings and surfaced 161. That
+historical ratio is an example, not the current size of a user's sourcing
+surface.
 
 It is built for people who do not write code. You talk to Claude Code; Claude
 runs the machinery.
@@ -26,8 +34,9 @@ folder.** This file is the short version, and the map.
    `/ingest` for anything you found elsewhere.
 6. **Calibration.** Why `/audit` exists, and why a filter you never review will
    quietly cost you jobs.
-7. **What leaves your machine.** Precisely, including keyed-feed credentials
-   and the USAJobs email header.
+7. **What leaves your machine.** Precisely, including keyed-feed credentials,
+   the USAJobs email header, and search terms sent only when the optional
+   Freehire discovery bridge is enabled.
 8. **Failure modes worth knowing.** How the engine tells a dead board from a
    quiet one, and why zero results is a claim that has to be earned.
 9. **Reference.** Every CLI command, the layout, how to share it.
@@ -48,6 +57,9 @@ means everything you banned starts surfacing. Elsewhere the engine names what it
 ignored and carries on. A board that returns HTTP 200 with an unparseable body
 is recorded as broken, not as empty, because "no openings" and "we are blocking
 you" look identical from the outside and only one of them is true.
+Likewise, a source that returned some jobs can still be partial or capped. Its
+results remain useful, but the run records a coverage gap instead of treating
+the source as healthy or complete.
 
 **Verified live, or it does not ship.** Postings persist in the database after
 they close. Anything the engine surfaces has been sighted on the source board,

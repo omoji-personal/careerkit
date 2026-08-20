@@ -1,0 +1,42 @@
+{
+  "data": [
+    {
+      "public_slug": "salesforce-consultant-aggregator-a1",
+      "source": "adzuna",
+      "external_id": "adzuna-a1",
+      "url": "https://www.adzuna.com/details/a1",
+      "title": "Salesforce Consultant",
+      "company": "Aggregator Example",
+      "location": "Remote",
+      "description": "A unique aggregator preview that policy excludes.",
+      "skills": ["salesforce"],
+      "regions": ["north_america"],
+      "countries": ["us"],
+      "cities": [],
+      "posted_at": "2026-08-19T00:00:00Z",
+      "created_at": "2026-08-19T03:00:00Z",
+      "enrichment": {}
+    },
+    {
+      "public_slug": "salesforce-consultant-example-wd1",
+      "source": "workday",
+      "external_id": "R-771",
+      "url": "https://example.wd5.myworkdayjobs.com/en-US/External/job/R-771",
+      "title": "Salesforce Consultant",
+      "company": "Example Corp",
+      "company_slug": "example-corp",
+      "location": "New York, New York",
+      "description": "Short Workday search preview.",
+      "skills": ["salesforce"],
+      "work_mode": "hybrid",
+      "regions": ["north_america"],
+      "countries": ["us"],
+      "cities": ["New York"],
+      "posted_at": "2026-08-17T00:00:00Z",
+      "created_at": "2026-08-17T05:00:00Z",
+      "closed_at": null,
+      "enrichment": {}
+    }
+  ],
+  "meta": {"total": 5, "limit": 3, "offset": 3}
+}

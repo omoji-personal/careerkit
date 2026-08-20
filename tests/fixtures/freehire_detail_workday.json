@@ -1,0 +1,30 @@
+{
+  "data": {
+    "public_slug": "salesforce-consultant-example-wd1",
+    "source": "workday",
+    "external_id": "R-771",
+    "url": "https://example.wd5.myworkdayjobs.com/en-US/External/job/R-771",
+    "title": "Salesforce Consultant",
+    "company": "Example Corp",
+    "company_slug": "example-corp",
+    "location": "New York, New York",
+    "description": "Role overview\nThe Salesforce consultant owns discovery, planning, solution alignment, and delivery governance for a major customer-service modernization. The role works with business leaders, product owners, architects, administrators, developers, security partners, and adoption leads. Responsibilities include facilitating workshops, documenting decisions, prioritizing a roadmap, coordinating testing and releases, monitoring delivery risk, and reporting progress to executive sponsors. The consultant will help teams simplify processes before automating them and will ensure that each release has measurable business outcomes.\n\nMinimum qualifications\nAt least five years of CRM consulting or enterprise applications delivery experience is required. Applicants must have practical Salesforce platform knowledge, strong written and verbal communication, stakeholder facilitation experience, release-planning experience, and the ability to manage multiple dependent workstreams. Experience with service operations, data migration, user acceptance testing, training, and organizational change is also required.\n\nWhat we offer\nA collaborative team, flexible hybrid schedule, learning support, paid leave, health coverage, and retirement benefits.",
+    "skills": ["salesforce", "crm"],
+    "work_mode": "hybrid",
+    "regions": ["north_america"],
+    "countries": ["us"],
+    "cities": ["New York"],
+    "posted_at": "2026-08-17T00:00:00Z",
+    "created_at": "2026-08-17T05:00:00Z",
+    "closed_at": null,
+    "enrichment": {
+      "seniority": "senior",
+      "category": "consulting",
+      "employment_type": "full_time",
+      "salary_min": 90000,
+      "salary_max": 120000,
+      "salary_currency": "EUR",
+      "salary_period": "year"
+    }
+  }
+}

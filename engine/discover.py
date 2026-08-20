@@ -191,15 +191,18 @@ PROBE_ORDER = [
 # Probed platforms, plus Workday, which is searched after these miss.
 PROBEABLE = len(PROBE_ORDER) + 1
 
-# Adapters exist for these, but discovery cannot reach them: each addresses a
-# board by an opaque tenant id or GUID with no convention that maps a company
-# NAME onto it, so there is nothing to guess. They enter the registry by pasting
-# a posting URL (`ingest-urls`), which contains the id. Documented rather than
+# Adapters exist for these, but name-based discovery cannot reach them safely.
+# Some use opaque tenant identifiers; Pinpoint and NEOGOV use human-readable
+# slugs that are still unsafe to guess because a valid collision can belong to
+# another employer. They enter the registry by pasting a posting URL
+# (`ingest-urls`), which carries an exact address. Documented rather than
 # silently absent: "discover found nothing" otherwise reads as "this employer
-# has no public board", which for these four is wrong.
+# has no public board", which is wrong.
 _REJECTED: list[dict] = []
 
-UNPROBEABLE = ("oracle_orc", "eightfold", "phenom", "paylocity")
+UNPROBEABLE = (
+    "oracle_orc", "eightfold", "phenom", "paylocity", "pinpoint", "neogov",
+)
 
 
 # --------------------------------------------------------------------------

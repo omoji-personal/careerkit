@@ -1,0 +1,30 @@
+{
+  "data": {
+    "public_slug": "salesforce-consultant-acme-gh1",
+    "source": "greenhouse",
+    "external_id": "acme-41001",
+    "url": "https://job-boards.greenhouse.io/acme/jobs/41001",
+    "title": "Senior Salesforce Consultant",
+    "company": "Acme",
+    "company_slug": "acme",
+    "location": "Atlanta, Georgia",
+    "description": "About the role\nAcme is seeking a Salesforce consultant to lead a multi-cloud transformation and guide stakeholders from discovery through launch. You will facilitate roadmap decisions, translate business outcomes into an executable delivery plan, coordinate architects and administrators, manage risks and dependencies, and make adoption measurable. This role partners with sales, service, operations, security, analytics, and executive sponsors. The consultant will run workshops, maintain decision records, communicate tradeoffs, coach workstream owners, and keep delivery focused on customer outcomes.\n\nRequirements\nFive or more years leading enterprise CRM programs. Hands-on experience with Salesforce configuration, governance, release planning, data migration, stakeholder facilitation, and change management is required. Candidates must be able to explain complex platform decisions to business leaders, manage parallel workstreams, document requirements, and work effectively with distributed teams. Experience developing adoption plans, training strategies, testing approaches, and executive status reporting is required.\n\nBenefits\nMedical, dental, retirement, paid time off, and professional development support are provided.",
+    "skills": ["salesforce", "crm", "change management"],
+    "work_mode": "remote",
+    "regions": ["north_america"],
+    "countries": ["us"],
+    "cities": ["Atlanta"],
+    "posted_at": "2026-08-19T00:00:00Z",
+    "created_at": "2026-08-19T03:00:00Z",
+    "closed_at": null,
+    "enrichment": {
+      "seniority": "senior",
+      "category": "consulting",
+      "employment_type": "full_time",
+      "salary_min": 135000,
+      "salary_max": 175000,
+      "salary_currency": "USD",
+      "salary_period": "year"
+    }
+  }
+}

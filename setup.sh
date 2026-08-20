@@ -90,7 +90,7 @@ VENV_PY="$(venv_python)"
 echo "  dependencies installed into .venv"
 
 mkdir -p profile data out
-[ -f profile/employers.yaml ] || printf 'employers: []\nfeeds:\n- {name: remotive, active: true}\n- {name: remoteok, active: true}\n- {name: himalayas, active: true}\n- {name: jobicy, active: true}\n- {name: themuse, active: true}\n- {name: weworkremotely, active: true}\n- {name: workingnomads, active: true}\n- {name: arbeitnow, active: true}\n' > profile/employers.yaml
+[ -f profile/employers.yaml ] || printf 'employers: []\nfeeds:\n- {name: remotive, active: true}\n- {name: remoteok, active: true}\n- {name: himalayas, active: true}\n- {name: jobicy, active: true}\n- {name: themuse, active: true}\n- {name: weworkremotely, active: true}\n- {name: workingnomads, active: true}\n- {name: arbeitnow, active: true}\n- {name: freehire, active: false, pages: 10, results_per_page: 100, detail_cap: 100, posted_within_days: 14, countries: [], canonical_enrichment: false}\n' > profile/employers.yaml
 
 "$VENV_PY" -c "import sys; sys.path.insert(0,'.'); import engine.score, engine.adapters" \
   && echo "  engine OK"

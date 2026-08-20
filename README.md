@@ -1,16 +1,23 @@
 <img src="brand/careerkit-mark.svg" alt="CareerKit" width="360">
 
-**A job search engine you operate by talking to it.** Against one set of
-criteria it read 19,550 postings and surfaced 161.
+**A job search engine you operate by talking to it.** In one August 2026
+reference run, it read 19,550 postings and surfaced 161. That historical ratio
+is an example, not the current size of any user's configured sourcing surface.
 
-It watches the job boards employers actually post on, 18 applicant tracking
-platforms plus 13 usable public feeds (8 live immediately, 4 want an API key,
-and 1 optional scraper is off by default), with a 14th adapter security-gated
+It watches the job boards employers actually post on, 20 applicant tracking
+platforms plus 14 usable public feeds (8 live immediately, 4 want an API key,
+and 2 optional sources are off by default), with a 15th adapter security-gated
 until its upstream dependency is fixed. It scores every posting against rules
 you wrote yourself. Then it helps you evaluate roles, build applications, prepare for
 interviews, and keep track of where everything stands. Dated pipeline analytics,
 follow-up aging, employer relationship memory, and a private local dashboard
 close the loop: the search can learn which lanes actually produce interviews.
+
+Those platform counts describe what the engine can poll, not comprehensive
+job-market coverage. A run covers only the active boards and operational feeds
+you configured. Use `./careerkit.py coverage` to see that sourcing surface;
+duplicate registry rows are one endpoint, while dormant, partial, or capped
+sources are coverage gaps rather than evidence of a healthy, complete search.
 
 It is built for people who are not programmers. You talk to Claude; Claude runs
 the machinery. Personal files are gitignored and remain local to your checkout;
@@ -135,6 +142,41 @@ Worth being precise about, because "nothing" would be a lie.
   send the API keys, account identifiers, or affiliate values you configured to
   that provider. USAJobs additionally requires your registered email in the
   request header. Skip any keyed feed whose disclosure you do not accept.
+- **Freehire, only if you explicitly enable it:** the shipped entry is
+  `active: false`. Changing it to `true` sends each configured `search_terms`
+  phrase (quoted), optional country/age filters, and ordinary request metadata
+  such as your IP address, User-Agent, and timing to the third-party hosted
+  service at freehire.me. CareerKit sends it no secret, API key, resume, claims
+  register, or application data. It searches previews first and requests detail
+  only for title-matching results from a conservative first-party ATS
+  source-and-host allowlist. LinkedIn and aggregator-of-aggregator results are
+  excluded. This is discovery evidence, not proof that a role is still open or
+  that Freehire's normalized fields are employer-authored. Every Freehire row
+  is forced to `VERIFY`; confirm the opening on its direct employer ATS. Ingest
+  that URL to register and poll it when CareerKit supports that ATS family;
+  unsupported families remain manual verification leads. Setting
+  `canonical_enrichment: true` may additionally fetch a thin posting from its
+  direct employer ATS URL through CareerKit's guarded outbound transport.
+  The preview filter is deliberately strict: every meaningful word in a search
+  term must also appear in the title before CareerKit requests the detail. Add
+  explicit title variants to `search_terms` if you want adjacent titles; this
+  privacy/traffic tradeoff means the feed is additive coverage, not a claim of
+  comprehensive market coverage.
+
+  New instances include this inactive example. Existing instances can add it
+  to the `feeds:` list in `profile/employers.yaml` and leave it false until the
+  disclosure above is acceptable:
+
+  ```yaml
+  - name: freehire
+    active: false
+    pages: 10
+    results_per_page: 100
+    detail_cap: 100
+    posted_within_days: 14      # set zero only if you want all open inventory
+    countries: []               # optional ISO codes, for example [us, ca]
+    canonical_enrichment: false
+  ```
 - **`/ingest` and `/evaluate`** fetch the URL you hand them. That is a request to
   whoever hosts it.
 - **No telemetry.** Nothing is reported back to the author or anyone else.
@@ -206,6 +248,7 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py rescore       # re-judge stored postings after a criteria change
 ./careerkit.py rescore --min-score 40  # rebuild the report at a score floor
 ./careerkit.py profile-lint  # validate profile rules before using them
+./careerkit.py coverage      # unique configured endpoints and sourcing gaps
 ./careerkit.py doctor        # one check: profile, sources, freshness, drift
 ./careerkit.py tracker-sync  # exact dry-run of tracker/database reconciliation
 ./careerkit.py tracker-sync --apply  # append links + mark matched rows after review
@@ -302,6 +345,13 @@ and quoted a salary band on the line below.
 parses, that no source has been failing repeatedly, that the last run finished and was recent, and that your database
 and `tracker.md` agree about what you have applied to.
 
+`coverage` inventories the configured sourcing surface without exposing
+credentials. It distinguishes active employer rows from unique configured board
+endpoints and reports the operational feed subset separately. A
+partial response or a source stopped at a configured or provider cap remains a
+coverage gap even when the run returned some jobs; it is not a healthy or
+complete source run.
+
 The scorer also recognizes explicit, parseable application deadlines such as
 "Apply by July 30, 2026" or "posting closes on 2026-07-30" and stops presenting
 the role after that day. It does not guess from unrelated dates, and "open until
@@ -323,7 +373,7 @@ accurate. It catches the careless cases. Keep reading the draft.
 
 `./run-tests.sh` runs the regression suite. Nearly every test in it locks down a
 bug that actually shipped, so it is worth keeping green if you change the engine.
-It runs all eighteen employer adapters against sanitized responses saved from
+It runs all twenty employer adapters against sanitized responses saved from
 real public boards, so a board changing its JSON or HTML shape fails a test
 rather than quietly returning nothing. Fixture origins are recorded in
 `tests/fixtures/README.md`; a fixture invented from a guessed shape would be

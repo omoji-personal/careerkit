@@ -126,8 +126,9 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
   <img class="mark" src="../brand/careerkit-mark.svg" alt="CareerKit">
   <hr class="gate">
 
-  <p class="standfirst">A job search engine you operate by talking to it. It read
-  19,550 postings and surfaced <em>161</em>.</p>
+  <p class="standfirst">A job search engine you operate by talking to it. In one
+  August 2026 reference run, it read 19,550 postings and surfaced
+  <em>161</em>.</p>
 
   <p class="whoami">CareerKit / open source, MIT<br>
   github.com/omoji-personal/careerkit</p>
@@ -144,10 +145,10 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
   <div class="plate">
     <div class="plate-h">Specification</div>
     <div class="spec">
-      <div><b>ATS platforms polled</b><span>18</span></div>
-      <div><b>Public job feeds</b><span>13 + 1 dormant</span></div>
-      <div><b>Auto-discoverable</b><span>14 platforms</span></div>
-      <div><b>One run</b><span>19,550 read, <em class="sig">161</em> passed</span></div>
+      <div><b>ATS platforms polled</b><span>20</span></div>
+      <div><b>Public job feeds</b><span>14 + 1 dormant</span></div>
+      <div><b>Auto-discoverable</b><span>14 probeable; 6 URL-only</span></div>
+      <div><b>Aug. 2026 reference run</b><span>19,550 read, <em class="sig">161</em> passed</span></div>
       <div><b>Regression suite</b><span>500+ cases</span></div>
       <div><b>Continuous integration</b><span>3.10 / 3.12 / 3.13 / 3.14</span></div>
       <div><b>Engine</b><span>Python, SQLite</span></div>
@@ -178,12 +179,18 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
   applicant tracking system lists the requisition the day it opens, with its real title,
   location and requisition id, and it stops listing it the day it closes.</p>
 
+  <p>The 20 supported ATS families are platform capacity, not a promise of comprehensive
+  sourcing. A run reaches only the active employer boards and operational feeds you have
+  configured. Coverage is therefore reported as an auditable sourcing surface, with gaps,
+  rather than as a claim that every possible opening was searched.</p>
+
   <p>Every posting it collects is scored against your rules. The output is a report,
   ordered, with the reasoning attached to each entry, so you can tell the difference
   between a role that matched and a role that merely appeared.</p>
 
   <h3>The ratio is the product</h3>
-  <p>In a single run against 273 employer boards and 14 feeds, CareerKit pulled 19,550
+  <p>In an August 2026 reference run against the 273 employer-board rows and 14 feeds
+  configured at that time, CareerKit pulled 19,550
   postings. 275 were in the right job family at all, and of those
   <em class="sig">161</em> cleared every screenable rail. Everything else was screened
   out against a named rule, and <code>audit</code> shows you those decisions whenever
@@ -330,6 +337,7 @@ claude              # open Claude Code in this folder
     <div><code>./careerkit.py db</code><span>integrity check or backup</span></div>
     <div><code>./careerkit.py rescore</code><span>apply changed criteria</span></div>
     <div><code>./careerkit.py profile-lint</code><span>validate profile rules</span></div>
+    <div><code>./careerkit.py coverage</code><span>unique endpoints and sourcing gaps</span></div>
     <div><code>./careerkit.py doctor</code><span>setup and drift check</span></div>
     <div><code>./careerkit.py tracker-sync</code><span>preview or repair tracker drift</span></div>
     <div><code>./careerkit.py enrich</code><span>refresh thin postings</span></div>
@@ -368,6 +376,13 @@ claude              # open Claude Code in this folder
   its API and has been returning an error for eleven days. CareerKit tracks the health of
   every source separately, reports consecutive failures, and flags a source that returned
   nothing when it had postings last run. A quiet week has to earn the description.</p>
+
+  <p><code>coverage</code> distinguishes active employer rows from unique configured
+  board endpoints and reports operational feeds separately: duplicate registry rows do
+  not increase real reach, and a keyed feed without its required configuration is
+  dormant. A partial response or a run stopped at a
+  configured or provider cap is still a coverage gap even if it returned jobs; it must not
+  be described as healthy or complete.</p>
 </section>
 
 <!-- ══ 6 ══ -->
@@ -388,6 +403,14 @@ claude              # open Claude Code in this folder
     <li><strong>To keyed feeds you enable:</strong> configured API keys, account IDs or
     affiliate values go to that provider. USAJobs additionally requires your registered
     email. Skip any keyed feed whose disclosure you do not accept.</li>
+    <li><strong>To Freehire, only if you enable it:</strong> quoted search terms, optional
+    country and age filters, and ordinary request metadata go to that third-party hosted
+    discovery API. No API key, resume, claims register or application data is sent.
+    CareerKit accepts only conservative first-party ATS source-and-host pairs and can,
+    if separately enabled, hydrate thin results from the direct employer URL. Every
+    Freehire row is forced to <code>VERIFY</code>; confirm it on the direct employer ATS,
+    then ingest it for polling when CareerKit supports that ATS family. Unsupported
+    families remain manual verification leads.</li>
     <li><strong>No telemetry.</strong> Nothing is reported to the author or anyone else.</li>
   </ul>
 

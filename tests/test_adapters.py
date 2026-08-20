@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -32,6 +33,7 @@ CASES = [
                     "site": "CX", "name": "Acme"}),
     ("eightfold", {"ats": "eightfold", "domain": "albemarle.com",
                    "host": "https://albemarle.eightfold.ai", "name": "Acme"}),
+    ("pinpoint", {"ats": "pinpoint", "slug": "acme", "name": "Acme"}),
 ]
 
 
@@ -104,6 +106,8 @@ TEXT_CASES = [
     ("phenom", "phenom.html",
      {"ats": "phenom", "host": "https://careers.phenom.com/global/en",
       "name": "Acme"}),
+    ("neogov", "neogov.xml",
+     {"ats": "neogov", "slug": "exampleagency", "name": "Acme"}),
 ]
 
 
@@ -131,7 +135,8 @@ def test_text_adapter_maps_its_real_payload(name, fixture, cfg, stub_text):
         assert j.title.strip(), f"{name}: empty title"
         assert j.url.startswith("http"), f"{name}: bad url {j.url!r}"
         assert j.source == name
-        assert j.company == "Acme"
+        expected_company = "Example Public Agency" if name == "neogov" else "Acme"
+        assert j.company == expected_company
         assert j.external_id, f"{name}: no external_id, uid collapses siblings"
         assert "<" not in j.description or ">" not in j.description, \
             f"{name}: HTML survived into the description"
@@ -214,6 +219,107 @@ def test_paylocity_maps_current_public_page_model(stub_text, monkeypatch):
     assert len(jobs) == 2
     assert jobs[0].location == "Raleigh, NC, USA"
     assert jobs[0].url.endswith("/Details/4141169")
+
+
+def test_pinpoint_maps_documented_full_posting_and_only_annual_usd(stub_fetch):
+    stub_fetch(json.loads((FIXTURES / "pinpoint.json").read_text()))
+    jobs = adapters.pinpoint({"ats": "pinpoint", "slug": "acme", "name": "Acme"})
+
+    assert len(jobs) == 2
+    annual, hourly = jobs
+    assert annual.company == "Acme"
+    assert annual.external_id == "post-001"
+    assert annual.url == "https://acme.pinpointhq.com/en/postings/post-001"
+    assert annual.location == "United States"
+    assert annual.department == "Technology"
+    assert annual.remote_flag is True
+    assert (annual.comp_min, annual.comp_max, annual.comp_source) == (
+        135000, 198000, "board",
+    )
+    for section in ("Lead the enterprise applications roadmap",
+                    "Own architecture decisions", "Experience with CRM platforms",
+                    "Medical and retirement plans", "Application deadline",
+                    "2026-08-28"):
+        assert section in annual.description
+
+    assert hourly.department == "Consulting", "legacy top-level department was lost"
+    assert hourly.remote_flag is None, "hybrid was overstated as fully remote"
+    assert hourly.comp_min is None and hourly.comp_max is None
+    assert "/ hour" in hourly.comp_text
+
+
+def test_neogov_maps_official_rss_and_only_annual_usd(stub_text):
+    # GovernmentJobs' live response currently exposes its UTF-8 BOM as these
+    # three mojibake characters through the shared HTTP decoder.
+    stub_text("ï»¿" + (FIXTURES / "neogov.xml").read_text())
+    jobs = adapters.neogov({
+        "ats": "neogov", "slug": "exampleagency", "name": "Acme",
+    })
+
+    assert len(jobs) == 2
+    annual, hourly = jobs
+    assert annual.company == "Example Public Agency"
+    assert annual.external_id == "410001"
+    assert annual.url.endswith("/careers/exampleagency/jobs/410001")
+    assert annual.location == "Atlanta, Georgia"
+    assert annual.department == "Information Technology"
+    assert annual.posted_at == "2026-08-19"
+    assert (annual.comp_min, annual.comp_max, annual.comp_source) == (
+        135000, 175000, "board",
+    )
+    for section in ("Lead the agency applications portfolio",
+                    "Own architecture and delivery governance",
+                    "Five years of enterprise systems leadership",
+                    "A background check is required", "Application deadline",
+                    "2026-09-20"):
+        assert section in annual.description
+
+    assert hourly.department == "Project Management"
+    assert hourly.comp_min is None and hourly.comp_max is None
+    assert hourly.comp_text.endswith("/ Hour")
+
+
+def test_neogov_uses_non_utc_deadline_fallback(stub_text):
+    payload = (FIXTURES / "neogov.xml").read_text().replace(
+        "advertiseToDateTimeUTC", "advertiseToDateTime")
+    stub_text(payload)
+
+    jobs = adapters.neogov({
+        "ats": "neogov", "slug": "exampleagency", "name": "Acme",
+    })
+
+    assert "Application deadline\n2026-09-20" in jobs[0].description
+
+
+def test_oracle_fetches_public_detail_requirements_for_relevant_titles(monkeypatch):
+    listing = json.loads((FIXTURES / "oracle_orc.json").read_text())
+    detail = json.loads((FIXTURES / "oracle_orc_detail.json").read_text())
+    calls = []
+
+    def fake_fetch_json(url, **_kwargs):
+        calls.append(url)
+        if "recruitingCEJobRequisitionDetails/" in url:
+            return detail
+        return listing if len([u for u in calls if "findReqs" in u]) == 1 else {
+            "items": [],
+        }
+
+    monkeypatch.setattr(adapters, "fetch_json", fake_fetch_json)
+    monkeypatch.setattr(adapters, "_RELEVANT_HINT", re.compile(
+        "Technology and Communications", re.I))
+
+    jobs = adapters.oracle_orc({
+        "ats": "oracle_orc", "host": "example.fa.example.oraclecloud.com",
+        "site": "CX", "name": "Acme",
+    })
+
+    relevant = next(job for job in jobs if "Technology" in job.title)
+    assert "Lead enterprise systems delivery" in relevant.description
+    assert "Own the implementation roadmap" in relevant.description
+    assert "Five years of CRM delivery" in relevant.description
+    assert relevant.location == "Atlanta, GA"
+    assert relevant.posted_at == "2026-08-19"
+    assert sum("recruitingCEJobRequisitionDetails/" in url for url in calls) == 1
 
 
 # --------------------------------------------------------------------------
@@ -304,8 +410,8 @@ def test_the_whole_chain_from_payload_to_report(tmp_path, monkeypatch):
 def test_adapter_fixture_coverage_does_not_regress():
     """Which adapters are covered by a real payload, and which are not.
 
-    All eighteen adapters now have a sanitized fixture captured from a real
-    public board. Writing a fixture from an assumed shape would be worse than
+    All twenty adapters now have a sanitized fixture using a real public board
+    response shape. Writing a fixture from an assumed shape would be worse than
     none, because it would test the assumption rather than the board.
 
     Asserting the current count stops the gap being forgotten, and fails loudly
@@ -316,10 +422,11 @@ def test_adapter_fixture_coverage_does_not_regress():
                {p.stem for p in FIXTURES.glob("*.html")})
     known = {"greenhouse", "lever", "ashby", "smartrecruiters", "workable", "recruitee",
              "bamboohr", "rippling", "teamtailor", "workday", "oracle_orc", "eightfold",
-             "phenom", "icims", "jobvite", "paylocity", "personio", "hrmdirect"}
+             "phenom", "icims", "jobvite", "paylocity", "personio", "hrmdirect",
+             "pinpoint", "neogov"}
     have = covered & known
     missing = known - covered
-    assert len(have) >= 18, (
-        f"adapter fixture coverage regressed to {len(have)}/18: {sorted(have)}")
+    assert len(have) >= 20, (
+        f"adapter fixture coverage regressed to {len(have)}/20: {sorted(have)}")
     assert missing == set(), (
         f"the uncovered set changed; update this list deliberately: {sorted(missing)}")
