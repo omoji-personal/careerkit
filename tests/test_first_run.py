@@ -66,6 +66,14 @@ def test_tracker_sync_cli_honors_the_legacy_tracker_override(tmp_path):
     tracker.parent.mkdir()
     original = "# Existing narrative\nThis must not be rewritten.\n"
     tracker.write_text(original)
+    profile_dir = home / "profile"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "setup-progress.md").write_text(
+        "Privacy: complete\nSearch Core: complete\nFirst Win: skipped\n"
+        "Source Expansion: deferred\nCareer Pack: deferred\n"
+        "Final Checks: complete\n",
+        encoding="utf-8",
+    )
     env = dict(os.environ, CAREERKIT_HOME=str(home), CAREERKIT_TRACKER=str(tracker),
                CAREERKIT_VENV="1")
     setup = (

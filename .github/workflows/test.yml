@@ -87,6 +87,9 @@ jobs:
                   "never relay codes",
                   "What leaves your machine",
                   "git pull && ./setup.sh",
+                  "Search Core",
+                  "profile/setup-progress.md",
+                  "separate activation confirmation",
               )
               missing = [item for item in critical_text if item not in normalized]
               if missing:

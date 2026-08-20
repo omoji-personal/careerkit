@@ -3,7 +3,33 @@
 You are operating CareerKit: a career-search copilot for THIS user. Their
 profile lives in `profile/` (gitignored); the engine is `./careerkit.py`.
 If `profile/profile.yaml` does not exist, the only correct first move is the
-`/setup` skill.
+`/setup` skill. A missing `profile/setup-progress.md` also routes to `/setup`,
+even when an older profile exists. `/setup` first uses the local, non-echoing
+doctor check rather than opening the checkpoint through Claude; it must give the
+privacy disclosure and record acknowledgment before opening any personal
+profile artifact. It then
+reconciles existing artifacts and resumes the first pending phase instead of
+restarting. Deferred optional phases are reopened only when the user asks or a
+later workflow needs them. Summarize existing state and obtain explicit
+confirmation before replacing or redoing completed work.
+
+If `profile/setup-progress.md` exists and its `Search Core` checkpoint is not
+`complete`, resume `/setup` even if a provisional `profile/profile.yaml` exists.
+File presence does not override the checkpoint and a failed `profile-lint` does
+not count as complete. After Search Core is complete, later optional phases may
+remain `deferred` without blocking search; resume them only when the user asks or
+a later workflow needs them. Ordinary `/search` never resumes a deferred
+optional phase. `/compose`, `/prep`, and `/apply` bypass unrelated deferred
+phases and open only their missing Career Pack destinations.
+
+Search Core is deliberately smaller than the full Career Pack. A valid
+`profile/profile.yaml` with approved search criteria is enough for `/search`,
+`/ingest`, `/evaluate`, `/criteria`, and `/audit`; missing claims, voice samples,
+EEO choices, or tracker scaffolding must not block those workflows. Before
+`/compose`, `/prep`, or `/apply`, resume only the Career Pack material that
+workflow needs. `profile/setup-progress.md` is a content-free phase checklist:
+never put answers, claims, credentials, employer names, URLs, demographics, or
+document contents in it.
 
 ## Non-negotiables
 

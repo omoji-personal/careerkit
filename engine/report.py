@@ -218,6 +218,47 @@ def _tail_line(rows: list[sqlite3.Row]) -> str:
             f"  {_display_url(r['url'])}")
 
 
+def _scope_notice(run_detail: dict) -> list[str]:
+    """Prominent, durable disclosure for a filtered sourcing report."""
+    scope = run_detail.get("scope")
+    if not isinstance(scope, dict):
+        # Old run records and direct renderer callers have no scope metadata.
+        # Their output remains byte-compatible instead of inventing provenance.
+        return []
+
+    filtered = scope.get("filtered") is True
+    cache_mode = _field(scope.get("cache_mode"), 120)
+    if not filtered:
+        return ([f"**Fetch mode:** {cache_mode}", ""] if cache_mode else [])
+
+    label = _field(scope.get("label") or "filtered sources", 120)
+    employer_boards = scope.get("employer_boards")
+    feeds = scope.get("feeds")
+    tiers = scope.get("tiers") if isinstance(scope.get("tiers"), list) else []
+    tier_label = ", ".join(_field(value, 12) for value in tiers) or "selected"
+
+    skipped: list[str] = []
+    if employer_boards == "skipped":
+        skipped.append("Employer boards were intentionally skipped.")
+    elif employer_boards == "tier-filtered":
+        skipped.append(
+            f"Employer boards outside tiers {tier_label} were intentionally skipped."
+        )
+    if feeds == "skipped":
+        skipped.append("Aggregator feeds were intentionally skipped.")
+
+    headline = (f"> **Limited run scope: {label}. {' '.join(skipped)} "
+                "This is not a comprehensive sourcing run.**")
+    retained = (
+        "> The decision queue below may include retained rows from sources or "
+        "earlier runs that were not fetched in this run."
+    )
+    lines = [headline, retained]
+    if cache_mode:
+        lines.append(f"> Cache mode: {cache_mode}.")
+    return lines + [""]
+
+
 def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
                  health: list[sqlite3.Row], run_detail: dict,
                  filename: str | None = None, run_id: int | None = None) -> Path:
@@ -235,6 +276,9 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     L: list[str] = [
         f"# Sourcing run - {today}",
         "",
+    ]
+    L += _scope_notice(run_detail)
+    L += [
         f"**Pulled** {run_detail.get('pulled', 0)} postings from "
         f"{run_detail.get('sources_ok', 0)} complete sources | "
         f"**{len(new_rows)} new** | **{len(qual)} qualified roles** "

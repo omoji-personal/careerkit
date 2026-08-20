@@ -70,10 +70,19 @@ if [ "$LOCAL" = true ]; then
   # A local clone contains only committed objects. Overlay both tracked changes
   # and non-ignored untracked files so "--local" means the working snapshot the
   # operator can actually see. Ignored profile/data/out secrets stay excluded.
-  if ! git -C "$HERE" diff --binary HEAD | \
-       git -C "$DEST" apply --whitespace=nowarn; then
-    echo "Could not copy tracked working changes into $DEST"
-    exit 1
+  if git -C "$HERE" diff --quiet HEAD --; then
+    : # A clean checkout has no patch to apply; git apply rejects empty input.
+  else
+    DIFF_STATUS=$?
+    if [ "$DIFF_STATUS" -ne 1 ]; then
+      echo "Could not inspect tracked working changes in $HERE"
+      exit 1
+    fi
+    if ! git -C "$HERE" diff --binary HEAD -- | \
+         git -C "$DEST" apply --whitespace=nowarn; then
+      echo "Could not copy tracked working changes into $DEST"
+      exit 1
+    fi
   fi
   while IFS= read -r -d '' rel; do
     mkdir -p "$DEST/$(dirname "$rel")"
@@ -81,7 +90,16 @@ if [ "$LOCAL" = true ]; then
   done < <(git -C "$HERE" ls-files --others --exclude-standard -z)
 fi
 
-cd "$DEST" && ./setup.sh
+if (cd "$DEST" && ./setup.sh); then
+  :
+else
+  SETUP_STATUS=$?
+  echo
+  echo "Instance cloned, but setup did not finish. The retained instance is: $DEST"
+  printf '  Retry setup with: cd %q && ./setup.sh\n' "$DEST"
+  echo "  Do not rerun new-instance.sh; that command creates only new destinations."
+  exit "$SETUP_STATUS"
+fi
 echo
 echo "Instance ready: $DEST"
 if [ "$LOCAL" = true ]; then

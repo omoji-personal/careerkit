@@ -33,7 +33,7 @@ reading before you trust it with your own search.
 
 ## What you need
 
-- [Claude Code](https://claude.com/claude-code) (Pro plan minimum; expect
+- [Claude Code setup](https://code.claude.com/docs/en/setup) (Pro plan minimum; expect
   meaningful usage on setup and application days). Install it with
   `npm install -g @anthropic-ai/claude-code`, which needs Node 18 or newer.
 - Python 3.10 or newer, and git
@@ -54,20 +54,57 @@ cd careerkit
 claude              # opens Claude Code in this folder
 ```
 
+On its first launch, Claude Code may open a browser for sign-in and then show a
+Workspace Trust prompt. Complete sign-in through Claude Code's own flow; do not
+paste credentials into CareerKit. Review the folder path and the repository you
+cloned, and grant trust only if they are the files you intended to run.
+
 Then, inside Claude Code, type:
 
 ```
-/setup              # ~40 min: Claude interviews you, builds your profile,
-                    # seeds your employer registry, calibrates the gates
+/setup              # builds Search Core first, then offers the rest in phases
 ```
 
-`/setup` is not optional. Until it writes `profile/profile.yaml`, the engine has
-no rules to score against and will tell you so rather than guess.
+There are two milestones, not one 40-minute wall:
+
+1. **Search Core:** target roles, location, compensation, exclusions, domain
+   terms and search terms. It distinguishes titles you prefer to avoid
+   (`exclusions.titles`, dream-company-waivable) from families you cannot
+   credibly do (`exclusions.titles_always`, never waived). Source documents are
+   optional. Once Claude writes and validates `profile/profile.yaml`, you can
+   search. It offers one bounded, feed-only first-results run and says exactly
+   which coverage is still missing.
+2. **Complete Career Pack:** claims and story bank, voice samples, truthful
+   application answers, EEO choices and tracker scaffolding, plus source
+   expansion and calibration. Completing the whole pack is the part that can
+   take about 40 minutes. You may defer it until `/compose`, `/prep`, or `/apply`
+   needs it; deferral does not block searching.
+
+`/setup` checkpoints phase status in the gitignored,
+content-free `profile/setup-progress.md`. If the session closes, run `/setup`
+again: it checks the privacy checkpoint before reading personal artifacts,
+inventories existing work after acknowledgment, and resumes the first pending
+phase. Deliberately deferred optional phases stay deferred until you request or
+need them. It must summarize and ask before restarting or overwriting anything.
+
+Search Core is not optional. Until it writes `profile/profile.yaml`, the engine
+has no rules to score against and will tell you so rather than guess. If you ran
+the optional First Win, that feed-only pull was your first search; do not
+immediately repeat it with `/search`.
+
+If `/setup` does not appear, confirm that Claude Code was opened from the cloned
+`careerkit` folder and that `.claude/skills/setup/SKILL.md` exists. Inside
+Claude Code, run `/skills` and confirm the project skill is listed; then exit and
+reopen `claude` from that folder. If discovery or installation still looks
+wrong, exit Claude Code and run `claude doctor` in the terminal. You can also
+tell Claude in plain language: "Follow `.claude/skills/setup/SKILL.md` and
+resume my setup." Do not start from another directory or copy the skill into a
+global location.
 
 ## The loop
 
 ```
-/search             # sweep every board + feed, report genuinely new roles
+/search             # sweep active configured sources, report genuinely new roles
 /evaluate <url>     # honest fit read of any posting you found anywhere
 /apply <url>        # build/fill; you review and approve this one submission
 /prep <company>     # interview prep from your own story bank
@@ -79,6 +116,15 @@ LinkedIn/Indeed finds enter the system), `/compose` (resume + cover letter +
 LinkedIn work), `/outreach` (referrals, thank-yous, nudges, draft-only by
 default), `/criteria` (change your search rules), `/audit` (review what the
 gates killed; run it monthly, it keeps the filter honest).
+
+If Career Pack is deferred, searching, ingesting, evaluating, changing criteria
+and auditing still work. Claude resumes only the needed pack material before
+compose, prep or apply instead of making you repeat onboarding.
+Career Pack answers have named destinations: confirmed facts in `claims.md`,
+voice in `style.md`, human context in `person.md`, application fields in the
+documented `identity`, `work_auth`, and `eeo` profile sections, and outcomes in
+`tracker.md`. Those application/context fields do not affect scoring; scoring
+changes go through a supported Search Core field and `/criteria`.
 
 **Location scoring is US-centric by design.** The rails reason about US states,
 US remote idioms and your target metros; a role outside the US is screened out
@@ -161,7 +207,10 @@ Worth being precise about, because "nothing" would be a lie.
   term must also appear in the title before CareerKit requests the detail. Add
   explicit title variants to `search_terms` if you want adjacent titles; this
   privacy/traffic tradeoff means the feed is additive coverage, not a claim of
-  comprehensive market coverage.
+  comprehensive market coverage. General consent to setup, a First Win, or a
+  normal sourcing run does not authorize activation: Claude must repeat this
+  disclosure and obtain a separate, explicit confirmation before changing
+  Freehire to `active: true`.
 
   New instances include this inactive example. Existing instances can add it
   to the `feeds:` list in `profile/employers.yaml` and leave it false until the

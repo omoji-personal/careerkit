@@ -391,9 +391,77 @@ def record_surfaced_sightings(con, scored: list, kept_uids: set[str]) -> None:
     con.commit()
 
 
+def _run_scope_detail(*, employers_only: bool, feeds_only: bool, tier,
+                      cache_mode: str | None) -> dict:
+    """Describe exactly what one pull attempted and what its report contains.
+
+    A filtered pull still renders the complete active decision queue from the
+    database. Without durable scope metadata, a feeds-only first run therefore
+    looked like a comprehensive search, and retained employer-board rows looked
+    as though the filtered run had fetched them. Keep the execution scope in
+    the run record so both the initial report and a later `report` rebuild can
+    make that boundary explicit.
+    """
+    raw_tiers = [tier] if isinstance(tier, str) else list(tier or [])
+    tiers = sorted({str(value).strip().upper() for value in raw_tiers
+                    if str(value).strip()})
+
+    if employers_only and feeds_only:
+        mode = "no-sources"
+        label = "no sources selected"
+        employer_boards = "skipped"
+        feeds = "skipped"
+    elif feeds_only:
+        mode = "feeds-only"
+        label = "aggregator feeds only"
+        employer_boards = "skipped"
+        feeds = "included"
+    elif employers_only and tiers:
+        mode = "employer-tiers-only"
+        label = f"employer boards only, tiers {', '.join(tiers)}"
+        employer_boards = "tier-filtered"
+        feeds = "skipped"
+    elif employers_only:
+        mode = "employers-only"
+        label = "employer boards only"
+        employer_boards = "included"
+        feeds = "skipped"
+    elif tiers:
+        mode = "employer-tiers-and-feeds"
+        label = f"employer tiers {', '.join(tiers)} plus aggregator feeds"
+        employer_boards = "tier-filtered"
+        feeds = "included"
+    else:
+        mode = "all-configured-sources"
+        label = "all configured active sources"
+        employer_boards = "included"
+        feeds = "included"
+
+    cache_label = None
+    if cache_mode is not None:
+        # This is caller-provided display metadata, not a command or policy
+        # switch. Collapse whitespace so saved JSON and rebuilt reports are
+        # deterministic even if a wrapper supplies a padded label.
+        cache_label = " ".join(str(cache_mode).split())[:120] or None
+
+    return {
+        "mode": mode,
+        "label": label,
+        "filtered": mode != "all-configured-sources",
+        "employer_boards": employer_boards,
+        "feeds": feeds,
+        "tiers": tiers,
+        "cache_mode": cache_label,
+        # store.query() deliberately returns the active retained decision queue,
+        # not only rows sighted in this run. That invariant is useful, but a
+        # filtered report must disclose it rather than implying run provenance.
+        "report_rows": "active-retained-decision-queue",
+    }
+
+
 def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = False,
              feeds_only: bool = False, tier=None, min_score: int = 0,
-             discovered=(), echo=print) -> dict:
+             cache_mode: str | None = None, discovered=(), echo=print) -> dict:
     """One complete pull. Returns the numbers the caller prints."""
     from .score import score_all
 
@@ -473,7 +541,11 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
         "SELECT * FROM source_health ORDER BY consecutive_failures DESC, source"))
     detail = {"pulled": len(all_jobs), "sources_ok": fetched["sources_ok"],
               "excluded_breakdown": dict(excluded.most_common(12)),
-              "errors": fetched["errors"], "discovered": list(discovered)}
+              "errors": fetched["errors"], "discovered": list(discovered),
+              "scope": _run_scope_detail(
+                  employers_only=employers_only, feeds_only=feeds_only,
+                  tier=tier, cache_mode=cache_mode,
+              )}
     qualified = sum(1 for r in rows if r["gate"] == "QUALIFIED")
     store.finish_run(con, run_id, len(all_jobs), len(new), qualified, detail)
     path = write_report(con, rows, health=health, run_detail=detail, run_id=run_id)

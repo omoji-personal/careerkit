@@ -99,6 +99,54 @@ from engine.verify import verify_entry  # noqa: E402
 # real because the postings were.
 ROOT = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent)
 
+_ONBOARDING_PHASES = (
+    "Privacy",
+    "Search Core",
+    "First Win",
+    "Source Expansion",
+    "Career Pack",
+    "Final Checks",
+)
+_ONBOARDING_STATES = {"pending", "complete", "skipped", "deferred"}
+
+
+def onboarding_progress(path: Path) -> tuple[dict[str, str], list[str]]:
+    """Read the content-free /setup checkpoint without echoing private text.
+
+    The checkpoint is deliberately a tiny, human-readable state machine rather
+    than another profile.  Doctor reports structural mistakes, but never prints
+    an unrecognised line: if a user accidentally pasted an answer into the file,
+    diagnostics must not repeat it into logs or support transcripts.
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}, []
+    states: dict[str, str] = {}
+    issues: list[str] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}, ["could not read the setup checkpoint"]
+    for raw_line in lines:
+        line = raw_line.strip().lstrip("-* ").strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            issues.append("contains a line outside the phase checklist")
+            continue
+        phase, state = (part.strip() for part in line.split(":", 1))
+        if phase not in _ONBOARDING_PHASES or state not in _ONBOARDING_STATES:
+            issues.append("contains an unknown phase or status")
+            continue
+        if phase in states:
+            issues.append(f"lists {phase} more than once")
+            continue
+        states[phase] = state
+    missing = [phase for phase in _ONBOARDING_PHASES if phase not in states]
+    if missing:
+        issues.append("is missing required phase rows: " + ", ".join(missing))
+    return states, list(dict.fromkeys(issues))
+
 
 def require_source_checkout(root: Path = ENGINE_ROOT) -> None:
     """Refuse to run a partial wheel as though it were the CareerKit product.
@@ -212,6 +260,43 @@ APPLICATIONS = _configured_path("CAREERKIT_APPLICATIONS", PROFILE.parent / "appl
 CLAIMS = _configured_path("CAREERKIT_CLAIMS", PROFILE.parent / "claims.md")
 
 
+# Every real CLI operation can read private local state or cause a request now
+# or as the command evolves.  Keep the exception list deliberately tiny and
+# fail closed for future commands: argparse help exits before dispatch, while
+# doctor has its own privacy-first diagnostic that does not inspect personal
+# artifacts until the checkpoint is valid.
+PRE_PRIVACY_COMMANDS = frozenset({"doctor"})
+
+
+def require_privacy_checkpoint() -> dict[str, str]:
+    """Require a valid recorded acknowledgment without reading personal state."""
+    progress_path = PROFILE.parent / "setup-progress.md"
+    if not progress_path.exists():
+        sys.exit(
+            "No onboarding privacy checkpoint yet. Run /setup in Claude Code "
+            "to review the disclosure before using CareerKit commands."
+        )
+    progress, issues = onboarding_progress(progress_path)
+    if issues:
+        sys.exit(
+            "The onboarding checkpoint is incomplete or malformed. Run /setup "
+            "in Claude Code to reconcile it before using CareerKit commands."
+        )
+    if progress.get("Privacy") != "complete":
+        sys.exit(
+            "Onboarding privacy acknowledgment is not complete. Run /setup in "
+            "Claude Code before using CareerKit commands."
+        )
+    return progress
+
+
+def enforce_privacy_command_policy(args: argparse.Namespace) -> None:
+    """Apply the fail-closed pre-dispatch privacy policy to one parsed command."""
+    if args.cmd in PRE_PRIVACY_COMMANDS:
+        return
+    require_privacy_checkpoint()
+
+
 def load_yaml(p: Path, default):
     if not p.exists():
         return default
@@ -304,11 +389,30 @@ def load_registry(*, required: bool = False) -> dict:
     return reg
 
 
-def load_profile() -> Profile:
+def load_profile(*, allow_incomplete_search_core: bool = False) -> Profile:
     if not PROFILE.exists():
         sys.exit("No profile yet. Run /setup in Claude Code first "
                  "(it interviews you and writes profile/profile.yaml).")
+    # Privacy is unconditional.  profile-lint may inspect a profile while Search
+    # Core is pending so it can repair that phase, but it may never use the same
+    # exception to bypass acknowledgment.
+    progress = require_privacy_checkpoint()
+    if (not allow_incomplete_search_core
+            and progress.get("Search Core") != "complete"):
+        sys.exit("Onboarding Search Core is not complete. Run /setup in "
+                 "Claude Code to resume before sourcing.")
     profile = Profile.load(PROFILE)
+    if not allow_incomplete_search_core:
+        raw = yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}
+        readiness_failures = _profile_readiness_failures(
+            raw, _score_mod.validate_profile(raw), profile
+        )
+        if readiness_failures:
+            sys.exit(
+                "Onboarding Search Core no longer passes readiness checks: "
+                + "; ".join(readiness_failures)
+                + ". Run /setup in Claude Code to repair it before sourcing."
+            )
     # Configure every user-dependent engine filter in one place. Commands used
     # to remember different subsets, so `pull` had the right title terms while
     # `search` reused module defaults and ignored the user's target metros.
@@ -317,6 +421,30 @@ def load_profile() -> Profile:
     _search.set_core_terms(profile.search_terms)
     _search.set_geo_terms(profile.metros)
     return profile
+
+
+def _profile_readiness_failures(
+        raw: dict, schema_notes: list[str], profile: Profile | None = None
+) -> list[str]:
+    """Return profile defects that make the Search Core milestone unusable."""
+    failures = [
+        warning for warning in schema_notes
+        if (warning.startswith("no lanes defined")
+            or "has no titles - it can never match a posting" in warning)
+    ]
+    if not (raw.get("search_terms") or []):
+        failures.append(
+            "no search_terms defined - keyword feeds cannot search for target roles"
+        )
+    if (profile is not None
+            and not profile.lanes
+            and not profile.dream_lanes
+            and not any("no lanes defined" in item for item in failures)):
+        failures.append(
+            "no usable lane title patterns remain after validation - nothing "
+            "can pass the title gate"
+        )
+    return failures
 
 
 def save_employers(data: dict) -> None:
@@ -350,7 +478,8 @@ def cmd_pull(args) -> None:
     """Thin wrapper. The loop itself lives in engine/pull.py because a second
     front end (the author's personal sourcer.py) drives the same engine, and
     while the loop was copied into both they drifted without a symptom."""
-    _http.set_cache_enabled(not getattr(args, "no_cache", False))
+    no_cache = bool(getattr(args, "no_cache", False))
+    _http.set_cache_enabled(not no_cache)
     profile = load_profile()
     reg = load_registry(required=True)
     keys = load_yaml(KEYS, {})
@@ -359,6 +488,8 @@ def cmd_pull(args) -> None:
     r = _pull.run_pull(con, reg, keys, profile,
                        employers_only=args.employers, feeds_only=args.feeds,
                        tier=args.tier, min_score=args.min_score,
+                       cache_mode=("cache bypassed; fresh fetch requested"
+                                   if no_cache else "normal 6-hour cache"),
                        discovered=take_discovered())
     path = r["path"]
 
@@ -901,12 +1032,23 @@ def cmd_profile_lint(args) -> None:
     from engine import profile_lint as _plint
     # Let the normal first-run check explain how to create the file before
     # attempting a direct read.  The previous order exposed a raw ENOENT path.
-    profile = load_profile()
+    profile = load_profile(allow_incomplete_search_core=True)
     raw = _yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}
     findings = _plint.lint(raw, profile)
-    fails = [m for sev, m in findings if sev == "fail"]
-    notes = [m for sev, m in findings if sev != "fail"]
-    if not findings:
+    # Profile.load prints schema warnings, but profile-lint historically ignored
+    # them when choosing its exit status.  An interrupted /setup could therefore
+    # leave an empty profile.yaml, suppress the first-run guidance, and still get
+    # "profile lint: clean" even though no posting could pass the title gate.
+    # Most schema warnings remain advisory; unusable lanes and missing search
+    # terms are Search Core blockers because no source run can honor them.
+    schema_notes = _score_mod.validate_profile(raw)
+    readiness_failures = _profile_readiness_failures(raw, schema_notes, profile)
+    fails = readiness_failures + [m for sev, m in findings if sev == "fail"]
+    notes = [
+        warning for warning in schema_notes
+        if warning not in readiness_failures
+    ] + [m for sev, m in findings if sev != "fail"]
+    if not fails and not notes:
         print("profile lint: clean")
     for m in fails:
         print(f"  x  {m}")
@@ -1087,41 +1229,113 @@ def cmd_doctor(args) -> None:
     The signals existed but were scattered across status, the report footer and
     the tail of a pull, so a broken feed or a stale database was only noticed by
     someone already looking for it."""
-    reg = load_registry(required=True)
-    keys = load_yaml(KEYS, {})
-    con = store.connect()
     problems, notes = [], []
-
     notes.extend(engine_checkout_notes())
 
+    progress_path = PROFILE.parent / "setup-progress.md"
+    progress, progress_issues = onboarding_progress(progress_path)
+    for issue in progress_issues:
+        problems.append(f"onboarding progress {issue} - run /setup to repair it")
+    privacy_ready = bool(
+        progress
+        and not progress_issues
+        and progress.get("Privacy") == "complete"
+    )
+    if not progress:
+        problems.append("no setup progress checklist or privacy acknowledgment - "
+                        "run /setup to reconcile existing artifacts")
+    elif progress.get("Privacy") != "complete":
+        problems.append("onboarding privacy acknowledgment is incomplete - run /setup")
+    if progress and progress.get("Search Core") != "complete":
+        problems.append("onboarding Search Core is incomplete - run /setup to resume")
+
+    # Privacy is the first diagnostic gate. Before it is acknowledged, do not
+    # parse a profile, target-employer registry, credential file, or jobs DB just
+    # to produce a richer diagnosis: those are exactly the personal artifacts
+    # the disclosure governs.
+    if not privacy_ready:
+        if not PROFILE.exists():
+            problems.append("no profile/profile.yaml - run /setup in Claude Code")
+        notes.append(
+            "personal profile, source, key, and database contents were not "
+            "inspected before privacy acknowledgment"
+        )
+        print("CareerKit check: personal state not inspected")
+        print(f"\n{len(problems)} problem(s):")
+        for problem in problems:
+            print(f"  x  {problem}")
+        print(f"\n{len(notes)} note(s):")
+        for note in notes:
+            print(f"  -  {note}")
+        sys.exit(1)
+
+    reg = load_registry(required=True)
+    keys = load_yaml(KEYS, {})
+    # A readiness check should not create a database merely because a new user
+    # asked what remains.  Once a database exists, open it normally so migrations
+    # and all historical diagnostics still run.
+    con = store.connect() if store.DB_PATH.exists() else None
     raw_profile = {}
+    profile = None
     if not PROFILE.exists():
         problems.append("no profile/profile.yaml - run /setup in Claude Code")
     else:
         try:
             raw_profile = yaml.safe_load(PROFILE.read_text(encoding="utf-8")) or {}
-            for w in _score_mod.validate_profile(raw_profile):
-                notes.append(f"profile: {w}")
+            schema_notes = _score_mod.validate_profile(raw_profile)
+            profile = Profile.load(PROFILE)
+            readiness_failures = _profile_readiness_failures(
+                raw_profile, schema_notes, profile
+            )
+            for w in schema_notes:
+                target = problems if w in readiness_failures else notes
+                target.append(f"profile: {w}")
+            for w in readiness_failures:
+                if w not in schema_notes:
+                    problems.append(f"profile: {w}")
         except ProfileError as e:
             problems.append(f"profile: {e}")
+            raw_profile = {}
 
-    try:
-        from engine import profile_lint as _plint
-        for sev, msg in _plint.lint(raw_profile, load_profile()):
-            (problems if sev == "fail" else notes).append(f"profile lint: {msg}")
-    except Exception:
-        pass
+    if profile is not None:
+        try:
+            from engine import profile_lint as _plint
+            for sev, msg in _plint.lint(raw_profile, profile):
+                (problems if sev == "fail" else notes).append(f"profile lint: {msg}")
+        except Exception:
+            pass
 
-    n_emp = len([e for e in reg.get("employers", []) if e.get("active", True)])
-    if not n_emp:
-        problems.append("no active employers registered - run discover or ingest-urls")
+    optional_states = [
+        f"{phase} ({progress.get(phase, 'missing')})"
+        for phase in ("First Win", "Source Expansion", "Career Pack")
+        if progress.get(phase) != "complete"
+    ]
+    if optional_states:
+        notes.append("optional onboarding phases not complete: "
+                     + ", ".join(optional_states))
+    if progress.get("Final Checks") != "complete":
+        notes.append(
+            f"onboarding Final Checks are {progress.get('Final Checks', 'missing')}"
+        )
 
-    health_rows = list(con.execute("SELECT * FROM source_health"))
+    health_rows = list(con.execute("SELECT * FROM source_health")) if con else []
     coverage = _coverage.build_coverage_ledger(
         reg, health_rows, keys=keys, as_of=date.today(),
         search_term_count=len(raw_profile.get("search_terms") or []))
     employers = coverage["employers"]
     feeds = coverage["feeds"]
+    n_emp = len([e for e in reg.get("employers", []) if e.get("active", True)])
+    expansion_deferred = progress.get("Source Expansion") in {"deferred", "skipped"}
+    if not n_emp:
+        if expansion_deferred and feeds["operational_count"]:
+            notes.append(
+                "no active employer boards: Source Expansion was deferred; "
+                "search remains limited to operational feeds"
+            )
+        else:
+            problems.append(
+                "no active employers registered - run discover or ingest-urls"
+            )
     if employers["duplicate_rows"]:
         for duplicate in employers["duplicate_boards"]:
             problems.append(
@@ -1156,35 +1370,47 @@ def cmd_doctor(args) -> None:
             f"supported ATS families with no active registered board: "
             f"{', '.join(missing_families)}"
         )
-    if feeds["dormant"]:
+    opted_out = [item for item in feeds["dormant"]
+                 if item.get("reason") == "explicit_opt_in_disabled"]
+    unavailable = [item for item in feeds["dormant"]
+                   if item.get("reason") != "explicit_opt_in_disabled"]
+    if unavailable:
         problems.append(
-            "dormant or opt-in feeds: "
+            "configured feeds not ready: "
             + ", ".join(
                 f"{item['name']} ({item['reason'].replace('_', ' ')})"
-                for item in feeds["dormant"])
+                for item in unavailable)
+        )
+    if opted_out:
+        notes.append(
+            "optional feeds left disabled by choice: "
+            + ", ".join(item["name"] for item in opted_out)
         )
 
-    try:
-        from engine import applied as _applied
-        for kind, text in _applied.surfacing_a_closed_door(con)[:10]:
-            # A likely repost of the role you were declined for is a problem.
-            # "same employer, different role" is context, and listing it as a
-            # problem reads as do-not-bother on a role that may be excellent.
-            (problems if kind == "problem" else notes).append(
-                f"already declined: {text}" if kind == "problem"
-                else f"same employer previously declined you: {text}")
-    except Exception:
-        pass
+    if con is not None:
+        try:
+            from engine import applied as _applied
+            for kind, text in _applied.surfacing_a_closed_door(con)[:10]:
+                # A likely repost of the role you were declined for is a problem.
+                # "same employer, different role" is context, and listing it as a
+                # problem reads as do-not-bother on a role that may be excellent.
+                (problems if kind == "problem" else notes).append(
+                    f"already declined: {text}" if kind == "problem"
+                    else f"same employer previously declined you: {text}")
+        except Exception:
+            pass
 
-    broken = _pull.broken_sources(con, reg)
-    for b in broken:
-        problems.append(f"source failing x{b['consecutive_failures']}: {b['source']} "
-                        f"({(b['last_error'] or '')[:40]})")
-    for d in store.dropped_to_zero(con):
-        problems.append(f"{d['source']} returned 0 but had {d['prev_count']} last run")
+    if con is not None:
+        broken = _pull.broken_sources(con, reg)
+        for b in broken:
+            problems.append(f"source failing x{b['consecutive_failures']}: {b['source']} "
+                            f"({(b['last_error'] or '')[:40]})")
+        for d in store.dropped_to_zero(con):
+            problems.append(f"{d['source']} returned 0 but had {d['prev_count']} last run")
 
-    last = con.execute("SELECT started, finished FROM runs "
-                       "ORDER BY run_id DESC LIMIT 1").fetchone()
+    last = (con.execute("SELECT started, finished FROM runs "
+                        "ORDER BY run_id DESC LIMIT 1").fetchone()
+            if con is not None else None)
     if last is None:
         notes.append("no completed run yet - try: ./careerkit.py pull")
     else:
@@ -1194,27 +1420,29 @@ def cmd_doctor(args) -> None:
         if not last["finished"]:
             problems.append("the last run did not finish (interrupted?)")
 
-    drift = tracker_drift(con)
-    for url, sect, uid in drift["missing_from_db"]:
-        problems.append(f"tracked as {sect} but still open in the database: "
-                        f"{url[:60]} (mark {uid} applied)")
-    for r in drift["missing_from_tracker"]:
-        notes.append(f"database application has no matching tracker URL: "
-                     f"{r['company']} - {r['title']}")
-    for item in drift["ambiguous_tracker_matches"]:
-        problems.append(f"tracker link matches {len(item['candidates'])} postings: "
-                        f"{item['tracker_url'][:60]} (run tracker-sync to review)")
+    if con is not None:
+        drift = tracker_drift(con)
+        for url, sect, uid in drift["missing_from_db"]:
+            problems.append(f"tracked as {sect} but still open in the database: "
+                            f"{url[:60]} (mark {uid} applied)")
+        for r in drift["missing_from_tracker"]:
+            notes.append(f"database application has no matching tracker URL: "
+                         f"{r['company']} - {r['title']}")
+        for item in drift["ambiguous_tracker_matches"]:
+            problems.append(f"tracker link matches {len(item['candidates'])} postings: "
+                            f"{item['tracker_url'][:60]} (run tracker-sync to review)")
 
     # Verdict history that an earlier build already destroyed. Before the
     # rescore guard (2026-08-14) a criteria change rewrote the gate and score
     # of applied rows; what they read when the user applied is unrecoverable.
     # Silent corruption is the failure mode this tool actually has, so the
     # least doctor can do is stop it being silent.
-    for r in con.execute("SELECT company, title FROM jobs WHERE status='applied' "
-                         "AND gate NOT IN ('QUALIFIED','VERIFY')"):
-        notes.append("applied row's verdict was rewritten by an earlier build "
-                     f"(score at application time unrecoverable): "
-                     f"{r['company']} - {r['title']}")
+    if con is not None:
+        for r in con.execute("SELECT company, title FROM jobs WHERE status='applied' "
+                             "AND gate NOT IN ('QUALIFIED','VERIFY')"):
+            notes.append("applied row's verdict was rewritten by an earlier build "
+                         f"(score at application time unrecoverable): "
+                         f"{r['company']} - {r['title']}")
 
     scrapers = [f["name"] for f in reg.get("feeds", [])
                 if f.get("active", True)
@@ -1231,7 +1459,8 @@ def cmd_doctor(args) -> None:
             f"set its active value to false in {EMPLOYERS}"
         )
 
-    ok = con.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"]
+    ok = (con.execute("SELECT COUNT(*) n FROM jobs").fetchone()["n"]
+          if con is not None else 0)
     print(f"CareerKit check: {ok} postings, {n_emp} active employer rows "
           f"({employers['unique_board_ids']} unique boards), "
           f"{feeds['operational_count']} operational feeds")
@@ -1240,7 +1469,7 @@ def cmd_doctor(args) -> None:
         for p in problems:
             print(f"  x  {p}")
     else:
-        print("\n  no problems found")
+        print("\n  no blocking problems found")
     if notes:
         print(f"\n{len(notes)} note(s):")
         for n in notes:
@@ -1923,6 +2152,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.cmd == "pull" and args.feeds and args.tier:
         parser.error("pull --tier selects employer tiers and cannot be used with --feeds")
+    enforce_privacy_command_policy(args)
     try:
         if command_writes(args):
             with store.RunLock():

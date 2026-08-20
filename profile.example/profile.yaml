@@ -53,8 +53,10 @@ hard_requirements:
   people management: ["/direct reports/", "/manage a team of \\d/"]
 
 exclusions:
+  # Preferences may be waived for a dream employer. Capability boundaries may not.
   titles: [designer, copywriter, "/sales (development|manager)/", intern, internship,
-           "/(software|data) engineer/", recruiter]
+           recruiter]
+  titles_always: ["/(software|data) engineer/"]
   products: []             # tools genuinely outside their depth, e.g. [adobe experience manager]
   certs_refused: []        # certs that hard-block only when REQUIRED by the posting
   competing_platforms: []  # ecosystems to slot-block by title

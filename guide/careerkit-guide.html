@@ -68,10 +68,11 @@ body{ margin:0; background:transparent; color:var(--ink);
 
 /* ── sections ── */
 .sec{ break-before:page; }
+.sec.flow{ break-before:auto; }
 h2{ font-family:var(--display); font-size:15.5pt; font-weight:600; letter-spacing:-.003em;
-    margin:0 0 .04in; line-height:1.16; }
+    margin:0 0 .04in; line-height:1.16; break-after:avoid; }
 .kicker{ font-family:var(--mono); font-size:7.6pt; letter-spacing:.2em; color:var(--steel);
-         text-transform:uppercase; margin:0 0 .05in; }
+         text-transform:uppercase; margin:0 0 .05in; break-after:avoid; }
 h3{ font-family:var(--display); font-size:11pt; font-weight:600; margin:.24in 0 .05in;
     letter-spacing:-.002em; }
 p{ max-width:var(--measure); margin:0 0 .5em; }
@@ -115,6 +116,7 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
 /* Section three is the densest page. Keep its final fail-closed note clear of
    the printed footer without shrinking the guide's general reading size. */
 .score-page h3{ margin:.17in 0 .035in; }
+.score-page p{ line-height:1.46; }
 .score-page .verdicts{ margin:.1in 0 .1em; }
 .score-page .note{ margin:.1in 0; }
 </style>
@@ -217,8 +219,9 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
   <h2>Setup, and why the interview is not optional</h2>
   <hr class="gate fine">
 
-  <p>You need Claude Code (Pro plan minimum), Python 3.10 or newer, and git. Install
-  Claude Code with <code>npm install -g @anthropic-ai/claude-code</code>, which needs
+  <p>You need Claude Code (Pro plan minimum), Python 3.10 or newer, and git. Follow
+  the <a href="https://code.claude.com/docs/en/setup">Claude Code setup guide</a> or
+  install it with <code>npm install -g @anthropic-ai/claude-code</code>, which needs
   Node 18 or newer. Chrome and the Claude-in-Chrome extension are optional, and only
   needed if you want it filling application forms for you. macOS and Linux work as they
   are; on Windows, run the shell scripts from Git Bash or WSL.</p>
@@ -227,15 +230,54 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
 cd careerkit
 ./setup.sh          # checks prerequisites, builds .venv, installs deps
 claude              # open Claude Code in this folder
-/setup              # about 40 minutes</pre>
+/setup              # Search Core first; the rest is resumable</pre>
 
-  <p><code>/setup</code> interviews you: what you do, what you want next, where you will
-  work, what you will not do, and what is true about you. It writes
-  <code>profile/profile.yaml</code> and <code>profile/claims.md</code>.</p>
+  <p>On first launch, Claude Code may open a browser for sign-in and then show Workspace
+  Trust. Authenticate through Claude Code's own flow, never in a CareerKit file, and grant
+  trust only after checking the folder and repository are the ones you intended to run. If
+  <code>/setup</code> is missing, confirm <code>.claude/skills/setup/SKILL.md</code> exists,
+  use <code>/skills</code> to inspect project-skill discovery, reopen <code>claude</code>
+  from the repository root, and run <code>claude doctor</code> from the terminal if discovery
+  still fails. You can also ask Claude in plain language to follow that file.</p>
 
-  <p>It is not skippable. Until that file exists the engine has no rules to score against,
-  and it will tell you so rather than guess. A tool that guesses your criteria produces a
-  report that looks exactly as confident as a correct one.</p>
+  <p>Before reading personal documents or making sourcing requests, setup explains what
+  Anthropic, boards and feeds receive and asks for acknowledgment. Freehire stays inactive:
+  because enabling it sends configured <code>search_terms</code> to a third party, it needs
+  its own disclosure and separate activation confirmation.</p>
+
+  <p>There are two milestones rather than one 40-minute wall. <strong>Search Core</strong>
+  is required: role lanes, location, compensation, exclusions, domain terms and search
+  terms. A resume or other source document is optional. Once
+  <code>profile/profile.yaml</code> passes <code>profile-lint</code>, the engine can search;
+  until then it refuses to guess. Search Core keeps preferred-to-avoid titles in
+  <code>exclusions.titles</code>, which a dream company may waive, and role families the
+  user cannot credibly do in <code>exclusions.titles_always</code>, which nothing waives.</p>
+
+  <p>Claude then offers one bounded <strong>First Win</strong> using
+  <code>pull --feeds --no-cache</code>. It is optional and reaches only active configured
+  feeds. It does not add employer boards or activate Freehire, and its results must be
+  described as incomplete whenever any source failed, was partial, capped, dormant or
+  skipped. If it ran, it was the first search; do not immediately repeat it.</p>
+
+  <p>Source expansion and calibration follow. The longer <strong>Career Pack</strong> holds
+  confirmed claims and stories, voice samples, truthful application fields, voluntary EEO
+  choices and tracker scaffolding. Completing everything can take about 40 minutes, but the
+  Career Pack may be deferred until <code>/compose</code>, <code>/prep</code> or
+  <code>/apply</code> needs it. Deferral never blocks searching. Claims, voice, human context,
+  application fields and outcomes go only to their documented profile artifacts;
+  application/context fields do not score jobs.</p>
+
+  <div class="note">
+    <span class="h">Close the window; keep the work</span>
+    <code>profile/setup-progress.md</code> records only phase names and statuses. On the
+    next <code>/setup</code>, Claude checks that content-free privacy row before opening
+    personal artifacts. After acknowledgment it inventories existing work, reports what is
+    complete and resumes the first pending phase; deliberately deferred optional phases
+    remain deferred until requested or needed. It asks before restarting or overwriting.
+    The final handoff runs database, consistency,
+    coverage and doctor checks, then names the first shortlist, gaps, deferred work and one
+    exact next action.
+  </div>
 
   <h3>The claims register</h3>
   <p><code>profile/claims.md</code> is the list of things that may be said about you.
@@ -245,7 +287,7 @@ claude              # open Claude Code in this folder
 </section>
 
 <!-- ══ 3 ══ -->
-<section class="sec score-page">
+<section class="sec flow score-page">
   <p class="kicker">Three</p>
   <h2>How scoring works: lanes, rails, gates</h2>
   <hr class="gate fine">
@@ -276,10 +318,9 @@ claude              # open Claude Code in this folder
   what surfaces, change that file, usually by asking Claude to run <code>/criteria</code>.
   Never by editing engine code.</p>
 
-  <p>This is enforced, not merely intended: a test parses every module in
-  <code>engine/</code> and fails the build if one of a list of person-specific terms
-  appears outside a docstring. It is a tripwire rather than a proof, but it means the
-  engine cannot quietly acquire an opinion about what you want.</p>
+  <p>An automated test scans <code>engine/</code> for person-specific terms outside
+  docstrings. It is a tripwire, not a proof, but it stops the engine quietly acquiring an
+  opinion about what you want.</p>
 
   <h3>Two kinds of exclusion</h3>
   <p><code>exclusions.titles</code> is what you would rather avoid, and an employer you
@@ -298,13 +339,13 @@ claude              # open Claude Code in this folder
 </section>
 
 <!-- ══ 4 ══ -->
-<section class="sec">
+<section class="sec flow">
   <p class="kicker">Four</p>
   <h2>The daily loop</h2>
   <hr class="gate fine">
 
   <dl class="cmd">
-    <dt>/search</dt><dd>Sweep every board and feed, report what is genuinely new since the last run.</dd>
+    <dt>/search</dt><dd>Sweep active configured sources and report what is genuinely new since the last run.</dd>
     <dt>/evaluate &lt;url&gt;</dt><dd>An honest fit read on any posting, from anywhere. Names the real disqualifiers.</dd>
     <dt>/apply &lt;url&gt;</dt><dd>Build and fill; you review and approve this one submission.</dd>
     <dt>/prep &lt;company&gt;</dt><dd>Interview preparation from your own story bank.</dd>
@@ -316,6 +357,10 @@ claude              # open Claude Code in this folder
       jobs the old gates excluded.</dd>
     <dt>/audit</dt><dd>Review what the gates killed. Run it monthly.</dd>
   </dl>
+
+  <p>Search Core is sufficient for searching, ingesting, evaluating, changing criteria and
+  auditing. If Career Pack was deferred, Claude resumes only the needed claims, story,
+  voice or application fields before compose, prep or apply.</p>
 
   <h3>Running the engine directly</h3>
   <p>Claude does this for you, but every operation is also available from a
@@ -351,7 +396,7 @@ claude              # open Claude Code in this folder
 </section>
 
 <!-- ══ 5 ══ -->
-<section class="sec">
+<section class="sec flow">
   <p class="kicker">Five</p>
   <h2>Calibration: keeping the filter honest</h2>
   <hr class="gate fine">
@@ -403,14 +448,17 @@ claude              # open Claude Code in this folder
     <li><strong>To keyed feeds you enable:</strong> configured API keys, account IDs or
     affiliate values go to that provider. USAJobs additionally requires your registered
     email. Skip any keyed feed whose disclosure you do not accept.</li>
-    <li><strong>To Freehire, only if you enable it:</strong> quoted search terms, optional
+    <li><strong>To Freehire, only if you enable it:</strong> quoted search terms
+    (<code>search_terms</code>), optional
     country and age filters, and ordinary request metadata go to that third-party hosted
     discovery API. No API key, resume, claims register or application data is sent.
     CareerKit accepts only conservative first-party ATS source-and-host pairs and can,
     if separately enabled, hydrate thin results from the direct employer URL. Every
     Freehire row is forced to <code>VERIFY</code>; confirm it on the direct employer ATS,
     then ingest it for polling when CareerKit supports that ATS family. Unsupported
-    families remain manual verification leads.</li>
+    families remain manual verification leads. General setup, First Win or sourcing consent
+    does not activate it: Claude must repeat this disclosure and receive separate, explicit
+    confirmation before changing Freehire to active.</li>
     <li><strong>No telemetry.</strong> Nothing is reported to the author or anyone else.</li>
   </ul>
 

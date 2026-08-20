@@ -216,7 +216,8 @@ def test_freehire_without_literal_opt_in_is_dormant_not_operational(monkeypatch)
 
     cli = (Path(__file__).resolve().parents[1] / "careerkit.py").read_text(
         encoding="utf-8")
-    assert "dormant or opt-in feeds" in cli
+    assert "optional feeds left disabled by choice" in cli
+    assert "configured feeds not ready" in cli
     assert "active but dormant keyed feeds" not in cli
 
 

@@ -235,6 +235,9 @@ def test_guide_ci_uses_source_build_marker_as_its_freshness_contract():
         "never relay codes",
         "What leaves your machine",
         "git pull && ./setup.sh",
+        "Search Core",
+        "profile/setup-progress.md",
+        "separate activation confirmation",
     ):
         assert critical_text in workflow
     assert 'committed = " ".join' not in workflow

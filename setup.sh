@@ -39,8 +39,23 @@ echo "  git $(git --version | awk '{print $3}')"
 # setup, be told to run `claude`, and hit "command not found" with nothing in the
 # output to explain it. A warning rather than a failure: the CLI still works.
 if command -v claude >/dev/null; then
-  echo "  claude $(claude --version 2>/dev/null | head -1 | awk '{print $1}')"
+  if CLAUDE_VERSION_OUTPUT="$(claude --version 2>/dev/null)"; then
+    CLAUDE_VERSION="$(printf '%s\n' "$CLAUDE_VERSION_OUTPUT" | awk 'NF {print $1; exit}')"
+  else
+    CLAUDE_VERSION=""
+  fi
+  if [ -n "$CLAUDE_VERSION" ]; then
+    CLAUDE_STATE="ready"
+    echo "  claude $CLAUDE_VERSION"
+  else
+    CLAUDE_STATE="unusable"
+    echo "  ! claude is present but unusable: claude --version failed or returned no version."
+    echo "    Fix or reinstall it: npm install -g @anthropic-ai/claude-code   (needs Node 18+)"
+    echo "    The ./careerkit.py commands work without it; the /search style"
+    echo "    workflows do not."
+  fi
 else
+  CLAUDE_STATE="missing"
   echo "  ! claude not found. CareerKit is driven from Claude Code."
   echo "    Install it:  npm install -g @anthropic-ai/claude-code   (needs Node 18+)"
   echo "    The ./careerkit.py commands work without it; the /search style"
@@ -78,8 +93,30 @@ if [ ! -d .venv ]; then
     exit 1; }
 fi
 VENV_PY="$(venv_python)"
-"$VENV_PY" -m pip install --quiet --upgrade pip
-"$VENV_PY" -m pip install --quiet -r requirements-dev.txt
+
+dependency_install_failed() {
+  local failed_step="$1"
+  local failed_status="$2"
+  echo "FAILED: could not $failed_step." >&2
+  echo "  Setup is incomplete, but it is safe to rerun." >&2
+  echo "  Check your network or proxy, then run: ./setup.sh" >&2
+  echo "  CareerKit will reuse .venv and retry the dependency installation." >&2
+  exit "$failed_status"
+}
+
+echo "  upgrading pip in .venv ..."
+if "$VENV_PY" -m pip install --quiet --upgrade pip; then
+  :
+else
+  dependency_install_failed "upgrade pip in .venv" "$?"
+fi
+
+echo "  installing CareerKit runtime and development dependencies ..."
+if "$VENV_PY" -m pip install --quiet -r requirements-dev.txt; then
+  :
+else
+  dependency_install_failed "install CareerKit runtime and development dependencies" "$?"
+fi
 
 # pip installs and upgrades declared requirements but never removes an optional
 # dependency that disappeared from the file. Migrate the retired vulnerable
@@ -95,12 +132,44 @@ mkdir -p profile data out
 "$VENV_PY" -c "import sys; sys.path.insert(0,'.'); import engine.score, engine.adapters" \
   && echo "  engine OK"
 
-cat <<'EOF'
+case "$CLAUDE_STATE" in
+  ready)
+    cat <<'EOF'
 
 Done.
 
   Next:  claude          # open Claude Code in this folder
          /setup          # it interviews you and writes profile/profile.yaml
+
+  If the Claude CLI later has an installation problem, run: claude doctor
+EOF
+    ;;
+  unusable)
+    cat <<'EOF'
+
+CareerKit's Python environment is ready, but Claude Code is not usable yet.
+
+  Next:  claude doctor   # diagnose the present Claude installation
+         npm install -g @anthropic-ai/claude-code
+         ./setup.sh      # safe recheck; it should print a Claude version
+
+Do not start /setup until this check reports a usable Claude version.
+EOF
+    ;;
+  missing)
+    cat <<'EOF'
+
+CareerKit's Python environment is ready, but Claude Code is not installed yet.
+
+  Next:  npm install -g @anthropic-ai/claude-code   # needs Node 18+
+         ./setup.sh      # safe recheck; it should print a Claude version
+
+After that recheck succeeds, follow the Claude and /setup instructions it prints.
+EOF
+    ;;
+esac
+
+cat <<'EOF'
 
 ./careerkit.py activates .venv on its own, so you never have to remember to.
 EOF
