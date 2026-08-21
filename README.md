@@ -91,6 +91,17 @@ somewhere global.
   happen. If you installed things by hand instead, add
   `eval "$(/opt/homebrew/bin/brew shellenv)"` there yourself.
 
+### Small things that cost people time
+
+- **Quote paths that contain spaces.** If you cloned into a folder like
+  `Claude Career Kit`, every unquoted `cd` fails with a confusing shell error:
+  write `cd "Claude Career Kit/careerkit"`.
+- **On macOS, press Return, not the numpad Enter.** Some login prompts ignore
+  the numpad key, which looks exactly like a frozen terminal.
+- **`claude --continue` is tied to the folder.** Run it from the `careerkit`
+  directory; from anywhere else it reports "No conversation found to continue",
+  which reads like your setup interview was lost when it is simply elsewhere.
+
 ### Upgrading an install you already had
 
 CareerKit records a privacy acknowledgment before any command reads your files.

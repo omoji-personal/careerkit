@@ -826,6 +826,53 @@ ONSITE_REQUIREMENT = re.compile(
     re.I)
 
 
+# A residency clause is not an attendance clause: "#LI-Remote" in the header and
+# "must be based in the NYC Metropolitan area" in the body is a posting that is
+# remote *and* closed to anyone living elsewhere. ONSITE_REQUIREMENT does not
+# match it because nothing about it mentions days in an office, so the metro gate
+# never ran and the role scored QUALIFIED for a candidate who is not eligible.
+RESIDENCY_REQUIREMENT = re.compile(
+    r"\b(?:must|required to|need to|expected to|要)\b[^.]{0,40}?"
+    r"\b(?:be\s+)?(?:based|located|residing|reside|living|live)\b\s*"
+    r"(?:in|within|near)\s+(?:the\s+)?([^.,;:)\n]{3,45})",
+    re.I)
+
+# Country-level eligibility is the opposite of a metro restriction: "must be
+# based in the United States" is exactly what a remote-US candidate wants to
+# read, so treating it as a restriction would kill the best matches on the board.
+COUNTRY_LEVEL_RESIDENCY = re.compile(
+    r"\b(?:u\.?s\.?a?\b|united states|america|continental us|contiguous us|"
+    r"anywhere in the (?:us|united states)|lower 48)",
+    re.I)
+
+# A time zone is not a place this rail can judge. Metros do not map to zones in
+# the profile, so "must reside in the EST Time Zone" was flagged as a
+# restriction against an Atlanta candidate who is already in Eastern. Claiming a
+# role is location-restricted when the reader qualifies for it is the same
+# one-sided error this rail exists to prevent, pointed the other way.
+TIME_ZONE_PHRASE = re.compile(
+    r"\b(?:[ecmp][sd]?t\b|eastern|central|mountain|pacific)\b[^.]{0,12}\b"
+    r"(?:time|zone|timezone)\b|\btime\s*zone\b",
+    re.I)
+
+
+def residency_restriction(body: str, p: "Profile") -> "re.Match | None":
+    """A body clause naming a place the profile does not accept.
+
+    Returns the match only when the named place is neither country-level nor one
+    of the profile's own metros, so a posting that says "must be based in
+    Atlanta" for an Atlanta candidate stays clean.
+    """
+    for m in RESIDENCY_REQUIREMENT.finditer(body):
+        place = m.group(1).strip()
+        if COUNTRY_LEVEL_RESIDENCY.search(place) or TIME_ZONE_PHRASE.search(place):
+            continue
+        if p.metro_re and p.metro_re.search(place):
+            continue
+        return m
+    return None
+
+
 def _clause_before(text: str, m: "re.Match") -> str:
     """The part of the match's own sentence that comes before it.
 
@@ -1046,6 +1093,14 @@ def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
             if onsite:
                 return "unknown", (f"labelled remote but the description says "
                                    f"{_sentence_around(body, onsite)!r}")
+            # Same lesson, different clause. "unknown" rather than "fail" on
+            # purpose: the phrase may belong to another team's paragraph, or the
+            # captured place may be imprecise, and silently killing a real role
+            # is the more expensive mistake.
+            residency = residency_restriction(body, p)
+            if residency:
+                return "unknown", (f"labelled remote but the description says "
+                                   f"{_sentence_around(body, residency)!r}")
             return "pass", f"remote-US: {loc[:60] or 'flagged remote'}"
         if loc and not re.search(r"^\s*(remote|anywhere)?\s*$", loc, re.I):
             return "unknown", f"'{loc[:50]}' - remote but US eligibility unconfirmed"

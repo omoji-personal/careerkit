@@ -4413,3 +4413,68 @@ def test_multi_region_remote_roles_are_not_killed_as_foreign():
     # The guard must not become a hole: genuinely foreign remote still fails.
     assert verdict("Remote - Canada") == "fail"
     assert verdict("Remote - EMEA") == "fail"
+
+
+def _residency_profile():
+    from engine import score
+    return score.Profile.load(
+        Path(__file__).resolve().parents[1] / "profile.example" / "profile.yaml")
+
+
+def test_a_body_residency_clause_beats_a_remote_label():
+    """Reported from the field: a req headed "#LI-Remote" whose body said "must
+    be based in the NYC Metropolitan area" scored QUALIFIED for a candidate who
+    was not eligible. ONSITE_REQUIREMENT never matched it, because nothing in it
+    mentions days in an office, so the metro gate never ran."""
+    from engine import score
+    profile = _residency_profile()   # metros: Denver, Boulder, CO
+
+    restricted = score.residency_restriction(
+        "#LI-Remote. Must be based in the NYC Metropolitan area to be considered.",
+        profile)
+    assert restricted is not None
+
+
+def test_a_residency_clause_naming_your_own_metro_is_not_a_restriction():
+    from engine import score
+    profile = _residency_profile()
+    assert score.residency_restriction(
+        "Remote role. Candidates must be based in Denver.", profile) is None
+
+
+def test_country_level_eligibility_is_not_a_metro_restriction():
+    """"Must be based in the United States" is what a remote-US candidate wants
+    to read. Treating it as a restriction would kill the best matches."""
+    from engine import score
+    profile = _residency_profile()
+    for phrase in ("You must be located in the United States to be eligible.",
+                   "Must reside in the USA.",
+                   "Open to anyone based in the continental US."):
+        assert score.residency_restriction(phrase, profile) is None, phrase
+
+
+def test_a_time_zone_requirement_is_not_treated_as_a_place():
+    """Metros do not map to time zones in the profile, so judging one produced a
+    restriction claim against a candidate who already qualified: an Atlanta
+    reader is inside "must reside in the EST Time Zone". Found while validating
+    this rail against a real corpus rather than fixtures."""
+    from engine import score
+    profile = _residency_profile()
+    assert score.residency_restriction(
+        "100% Remote. Candidates must reside in the EST Time Zone.", profile) is None
+
+
+def test_the_residency_rail_downgrades_rather_than_kills():
+    """A body phrase may belong to another team's paragraph, and the captured
+    place may be imprecise, so this routes to a human check instead of a silent
+    fail — the mistake this rail exists to prevent, pointed the other way."""
+    from engine import score
+    profile = _residency_profile()
+    job = score.Job(
+        title="Account Director", company="Acme", location="Remote - United States",
+        url="https://example.com/1", source="greenhouse",
+        description="#LI-Remote. Must be based in the NYC Metropolitan area to be considered.",
+    )
+    verdict, why = score.location_verdict(job, profile)
+    assert verdict == "unknown", (verdict, why)
+    assert "NYC" in why
