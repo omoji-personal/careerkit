@@ -21,6 +21,13 @@ BASH = shutil.which("bash")
 
 pytestmark = pytest.mark.skipif(BASH is None, reason="bash is required")
 
+# Git Bash on Windows cannot drive Homebrew or an interactive sudo prompt, so
+# bootstrap.sh deliberately prints what to install by hand and exits nonzero
+# instead of offering a plan it could not carry out. The plan-shaped tests below
+# describe the macOS/Linux path; the Windows path has its own test.
+WINDOWS = sys.platform.startswith("win")
+not_windows = pytest.mark.skipif(WINDOWS, reason="Windows takes the manual-instructions path")
+
 
 def _checkout(tmp_path: Path) -> Path:
     checkout = tmp_path / "checkout"
@@ -66,6 +73,7 @@ def _run(checkout: Path, env: dict[str, str], *args: str) -> subprocess.Complete
     )
 
 
+@not_windows
 def test_dry_run_changes_nothing_and_says_so(tmp_path):
     checkout = _checkout(tmp_path)
     result = _run(checkout, _env(tmp_path), "--dry-run")
@@ -76,6 +84,7 @@ def test_dry_run_changes_nothing_and_says_so(tmp_path):
     assert "Dry run: stopping here." in combined
 
 
+@not_windows
 def test_non_interactive_without_yes_refuses_to_install(tmp_path):
     """stdin is not a terminal here, so nobody could have answered the prompt.
     Installing anyway would be an unattended install the user never approved."""
@@ -88,6 +97,7 @@ def test_non_interactive_without_yes_refuses_to_install(tmp_path):
     assert "--yes" in combined
 
 
+@not_windows
 def test_the_plan_prints_every_command_before_running_any(tmp_path):
     checkout = _checkout(tmp_path)
     result = _run(checkout, _env(tmp_path), "--dry-run")
@@ -181,3 +191,18 @@ def test_yes_cannot_force_a_step_that_needs_a_password_prompt(tmp_path):
     assert "needs a real terminal window" in combined or "cannot run without a terminal" in combined
     # Nothing may have been attempted: install steps announce themselves with "==>".
     assert "==>" not in combined
+
+
+@pytest.mark.skipif(not WINDOWS, reason="describes the Git Bash path specifically")
+def test_windows_git_bash_is_told_what_to_install_by_hand(tmp_path):
+    """bootstrap.sh cannot install packages from Git Bash, and pretending
+    otherwise would strand a Windows user midway. It must name every missing
+    prerequisite with a command that actually works on Windows."""
+    checkout = _checkout(tmp_path)
+    result = _run(checkout, _env(tmp_path), "--dry-run")
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, combined
+    assert "cannot install packages on this system automatically" in combined
+    assert "install.ps1" in combined or "winget" in combined
+    assert "brew" not in combined

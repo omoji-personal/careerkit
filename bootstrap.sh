@@ -213,6 +213,7 @@ if [ "$UNSUPPORTED" -eq 1 ] || [ ${#STEP_CMDS[@]} -eq 0 ]; then
     say "  Claude    desktop app, no terminal needed:  https://claude.ai/download"
     say "            or in a terminal:  curl -fsSL https://claude.ai/install.sh | bash"
     say "            (Windows PowerShell:  irm https://claude.ai/install.ps1 | iex)"
+    say "            (Windows WinGet:      winget install Anthropic.ClaudeCode)"
   fi
   say ""
   say "Then run: ./setup.sh"
