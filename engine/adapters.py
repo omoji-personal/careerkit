@@ -509,8 +509,14 @@ def workable(cfg: dict) -> list[Job]:
     if not isinstance(jobs, list):
         status, text = fetch(
             f"https://apply.workable.com/api/v3/accounts/{slug}/jobs",
+            # No "limit": Workable rejects the key outright at any value
+            # ({"limit":"Not allowed"}, HTTP 400), so sending it made this
+            # fallback fail 100% of the time. Every board whose v1 widget
+            # returned an unusable shape fell through to a request that could
+            # not succeed, and the failure was quiet: the adapter returned []
+            # and the run recorded a repeating HTTP 400 against the source.
             method="POST", json_body={"query": "", "location": [], "department": [],
-                                      "worktype": [], "limit": 100},
+                                      "worktype": []},
         )
         if status != 200:
             http.mark_partial(f"workable fallback returned HTTP {status}")

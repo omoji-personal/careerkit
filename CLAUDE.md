@@ -72,6 +72,11 @@ document contents in it.
 
 ## The machinery
 
+- **Always run Python through `.venv/bin/python`, never bare `python3`.** The
+  system interpreter is externally managed (PEP 668) and refuses `pip install`,
+  which sends a session into an install-debugging loop mid-interview instead of
+  the task. Import engine modules by package path (`import engine.score`), not
+  bare (`import score`), which raises a relative-import error.
 - `./careerkit.py pull` — poll boards + feeds, score against the profile,
   write `out/` report. `status`, `report`, `verify`, `discover`,
   `ingest-urls`, `audit` as documented in its header.

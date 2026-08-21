@@ -4373,3 +4373,43 @@ def test_a_posting_with_no_employer_does_not_corrupt_the_report(db, tmp_path, mo
         "a heading ends with a bare dash, which breaks the report's own parser"
     problems = consistency.check_report(db, str(out))
     assert not problems, f"the report disagrees with the database it came from: {problems}"
+
+
+def test_workable_v3_fallback_does_not_send_the_rejected_limit_key():
+    """Workable rejects "limit" at any value with HTTP 400 {"limit":"Not
+    allowed"}, so sending it made the v1-widget fallback fail every time. Found
+    by a user whose registered Workable boards were all sitting at x9
+    consecutive failures."""
+    source = (Path(__file__).resolve().parents[1] / "engine" / "adapters.py").read_text()
+    start = source.index("def workable(")
+    body = source[start:start + 1600]
+    assert "api/v3/accounts" in body, "the v3 fallback moved; re-point this test"
+    request = body[body.index("json_body="):body.index("json_body=") + 260]
+    assert '"limit"' not in request, "Workable rejects the limit key outright"
+    for expected in ('"query"', '"location"', '"department"', '"worktype"'):
+        assert expected in request
+
+
+def test_multi_region_remote_roles_are_not_killed_as_foreign():
+    """A region list naming the US alongside anywhere else must pass. The remote
+    rail lacked the `and not us_here` guard its sibling above it has, so the
+    first foreign name decided the verdict: "Remote - US, Canada" failed on the
+    word Canada. These are among the best matches a remote-US profile gets."""
+    from engine import score
+
+    profile = score.Profile.load(
+        Path(__file__).resolve().parents[1] / "profile.example" / "profile.yaml")
+
+    def verdict(location: str) -> str:
+        job = score.Job(
+            title="Salesforce Administrator", company="Acme", location=location,
+            url="https://example.com/1", source="greenhouse",
+            description="Remote role open to candidates in the US or Canada.",
+        )
+        return score.location_verdict(job, profile)[0]
+
+    assert verdict("Remote - US, Canada") == "pass"
+    assert verdict("Remote - United States") == "pass"
+    # The guard must not become a hole: genuinely foreign remote still fails.
+    assert verdict("Remote - Canada") == "fail"
+    assert verdict("Remote - EMEA") == "fail"

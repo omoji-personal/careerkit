@@ -1019,7 +1019,13 @@ def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
     remote_claim = loc_says_remote or REMOTE_OK.search(blob) or REMOTE_OK.search(body)
 
     if remote_claim and p.remote_ok:
-        if NON_US.search(f"{loc} {company}"):
+        # Mirror the `and not us_here` guard on the non-US rail above. Without
+        # it the first foreign name in a region list decided the verdict alone,
+        # so "Remote - US, Canada" failed on the word Canada with US sitting
+        # beside it. Multi-region remote reqs are common and are among the best
+        # matches a remote-US profile can get, so the loss was silent, one-sided
+        # and concentrated on exactly the postings the user most wanted.
+        if NON_US.search(f"{loc} {company}") and not us_here:
             return "fail", f"remote but non-US: {loc[:60]}"
         if VAGUE_REMOTE.search(blob):
             return "unknown", f"'{loc[:40]}' - global remote, US payroll unconfirmed"

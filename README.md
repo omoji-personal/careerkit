@@ -105,8 +105,35 @@ need to redo setup. Review the disclosure and record it:
 
 If you install Claude Code with `npm install -g @anthropic-ai/claude-code`
 rather than the installer above, npm prints an `install-scripts`/`allowScripts`
-warning about the package's postinstall step. That warning is expected and the
-install is fine; check it with `claude --version`.
+warning about the package's postinstall step. Take that warning seriously: when
+the postinstall really is skipped, the installed `claude` is a small placeholder
+that falls back to a Node wrapper, and **both `claude --version` and `claude
+doctor` still report success**, so neither one detects it. Check the binary
+itself instead:
+
+```
+file "$(readlink -f "$(command -v claude)")"
+```
+
+A working install is a large native executable (a Mach-O binary on macOS), not a
+short script. If it is not, reinstall with
+`npm install -g --allow-scripts=@anthropic-ai/claude-code`, or use the native
+installer above, which has no postinstall step to skip.
+
+### If `claude` fails with `EPERM` on macOS
+
+Every invocation, including plain `claude`, dies with `An internal error
+occurred (EPERM)`, and `claude doctor` reports no problems.
+
+Grant your terminal **Input Monitoring** in System Settings → Privacy &
+Security. Terminal is often not in that list at all, so add it with the `+`
+button; you will need to unlock the padlock with your password first, then
+restart the terminal.
+
+This is a macOS permission, not a CareerKit or Claude Code fault, but it stops
+everything and nothing else reports it. It cost one first-time user several
+hours, spent on reinstalling the CLI and checking Gatekeeper, code signatures
+and file ownership, none of which were the cause.
 
 On its first launch, Claude Code may open a browser for sign-in and then show a
 Workspace Trust prompt. Complete sign-in through Claude Code's own flow; do not

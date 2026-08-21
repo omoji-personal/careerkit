@@ -273,3 +273,73 @@ def test_setup_distinguishes_an_off_path_install_from_a_missing_one(tmp_path):
     assert "not on this shell's PATH" in combined
     assert "$HOME/.local/bin" in combined
     assert "! claude not found" not in combined
+
+
+def test_a_usable_interpreter_is_found_even_when_python3_is_too_old(tmp_path):
+    """Reported from a first run: `python3` was Apple's 3.9.6 while Homebrew's
+    3.14 sat at /opt/homebrew/bin/python3, so setup reported "MISSING: Python
+    3.10 or newer" with a valid interpreter already installed. Not updating PATH
+    after installing Python is the default outcome, not an exotic mistake."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    too_old = fake_bin / "python3"
+    too_old.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")   # fails the >=3.10 probe
+    too_old.chmod(0o755)
+    usable = fake_bin / "python3.12"
+    usable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")    # passes it
+    usable.chmod(0o755)
+
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        f'. "{ROOT}/scripts/select-python.sh"\n'
+        'careerkit_select_bootstrap_python || { echo NONE; exit 0; }\n'
+        'echo "${CAREERKIT_BOOTSTRAP_PYTHON[*]}"\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [BASH, str(script)],
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.stdout.strip() == "python3.12", result.stdout + result.stderr
+
+
+def test_the_interpreter_probe_never_selects_one_below_the_floor(tmp_path):
+    """The fallback must not degrade into selecting an interpreter that fails
+    the version floor; a wrong Python is worse than a clear refusal. This asserts
+    the invariant rather than "nothing is found", because the probe deliberately
+    checks absolute install prefixes and will legitimately find a real Homebrew
+    interpreter on a developer machine no matter what PATH says."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("python3", "python", "python3.12", "python3.10"):
+        stub = fake_bin / name
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+
+    script = tmp_path / "probe.sh"
+    script.write_text(
+        f'. "{ROOT}/scripts/select-python.sh"\n'
+        'careerkit_select_bootstrap_python || { echo NONE; exit 0; }\n'
+        'echo "${CAREERKIT_BOOTSTRAP_PYTHON[*]}"\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [BASH, str(script)],
+        env={"PATH": str(fake_bin), "HOME": str(tmp_path)},
+        text=True, capture_output=True, check=False,
+    )
+
+    selected = result.stdout.strip()
+    assert selected, result.stderr
+    if selected == "NONE":
+        return
+    # Anything it did select must actually satisfy the floor it claims to check.
+    probe = subprocess.run(
+        selected.split() + ["-c", "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)"],
+        capture_output=True, check=False,
+    )
+    assert probe.returncode == 0, f"selected {selected}, which fails the >=3.10 floor"
+    # And it must never be one of the stubs, all of which fail the probe.
+    assert not selected.startswith(str(fake_bin)), selected

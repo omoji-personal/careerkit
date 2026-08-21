@@ -181,8 +181,11 @@ def test_yes_cannot_force_a_step_that_needs_a_password_prompt(tmp_path):
     includes Homebrew must refuse rather than fail halfway through."""
     checkout = _checkout(tmp_path)
     env = _env(tmp_path)
-    # No Homebrew and only the system python 3.9.6 on PATH, so Homebrew is planned.
+    # No Homebrew and only the system python 3.9.6 on PATH, so Homebrew is
+    # planned. The interpreter probe also checks absolute install prefixes, so
+    # it must be pinned too or a real Homebrew python answers for the machine.
     env["PATH"] = "/usr/bin:/bin"
+    env["CAREERKIT_PYTHON_SEARCH_PATHS"] = " "
 
     result = _run(checkout, env, "--yes")
 
