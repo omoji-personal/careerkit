@@ -76,8 +76,8 @@ def lint(draft: str, register: str, *, extra_allowed: str = "") -> list[dict]:
         for m in _PROPER.finditer(line):
             words = m.group(1).strip().split()
             # A sentence-initial capital and a bare "I" get swept into the run:
-            # "At TechBridge I" was reported as an unknown employer even though
-            # TechBridge is in the register. Trim the edges before judging.
+            # "At Northwind I" was reported as an unknown employer even though
+            # Northwind is in the register. Trim the edges before judging.
             while words and words[0].lower() in _STOP:
                 words.pop(0)
             while words and words[-1].lower() in _STOP:

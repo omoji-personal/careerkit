@@ -990,10 +990,10 @@ _REQUIREMENT = re.compile(
 # environment, including Sales Cloud, ARM/RCA/CPQ" is a description of their
 # stack; it does not demand CPQ expertise. Without this guard, widening the
 # context window to the whole clause turned eight live postings into false
-# blocks in one run (2026-08-10) -- among them a $125-140K Salesforce
-# Administrator and a NeuraFlash req the user had already applied to, killed on
-# "Field Service" appearing third in a list of clouds. Discarding a role he can
-# do is the more expensive error, so the rail yields here.
+# blocks in one run (2026-08-10) -- among them a mid-six-figure Salesforce
+# Administrator req, and another the reader had already applied to, both killed
+# on "Field Service" appearing third in a list of clouds. Discarding a role
+# someone can do is the more expensive error, so the rail yields here.
 _ENUMERATION = re.compile(
     r"\b(including|include[sd]?|such as|like|e\.?g\.?|for example|ranging from)\b", re.I)
 
