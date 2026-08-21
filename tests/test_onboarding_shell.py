@@ -282,11 +282,16 @@ def test_a_usable_interpreter_is_found_even_when_python3_is_too_old(tmp_path):
     after installing Python is the default outcome, not an exotic mistake."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    too_old = fake_bin / "python3"
-    too_old.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")   # fails the >=3.10 probe
-    too_old.chmod(0o755)
+    # Stub every earlier candidate as failing the floor, so this exercises the
+    # versioned fallback specifically. Leaving `python` unstubbed made the test
+    # pass locally, where macOS has no /usr/bin/python, and fail on CI, where a
+    # usable `python` exists and is correctly selected before the fallback runs.
+    for name in ("python3", "python", "py"):
+        stub = fake_bin / name
+        stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
     usable = fake_bin / "python3.12"
-    usable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")    # passes it
+    usable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")    # passes the probe
     usable.chmod(0o755)
 
     script = tmp_path / "probe.sh"
@@ -298,7 +303,8 @@ def test_a_usable_interpreter_is_found_even_when_python3_is_too_old(tmp_path):
     )
     result = subprocess.run(
         [BASH, str(script)],
-        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        env={"PATH": f"{fake_bin}:/usr/bin:/bin", "HOME": str(tmp_path),
+             "CAREERKIT_PYTHON_SEARCH_PATHS": "python3.12"},
         text=True, capture_output=True, check=False,
     )
 
