@@ -213,7 +213,9 @@ def test_missing_privacy_checkpoint_blocks_sourcing_and_fails_doctor(
 
     with pytest.raises(SystemExit) as blocked:
         careerkit.load_profile()
-    assert "No onboarding privacy checkpoint" in str(blocked.value)
+    # A profile with no checkpoint is an upgraded install, so the refusal must
+    # offer the migration rather than send a working setup back to onboarding.
+    assert "privacy --accept" in str(blocked.value)
 
     with pytest.raises(SystemExit) as diagnosed:
         careerkit.cmd_doctor(argparse.Namespace())
@@ -227,7 +229,7 @@ def test_missing_privacy_checkpoint_blocks_sourcing_and_fails_doctor(
 
 _MALFORMED_CHECKPOINT_SECRET = "PrivateCheckpointValue"
 _PRIVACY_CHECKPOINT_CASES = (
-    pytest.param(None, "No onboarding privacy checkpoint", id="absent"),
+    pytest.param(None, "privacy --accept", id="absent"),
     pytest.param(
         "Privacy: complete\nSearch Core: pending\nFirst Win: pending\n"
         "Source Expansion: pending\nCareer Pack: pending\nFinal Checks: pending\n"
@@ -316,7 +318,10 @@ def test_pre_privacy_dispatch_allowlist_contains_only_the_limited_doctor(
     def limited_doctor(args):
         called.append(args.cmd)
 
-    assert careerkit.PRE_PRIVACY_COMMANDS == frozenset({"doctor"})
+    # Only two commands may run before acknowledgment: the limited diagnostic,
+    # and the command that presents the disclosure and records the answer.
+    # Anything else joining this set is a hole in the gate.
+    assert careerkit.PRE_PRIVACY_COMMANDS == frozenset({"doctor", "privacy"})
     monkeypatch.setattr(careerkit, "cmd_doctor", limited_doctor)
     monkeypatch.setattr(careerkit, "command_writes", lambda _args: False)
 
@@ -508,3 +513,125 @@ def test_pull_passes_its_cache_scope_into_the_durable_report_metadata(
 
     assert captured["cache_mode"] == expected
     assert captured["feeds_only"] is True
+
+
+# --- upgrade path: installs that predate the checkpoint ----------------------
+#
+# The checkpoint became mandatory for every command after installs already
+# existed. A user with a mature profile and no checkpoint was refused by the
+# gate and pointed at /setup, which is the one thing they cannot reach and which
+# sounds like it will redo the profile they already have.
+
+
+def _accept_args(accept: bool) -> argparse.Namespace:
+    return argparse.Namespace(cmd="privacy", accept=accept)
+
+
+def test_an_install_that_predates_the_checkpoint_is_told_how_to_upgrade(
+        monkeypatch, tmp_path, capsys):
+    profile_dir = _bind_home(monkeypatch, tmp_path)
+    (profile_dir / "profile.yaml").write_text("lanes: []\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        careerkit.require_privacy_checkpoint()
+
+    message = str(exit_info.value)
+    assert "predates that" in message
+    assert "privacy --accept" in message
+    assert "has not been touched" in message
+
+
+def test_a_genuinely_new_install_is_still_sent_to_setup(monkeypatch, tmp_path):
+    """No profile means onboarding, not a migration: the original routing must
+    survive, or /setup stops being the front door for new users."""
+    _bind_home(monkeypatch, tmp_path)
+
+    with pytest.raises(SystemExit) as exit_info:
+        careerkit.require_privacy_checkpoint()
+
+    message = str(exit_info.value)
+    assert "/setup" in message
+    assert "privacy --accept" not in message
+
+
+def test_privacy_shows_the_disclosure_without_recording_anything(
+        monkeypatch, tmp_path, capsys):
+    profile_dir = _bind_home(monkeypatch, tmp_path)
+
+    careerkit.cmd_privacy(_accept_args(False))
+
+    out = capsys.readouterr().out
+    for topic in ("Anthropic", "employer boards", "freehire.me", "telemetry"):
+        assert topic in out
+    assert not (profile_dir / "setup-progress.md").exists()
+
+
+def test_accept_records_a_checkpoint_the_gate_accepts(monkeypatch, tmp_path, capsys):
+    profile_dir = _bind_home(monkeypatch, tmp_path)
+    (profile_dir / "profile.yaml").write_text("lanes: []\n", encoding="utf-8")
+
+    careerkit.cmd_privacy(_accept_args(True))
+
+    out = capsys.readouterr().out
+    assert "Anthropic" in out, "acceptance must still show what is being accepted"
+    assert "not read or changed" in out
+    progress = careerkit.require_privacy_checkpoint()
+    assert progress["Privacy"] == "complete"
+    # A migrated install already has its criteria; sending it back through the
+    # Search Core interview would be the upgrade undoing working configuration.
+    assert progress["Search Core"] == "complete"
+
+
+def test_accept_leaves_search_core_pending_when_there_is_no_profile(
+        monkeypatch, tmp_path, capsys):
+    profile_dir = _bind_home(monkeypatch, tmp_path)
+
+    careerkit.cmd_privacy(_accept_args(True))
+
+    capsys.readouterr()
+    progress, issues = careerkit.onboarding_progress(profile_dir / "setup-progress.md")
+    assert not issues
+    assert progress["Privacy"] == "complete"
+    assert progress["Search Core"] == "pending"
+
+
+def test_accept_refuses_to_overwrite_a_checkpoint_it_did_not_create(
+        monkeypatch, tmp_path, capsys):
+    """A malformed checkpoint may encode deliberate state. Rewriting it would
+    silently discard whatever /setup recorded there."""
+    profile_dir = _bind_home(monkeypatch, tmp_path)
+    existing = "Privacy: pending\nSearch Core: complete\n"
+    (profile_dir / "setup-progress.md").write_text(existing, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        careerkit.cmd_privacy(_accept_args(True))
+
+    assert "will not rewrite" in str(exit_info.value)
+    assert (profile_dir / "setup-progress.md").read_text(encoding="utf-8") == existing
+
+
+def test_accept_is_idempotent(monkeypatch, tmp_path, capsys):
+    profile_dir = _bind_home(monkeypatch, tmp_path)
+    _write_complete_checkpoint(profile_dir)
+    before = (profile_dir / "setup-progress.md").read_text(encoding="utf-8")
+
+    careerkit.cmd_privacy(_accept_args(True))
+
+    assert "Already acknowledged" in capsys.readouterr().out
+    assert (profile_dir / "setup-progress.md").read_text(encoding="utf-8") == before
+
+
+def test_privacy_runs_before_acknowledgment(monkeypatch, tmp_path):
+    """The command that records the acknowledgment cannot itself require one."""
+    _bind_home(monkeypatch, tmp_path)
+    careerkit.enforce_privacy_command_policy(_accept_args(False))
+
+
+def test_the_cli_disclosure_still_covers_what_the_setup_skill_promises():
+    """Two copies of a disclosure drift. This pins the topics that must appear
+    in both, so a change to one is a visible failure rather than a quiet gap."""
+    skill = (ROOT / ".claude" / "skills" / "setup" / "SKILL.md").read_text(encoding="utf-8")
+    cli = careerkit.PRIVACY_DISCLOSURE
+    for topic in ("Anthropic", "USAJobs", "freehire.me", "telemetry"):
+        assert topic in skill, f"{topic} missing from the setup skill"
+        assert topic in cli, f"{topic} missing from the CLI disclosure"

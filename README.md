@@ -91,6 +91,18 @@ somewhere global.
   happen. If you installed things by hand instead, add
   `eval "$(/opt/homebrew/bin/brew shellenv)"` there yourself.
 
+### Upgrading an install you already had
+
+CareerKit records a privacy acknowledgment before any command reads your files.
+Installs created before that exists have no such record, so after `git pull`
+every command stops and says so. Your profile is not touched, and you do not
+need to redo setup. Review the disclosure and record it:
+
+```
+./careerkit.py privacy            # read it, record nothing
+./careerkit.py privacy --accept   # record it and carry on
+```
+
 If you install Claude Code with `npm install -g @anthropic-ai/claude-code`
 rather than the installer above, npm prints an `install-scripts`/`allowScripts`
 warning about the package's postinstall step. That warning is expected and the

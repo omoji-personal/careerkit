@@ -265,13 +265,110 @@ CLAIMS = _configured_path("CAREERKIT_CLAIMS", PROFILE.parent / "claims.md")
 # fail closed for future commands: argparse help exits before dispatch, while
 # doctor has its own privacy-first diagnostic that does not inspect personal
 # artifacts until the checkpoint is valid.
-PRE_PRIVACY_COMMANDS = frozenset({"doctor"})
+PRE_PRIVACY_COMMANDS = frozenset({"doctor", "privacy"})
+
+# The same four points the /setup skill makes. This copy exists so the
+# acknowledgment can be reviewed and recorded from a terminal: an install that
+# predates the checkpoint has a working profile and no way to reach /setup
+# without first being refused by the gate that /setup is supposed to satisfy.
+PRIVACY_DISCLOSURE = """\
+What CareerKit does with your information
+
+  1. Everything Claude reads is processed by Anthropic under your own Claude
+     plan's terms.
+  2. CareerKit makes outbound requests to employer boards, feeds, and any URL
+     you paste. Optional keyed feeds send their configured API credential or
+     account identifier to that provider; USAJobs also sends the registered
+     email address as a header.
+  3. Freehire ships inactive. Only if you separately enable it, CareerKit sends
+     your configured search terms, optional country and age filters, and
+     ordinary network metadata to freehire.me. It never sends your resume,
+     claims register, application data, secrets, or API keys. Enabling it needs
+     its own explicit confirmation at that time; this acknowledgment is not
+     that confirmation.
+  4. There is no CareerKit telemetry. Deleting profile/, data/, and out/ removes
+     the private state CareerKit owns locally, but cannot retract anything
+     already sent to those services or delete copies held elsewhere."""
+
+
+def cmd_privacy(args) -> None:
+    """Show the privacy disclosure, and with --accept record acknowledgment.
+
+    This is the upgrade path. The checkpoint became mandatory for every command
+    after installs already existed, so a user with a mature profile and no
+    checkpoint was locked out of a working tool and pointed at onboarding, which
+    reads like it might overwrite the profile they spent months building. The
+    gate is not relaxed here: the disclosure is still shown and still has to be
+    accepted deliberately. It just no longer requires Claude Code to do it.
+    """
+    print(PRIVACY_DISCLOSURE)
+    progress_path = PROFILE.parent / "setup-progress.md"
+
+    if not args.accept:
+        print()
+        if progress_path.exists():
+            print("A checkpoint already exists at " + str(progress_path) + ".")
+        else:
+            print("Nothing has been recorded. To acknowledge this and unlock "
+                  "CareerKit:\n\n  ./careerkit.py privacy --accept")
+        return
+
+    if progress_path.exists():
+        progress, issues = onboarding_progress(progress_path)
+        if not issues and progress.get("Privacy") == "complete":
+            print("\nAlready acknowledged; nothing to change.")
+            return
+        sys.exit(
+            "\nA checkpoint already exists at " + str(progress_path) + " and is "
+            "incomplete or malformed.\nRun /setup in Claude Code, which reconciles "
+            "existing artifacts instead of\noverwriting them. This command will not "
+            "rewrite a checkpoint it did not create."
+        )
+
+    # An install being migrated already has its search criteria; recording those
+    # phases as pending would send a working setup back through an interview it
+    # does not need. The optional phases were never run *as phases*, which is
+    # what "skipped" means here, and /setup can still open any of them later.
+    configured = PROFILE.exists()
+    states = {
+        "Privacy": "complete",
+        "Search Core": "complete" if configured else "pending",
+        "First Win": "skipped",
+        "Source Expansion": "skipped",
+        "Career Pack": "skipped",
+        "Final Checks": "complete" if configured else "pending",
+    }
+    body = "# CareerKit setup checkpoint (content-free)\n" + "".join(
+        f"{phase}: {states[phase]}\n" for phase in _ONBOARDING_PHASES
+    )
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = progress_path.with_suffix(".md.tmp")
+    tmp.write_text(body, encoding="utf-8")
+    tmp.replace(progress_path)
+
+    print("\nRecorded at " + str(progress_path) + ".")
+    if configured:
+        print("Your existing profile was not read or changed.")
+    else:
+        print("No profile yet: run /setup in Claude Code to build one.")
 
 
 def require_privacy_checkpoint() -> dict[str, str]:
     """Require a valid recorded acknowledgment without reading personal state."""
     progress_path = PROFILE.parent / "setup-progress.md"
     if not progress_path.exists():
+        # A profile with no checkpoint is an install that predates the
+        # checkpoint, not a user who skipped onboarding. Sending them to /setup
+        # is both inconvenient and alarming, because it sounds like it will
+        # redo the profile they already have.
+        if PROFILE.exists():
+            sys.exit(
+                "CareerKit now records a privacy acknowledgment before any command "
+                "reads your\nfiles, and this install predates that. Your profile has "
+                "not been touched.\n\n"
+                "  Review the disclosure and record it:  ./careerkit.py privacy --accept\n"
+                "  See it without recording anything:    ./careerkit.py privacy\n"
+            )
         sys.exit(
             "No onboarding privacy checkpoint yet. Run /setup in Claude Code "
             "to review the disclosure before using CareerKit commands."
@@ -2069,6 +2166,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("doctor", help="check setup, source health, freshness, and drift")
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("privacy", help="show the privacy disclosure, or record acknowledgment")
+    sp.add_argument("--accept", action="store_true",
+                    help="record acknowledgment so CareerKit commands can run")
+    sp.set_defaults(fn=cmd_privacy)
 
     sp = sub.add_parser("tracker-sync", help="preview tracker/database drift; "
                         "append and mark only with --apply")
