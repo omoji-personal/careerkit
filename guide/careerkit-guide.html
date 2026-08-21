@@ -219,16 +219,18 @@ pre{ font-family:var(--mono); font-size:8.4pt; line-height:1.42; background:var(
   <h2>Setup, and why the interview is not optional</h2>
   <hr class="gate fine">
 
-  <p>You need Claude Code (Pro plan minimum), Python 3.10 or newer, and git. Follow
-  the <a href="https://code.claude.com/docs/en/setup">Claude Code setup guide</a> or
-  install it with <code>npm install -g @anthropic-ai/claude-code</code>, which needs
-  Node 18 or newer. Chrome and the Claude-in-Chrome extension are optional, and only
+  <p>You need Claude Code (Pro plan minimum), Python 3.10 or newer, and git.
+  <code>./bootstrap.sh</code> installs whatever is missing, printing the exact commands
+  and asking first; the <a href="https://code.claude.com/docs/en/setup">Claude Code setup
+  guide</a> covers doing it by hand. Claude Code counts either as the terminal command or
+  the desktop app. Chrome and the Claude-in-Chrome extension are optional, and only
   needed if you want it filling application forms for you. macOS and Linux work as they
   are; on Windows, run the shell scripts from Git Bash or WSL.</p>
 
 <pre>git clone https://github.com/omoji-personal/careerkit.git
 cd careerkit
-./setup.sh          # checks prerequisites, builds .venv, installs deps
+./bootstrap.sh      # installs missing prerequisites, after asking
+./setup.sh          # builds .venv, installs deps
 claude              # open Claude Code in this folder
 /setup              # Search Core first; the rest is resumable</pre>
 

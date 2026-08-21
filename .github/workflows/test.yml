@@ -23,7 +23,7 @@ jobs:
       # database, which is also what keeps them honest.
       # Lint as its own step, so a failure names itself rather than surfacing as
       # a confusing test failure three files away.
-      - run: bash -n setup.sh new-instance.sh run-tests.sh scripts/select-python.sh
+      - run: bash -n setup.sh bootstrap.sh new-instance.sh run-tests.sh scripts/select-python.sh scripts/detect-claude.sh
       - run: sh -n scripts/run-careerkit.sh
       - run: python -m pyflakes engine/*.py scripts/*.py careerkit.py tests/*.py
       - run: python -m pytest tests/ -q
@@ -90,6 +90,7 @@ jobs:
                   "Search Core",
                   "profile/setup-progress.md",
                   "separate activation confirmation",
+                  "./bootstrap.sh",
               )
               missing = [item for item in critical_text if item not in normalized]
               if missing:

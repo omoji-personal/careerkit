@@ -38,29 +38,37 @@ echo "  git $(git --version | awk '{print $3}')"
 # itself a prerequisite check while never looking for it. A user could complete
 # setup, be told to run `claude`, and hit "command not found" with nothing in the
 # output to explain it. A warning rather than a failure: the CLI still works.
-if command -v claude >/dev/null; then
-  if CLAUDE_VERSION_OUTPUT="$(claude --version 2>/dev/null)"; then
-    CLAUDE_VERSION="$(printf '%s\n' "$CLAUDE_VERSION_OUTPUT" | awk 'NF {print $1; exit}')"
-  else
-    CLAUDE_VERSION=""
-  fi
-  if [ -n "$CLAUDE_VERSION" ]; then
-    CLAUDE_STATE="ready"
+# shellcheck source=scripts/detect-claude.sh
+. ./scripts/detect-claude.sh
+careerkit_detect_claude
+CLAUDE_STATE="$CAREERKIT_CLAUDE_STATE"
+CLAUDE_VERSION="$CAREERKIT_CLAUDE_VERSION"
+case "$CLAUDE_STATE" in
+  ready)
     echo "  claude $CLAUDE_VERSION"
-  else
-    CLAUDE_STATE="unusable"
+    ;;
+  desktop)
+    echo "  claude Code desktop app ($CAREERKIT_CLAUDE_DESKTOP)"
+    ;;
+  unusable)
     echo "  ! claude is present but unusable: claude --version failed or returned no version."
-    echo "    Fix or reinstall it: npm install -g @anthropic-ai/claude-code   (needs Node 18+)"
+    echo "    Fix or reinstall it:  curl -fsSL https://claude.ai/install.sh | bash"
     echo "    The ./careerkit.py commands work without it; the /search style"
     echo "    workflows do not."
-  fi
-else
-  CLAUDE_STATE="missing"
-  echo "  ! claude not found. CareerKit is driven from Claude Code."
-  echo "    Install it:  npm install -g @anthropic-ai/claude-code   (needs Node 18+)"
-  echo "    The ./careerkit.py commands work without it; the /search style"
-  echo "    workflows do not."
-fi
+    ;;
+  not-on-path)
+    echo "  ! claude is installed at ~/.local/bin/claude but is not on this shell's PATH."
+    echo "    Add it:  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo "    The ./careerkit.py commands work without it; the /search style"
+    echo "    workflows do not."
+    ;;
+  *)
+    echo "  ! claude not found. CareerKit is driven from Claude Code."
+    echo "    Install it:  ./bootstrap.sh          (installs prerequisites for you)"
+    echo "    The ./careerkit.py commands work without it; the /search style"
+    echo "    workflows do not."
+    ;;
+esac
 
 # Python puts the venv binaries in Scripts/ on Windows and bin/ everywhere else.
 # The README tells Windows users to run this from Git Bash, where the shell is
@@ -133,6 +141,29 @@ mkdir -p profile data out
   && echo "  engine OK"
 
 case "$CLAUDE_STATE" in
+  desktop)
+    cat <<'EOF'
+
+Done.
+
+  Next:  open this folder in the Claude Code desktop app
+         /setup          # it interviews you and writes profile/profile.yaml
+
+  The terminal command is optional; the desktop app runs /setup just as well.
+EOF
+    ;;
+  not-on-path)
+    cat <<'EOF'
+
+CareerKit's Python environment is ready, but this shell cannot see Claude Code.
+
+  Next:  export PATH="$HOME/.local/bin:$PATH"
+         ./setup.sh      # safe recheck; it should print a Claude version
+
+  Add that export line to your shell profile to make it stick, or just open a
+  new terminal window.
+EOF
+    ;;
   ready)
     cat <<'EOF'
 
@@ -161,8 +192,12 @@ EOF
 
 CareerKit's Python environment is ready, but Claude Code is not installed yet.
 
-  Next:  npm install -g @anthropic-ai/claude-code   # needs Node 18+
+  Next:  ./bootstrap.sh  # installs Claude Code (and anything else missing)
          ./setup.sh      # safe recheck; it should print a Claude version
+
+  Prefer a graphical app, or installing by hand?
+         desktop app:  https://claude.ai/download
+         terminal:     curl -fsSL https://claude.ai/install.sh | bash
 
 After that recheck succeeds, follow the Claude and /setup instructions it prints.
 EOF

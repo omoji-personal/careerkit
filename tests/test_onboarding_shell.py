@@ -104,6 +104,7 @@ def _setup_fixture(
     scripts.mkdir(parents=True)
     shutil.copy2(ROOT / "setup.sh", checkout / "setup.sh")
     shutil.copy2(ROOT / "scripts/select-python.sh", scripts / "select-python.sh")
+    shutil.copy2(ROOT / "scripts/detect-claude.sh", scripts / "detect-claude.sh")
     shutil.copy2(ROOT / "requirements-dev.txt", checkout / "requirements-dev.txt")
 
     venv_dir = checkout / ".venv" / ("Scripts" if os.name == "nt" else "bin")
@@ -118,8 +119,42 @@ def _setup_fixture(
         claude = fake_bin / "claude"
         claude.write_text("#!/bin/sh\n" + claude_body, encoding="utf-8")
         claude.chmod(0o755)
-    env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        # A single space means "no desktop app". Without this the result depends
+        # on whether the machine running the tests has Claude.app installed.
+        "CAREERKIT_CLAUDE_DESKTOP_PATHS": " ",
+    }
     return checkout, env
+
+
+def _isolate_claude(tmp_path: Path, env: dict[str, str]) -> dict[str, str]:
+    """Make Claude Code detection depend only on what a test sets up.
+
+    Three things leak in otherwise: `claude` on the real PATH, the developer's
+    own ~/.local/bin/claude launcher, and /Applications/Claude.app. A test that
+    controls none of them asserts different behavior on a laptop than on CI.
+    """
+    hide = tmp_path / "hide-claude.sh"
+    hide.write_text(
+        """command() {
+  if [ "${1-}" = -v ] && [ "${2-}" = claude ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+""",
+        encoding="utf-8",
+    )
+    home = tmp_path / "isolated-home"
+    home.mkdir(exist_ok=True)
+    return {
+        **env,
+        "BASH_ENV": str(hide),
+        "HOME": str(home),
+        "CAREERKIT_CLAUDE_DESKTOP_PATHS": " ",
+    }
 
 
 @pytest.mark.parametrize("claude_body", ["exit 23\n", "exit 0\n"])
@@ -141,18 +176,7 @@ def test_setup_warns_when_claude_is_present_but_unusable(tmp_path, claude_body):
 
 def test_setup_without_claude_points_to_install_and_safe_recheck(tmp_path):
     checkout, env = _setup_fixture(tmp_path, "exit 0\n", None)
-    bash_env = tmp_path / "hide-claude.sh"
-    bash_env.write_text(
-        """command() {
-  if [ "${1-}" = -v ] && [ "${2-}" = claude ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-""",
-        encoding="utf-8",
-    )
-    env = {**env, "BASH_ENV": str(bash_env)}
+    env = _isolate_claude(tmp_path, env)
 
     result = _run_bash(checkout / "setup.sh", cwd=checkout, env=env)
 
@@ -160,7 +184,9 @@ def test_setup_without_claude_points_to_install_and_safe_recheck(tmp_path):
     assert result.returncode == 0, combined
     assert "! claude not found" in combined
     assert "CareerKit's Python environment is ready, but Claude Code is not installed yet." in combined
-    assert "Next:  npm install -g @anthropic-ai/claude-code" in combined
+    assert "Next:  ./bootstrap.sh" in combined
+    assert "https://claude.ai/download" in combined
+    assert "npm install -g" not in combined
     assert "./setup.sh      # safe recheck" in combined
     assert "Next:  claude          # open Claude Code" not in combined
     assert "Done." not in combined
@@ -207,3 +233,43 @@ exit 0
     assert "Done." in recovered.stdout
     assert "Next:  claude          # open Claude Code" in recovered.stdout
     assert "claude doctor" in recovered.stdout
+
+
+def test_setup_accepts_the_desktop_app_instead_of_the_terminal_command(tmp_path):
+    """A desktop-app user has a working Claude Code and must not be told to
+    install a second copy: CareerKit's /setup is a skill in this checkout, and
+    whichever Claude opens the folder can run it."""
+    checkout, env = _setup_fixture(tmp_path, "exit 0\n", None)
+    desktop = tmp_path / "Claude.app"
+    desktop.mkdir()
+    env = {**_isolate_claude(tmp_path, env), "CAREERKIT_CLAUDE_DESKTOP_PATHS": str(desktop)}
+
+    result = _run_bash(checkout / "setup.sh", cwd=checkout, env=env)
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "claude Code desktop app" in combined
+    assert "open this folder in the Claude Code desktop app" in combined
+    assert "! claude not found" not in combined
+    assert "not installed yet" not in combined
+
+
+def test_setup_distinguishes_an_off_path_install_from_a_missing_one(tmp_path):
+    """The native installer writes ~/.local/bin/claude, which a fresh shell may
+    not have on PATH. Reinstalling cannot fix that, so setup must name the PATH
+    problem rather than repeat the install instructions."""
+    checkout, env = _setup_fixture(tmp_path, "exit 0\n", None)
+    env = _isolate_claude(tmp_path, env)
+    launcher_dir = Path(env["HOME"]) / ".local" / "bin"
+    launcher_dir.mkdir(parents=True)
+    launcher = launcher_dir / "claude"
+    launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    launcher.chmod(0o755)
+
+    result = _run_bash(checkout / "setup.sh", cwd=checkout, env=env)
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined
+    assert "not on this shell's PATH" in combined
+    assert "$HOME/.local/bin" in combined
+    assert "! claude not found" not in combined

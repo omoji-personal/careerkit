@@ -238,6 +238,7 @@ def test_guide_ci_uses_source_build_marker_as_its_freshness_contract():
         "Search Core",
         "profile/setup-progress.md",
         "separate activation confirmation",
+        "./bootstrap.sh",
     ):
         assert critical_text in workflow
     assert 'committed = " ".join' not in workflow

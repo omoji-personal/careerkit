@@ -50,9 +50,51 @@ Open a terminal and run these one at a time:
 ```
 git clone https://github.com/omoji-personal/careerkit.git
 cd careerkit
-./setup.sh          # checks prerequisites, creates a .venv, installs deps
+./bootstrap.sh      # installs anything missing: Python, Claude Code, Homebrew
+./setup.sh          # creates a .venv and installs CareerKit's dependencies
 claude              # opens Claude Code in this folder
 ```
+
+`./bootstrap.sh` checks what you already have, prints the exact commands it
+wants to run, and asks before running any of them. If everything is already
+installed it says so and stops. Run `./bootstrap.sh --dry-run` to see the plan
+without changing anything. If you would rather install the prerequisites
+yourself, skip it and go straight to `./setup.sh`, which checks the same things
+and tells you what is missing.
+
+Claude Code counts as installed whether you use the terminal command or the
+[desktop app](https://claude.ai/download). With the desktop app you open this
+folder in it instead of typing `claude`, and everything below works the same.
+
+**If you are already in a Claude Code session** and asked it to clone this repo
+for you, `/setup` will not be in that session's skill list: skills are read when
+a session opens on a folder, and this folder did not exist yet. Either quit and
+reopen Claude Code from the `careerkit` folder, or just say in plain language:
+
+> Follow `.claude/skills/setup/SKILL.md` and resume my setup.
+
+That works identically. Do not start from another directory or copy the skill
+somewhere global.
+
+### If you have none of this yet
+
+`./bootstrap.sh` handles it, with two things worth knowing before you start:
+
+- **Run it in a real Terminal window, not through an assistant.** Installing
+  Homebrew asks for your macOS password, and its installer refuses to run when
+  it cannot reach a terminal. `bootstrap.sh` checks for this and stops with
+  instructions rather than failing halfway.
+- **A brand-new Mac may have no shell profile at all.** Homebrew does not always
+  create one, which is how `python3` and `claude` can work right after setup and
+  then be "command not found" in a fresh terminal window. `bootstrap.sh` writes
+  the needed lines into `~/.zprofile` (or `~/.bash_profile`) so that does not
+  happen. If you installed things by hand instead, add
+  `eval "$(/opt/homebrew/bin/brew shellenv)"` there yourself.
+
+If you install Claude Code with `npm install -g @anthropic-ai/claude-code`
+rather than the installer above, npm prints an `install-scripts`/`allowScripts`
+warning about the package's postinstall step. That warning is expected and the
+install is fine; check it with `claude --version`.
 
 On its first launch, Claude Code may open a browser for sign-in and then show a
 Workspace Trust prompt. Complete sign-in through Claude Code's own flow; do not
@@ -95,11 +137,10 @@ immediately repeat it with `/search`.
 If `/setup` does not appear, confirm that Claude Code was opened from the cloned
 `careerkit` folder and that `.claude/skills/setup/SKILL.md` exists. Inside
 Claude Code, run `/skills` and confirm the project skill is listed; then exit and
-reopen `claude` from that folder. If discovery or installation still looks
-wrong, exit Claude Code and run `claude doctor` in the terminal. You can also
-tell Claude in plain language: "Follow `.claude/skills/setup/SKILL.md` and
-resume my setup." Do not start from another directory or copy the skill into a
-global location.
+reopen `claude` from that folder. The most common cause is covered in
+[Start](#start): a session that was already open before this folder existed
+never saw the skill. If discovery or installation still looks wrong, exit Claude
+Code and run `claude doctor` in the terminal.
 
 ## The loop
 

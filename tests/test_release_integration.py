@@ -305,6 +305,7 @@ def test_setup_rebuilds_old_venv_and_targets_only_project_python(tmp_path):
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     shutil.copy2(ROOT / "scripts/select-python.sh", scripts / "select-python.sh")
+    shutil.copy2(ROOT / "scripts/detect-claude.sh", scripts / "detect-claude.sh")
     shutil.copy2(ROOT / "scripts/remove_unsafe_jobspy.py",
                  scripts / "remove_unsafe_jobspy.py")
 
