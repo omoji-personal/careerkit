@@ -33,9 +33,8 @@ reading before you trust it with your own search.
 
 ## What you need
 
-- [Claude Code setup](https://code.claude.com/docs/en/setup) (Pro plan minimum; expect
-  meaningful usage on setup and application days). Install it with
-  `npm install -g @anthropic-ai/claude-code`, which needs Node 18 or newer.
+- [Claude Code access and setup](https://code.claude.com/docs/en/setup). The
+  recommended native installer needs no Node.js; `./bootstrap.sh` uses it for you.
 - Python 3.10 or newer, and git
 - Chrome + the Claude-in-Chrome extension, only if you want it filling forms
   and editing LinkedIn for you
@@ -50,10 +49,18 @@ Open a terminal and run these one at a time:
 ```
 git clone https://github.com/omoji-personal/careerkit.git
 cd careerkit
-./bootstrap.sh      # installs anything missing: Python, Claude Code, Homebrew
+./bootstrap.sh      # installs anything missing: Python, Claude Code, curl, Homebrew
 ./setup.sh          # creates a .venv and installs CareerKit's dependencies
 claude              # opens Claude Code in this folder
 ```
+
+The clone is the one prerequisite `bootstrap.sh` cannot create for itself. If
+the first command says `git: command not found`, install
+[git](https://git-scm.com/downloads) (or use your operating system's package
+manager), then run the clone again. Once this checkout exists, `bootstrap.sh`
+can install the remaining prerequisites. It also installs `curl` on supported
+apt- and dnf-based Linux systems when a download needs it. macOS normally ships
+`curl`; if it is unavailable there, repair or install it before bootstrapping.
 
 `./bootstrap.sh` checks what you already have, prints the exact commands it
 wants to run, and asks before running any of them. If everything is already
@@ -114,22 +121,23 @@ need to redo setup. Review the disclosure and record it:
 ./careerkit.py privacy --accept   # record it and carry on
 ```
 
-If you install Claude Code with `npm install -g @anthropic-ai/claude-code`
-rather than the installer above, npm prints an `install-scripts`/`allowScripts`
-warning about the package's postinstall step. Take that warning seriously: when
-the postinstall really is skipped, the installed `claude` is a small placeholder
-that falls back to a Node wrapper, and **both `claude --version` and `claude
-doctor` still report success**, so neither one detects it. Check the binary
-itself instead:
+The recommended native installer is the simplest manual route too:
 
 ```
-file "$(readlink -f "$(command -v claude)")"
+curl -fsSL https://claude.ai/install.sh | bash
 ```
 
-A working install is a large native executable (a Mach-O binary on macOS), not a
-short script. If it is not, reinstall with
-`npm install -g --allow-scripts=@anthropic-ai/claude-code`, or use the native
-installer above, which has no postinstall step to skip.
+It needs no Node.js. If you intentionally use the npm distribution instead,
+the current package requires Node.js 22 or newer and npm must install optional
+dependencies:
+
+```
+npm install -g @anthropic-ai/claude-code
+```
+
+If npm warns that an optional dependency or install step was skipped, or the
+resulting `claude` command is unusable, switch to the native installer above.
+Do not add an `--allow-scripts` flag: current npm treats it as an unknown option.
 
 ### If `claude` fails with `EPERM` on macOS
 
@@ -395,7 +403,7 @@ Claude does this for you, but it is a normal CLI:
 ./careerkit.py consistency   # does the report agree with the database it came from?
 ./careerkit.py consistency --repair   # clear compensation that cannot be true
 ./careerkit.py applied       # reconcile what you have applied to (see below)
-./careerkit.py applied --apply        # write the unambiguous matches
+./careerkit.py applied --apply        # write exact posting-URL matches only
 ./careerkit.py enrich        # fetch the full posting for rows that cannot be screened
 ./careerkit.py status        # what is in the database, which sources are broken
 ./careerkit.py audit         # show what the gates killed, and why
@@ -435,7 +443,7 @@ loosening changes.
 JSON per application to `profile/applications.jsonl`:
 
 ```
-{"company": "Acme", "title": "Salesforce Admin", "status": "rejected", "applied_on": "2026-07-30", "on": "2026-08-05"}
+{"company": "Acme", "title": "Salesforce Admin", "url": "https://jobs.example.invalid/123", "status": "rejected", "applied_on": "2026-07-30", "on": "2026-08-05"}
 ```
 
 `status` is prepared, applied, rejected, interviewing, offer or withdrawn, and
@@ -446,9 +454,10 @@ history while the database row uses `applied` as its report-suppression status.
 For a later stage, `applied_on` is optional but recommended: it lets analytics
 measure apply-to-interview and apply-to-outcome timing without pretending the
 later status date was the application date.
-It never writes a
-status from a company match alone, because at an employer with several openings
-that marks the wrong one; those go to a review list instead. Once it knows, the
+Only an exact stored posting URL is safe for automatic writing. Title-only
+matches remain useful for analytics and manual review, but neither they nor a
+company-only match change the database; a repeated title can belong to a
+different requisition. Once it knows, the
 report warns you when a live posting sits at an employer that already declined
 you. Claude can populate the file from your mail if you ask it to; the engine
 itself never touches your mailbox.

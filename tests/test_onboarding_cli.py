@@ -498,7 +498,7 @@ def test_pull_passes_its_cache_scope_into_the_durable_report_metadata(
             "demoted": 0,
         }
 
-    monkeypatch.setattr(store, "connect", lambda: object())
+    monkeypatch.setattr(store, "connect", lambda **_kwargs: object())
     monkeypatch.setattr(store, "dropped_to_zero", lambda _con: [])
     monkeypatch.setattr(careerkit._pull, "run_pull", fake_run_pull)
     monkeypatch.setattr(careerkit, "take_discovered", lambda: [])

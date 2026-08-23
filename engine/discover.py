@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable
 
 from .http import fetch, fetch_json
+from .verify import verify_entry
 
 _STOP = {
     "inc", "inc.", "llc", "l.l.c.", "ltd", "limited", "corp", "corporation", "co",
@@ -42,8 +43,17 @@ def slug_candidates(name: str, extra: Iterable[str] = ()) -> list[str]:
     words = [w for w in clean.split() if w]
     core = [w for w in words if w not in _STOP] or words
 
-    joined = "".join(core)
-    hyph = "-".join(core)
+    # Removing a generic legal/service suffix can itself expose a generic bare
+    # word: "Delta Services" becomes ["delta"].  That is no safer than using
+    # the generic first word directly, and may resolve to an unrelated live
+    # board.  Keep the full-name forms below, but suppress bare core-derived
+    # forms for multi-word names in this one case.  A genuinely single-word
+    # company (including "Delta") still needs its literal slug candidate.
+    bare_generic = (
+        len(words) > 1 and len(core) == 1 and core[0] in _GENERIC_FIRST
+    )
+    joined = "" if bare_generic else "".join(core)
+    hyph = "" if bare_generic else "-".join(core)
     full = "".join(words)
     fullhyph = "-".join(words)
     # The first word alone, but only when it is doing the identifying. Probing
@@ -298,7 +308,23 @@ def discover_company(
                 entry = {"name": name, "ats": plat, "slug": s_, "open_roles": n}
                 ok, why = verify_board(name, entry)
                 if ok:
-                    entry["verified"] = why
+                    if "not verifiable" in why:
+                        # ``verify_board`` predates the richer per-platform
+                        # namers in verify.py.  Its success here means only
+                        # "this lightweight check has no evidence", not that
+                        # the guessed slug belongs to the requested employer.
+                        # Run the authoritative verifier now and persist only
+                        # its finite ok/review/bad state; a free-form sentence
+                        # in ``verified`` was skipped forever by the normal
+                        # verification queue.
+                        verify_entry(entry)
+                        if entry.get("verified") != "bad":
+                            return entry
+                        entry["rejected"] = entry.get("verify_note", why)
+                        _REJECTED.append(entry)
+                        continue
+                    entry["verified"] = "ok"
+                    entry["verify_note"] = why
                     return entry
                 entry["rejected"] = why
                 _REJECTED.append(entry)

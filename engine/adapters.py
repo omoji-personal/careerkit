@@ -74,6 +74,38 @@ def _positive_int(value) -> int | None:
     return int(number)
 
 
+def _bounded_pages(cfg: dict, *, feed_name: str, default: int,
+                   maximum: int) -> int:
+    """Return an explicit whole-page budget without lossy coercion.
+
+    ``int(1.9)`` silently narrows a requested coverage budget to one page, and
+    ``bool`` is an ``int`` subclass.  Both are especially dangerous for source
+    completeness because the run still looks deliberately capped.  Accept
+    whole numeric values (including ``"3.0"``), but reject every fractional or
+    non-finite representation instead of guessing what the operator meant.
+    """
+    raw = cfg.get("pages", default)
+    message = f"{feed_name} pages must be a whole number from 1 to {maximum}"
+    if isinstance(raw, bool):
+        raise ValueError(message)
+    if isinstance(raw, int):
+        pages = raw
+    elif isinstance(raw, float):
+        if not math.isfinite(raw) or not raw.is_integer():
+            raise ValueError(message)
+        pages = int(raw)
+    elif isinstance(raw, str):
+        value = raw.strip()
+        if not re.fullmatch(r"\+?[0-9]+(?:\.0*)?", value):
+            raise ValueError(message)
+        pages = int(value.split(".", 1)[0].lstrip("+") or "0")
+    else:
+        raise ValueError(message)
+    if pages < 1 or pages > maximum:
+        raise ValueError(message)
+    return pages
+
+
 def _sections(*parts: tuple[str, object]) -> str:
     """Join separately-published JD sections without losing their headings."""
     rendered = []
@@ -995,12 +1027,13 @@ def workday(cfg: dict) -> list[Job]:
                         f"workday term {term_index} listing page offset {offset} "
                         "contained invalid bulletFields")
                     bullets = []
-                external_id = str(bullets[0] or "").strip() if bullets else ""
-                # Requisition id is stable even when a localized Workday path
-                # changes; the path remains the fallback for boards that omit
-                # bulletFields.
-                identity = f"id:{external_id}" if external_id else (
-                    f"path:{path}" if path else "")
+                # ``bulletFields`` is tenant-configured display metadata, not a
+                # requisition-id contract.  Several live boards put the job's
+                # LOCATION first (for example ``Swindon``), which collapsed
+                # every posting in that location into one pagination identity.
+                # externalPath is the listing route Workday itself gives each
+                # row, so use it for page progress and replay detection.
+                identity = f"path:{path}" if path else ""
                 if not identity:
                     http.mark_partial(
                         f"workday term {term_index} listing page offset {offset} "
@@ -1039,7 +1072,17 @@ def workday(cfg: dict) -> list[Job]:
                 seen.add(identity)
                 path = str(j.get("externalPath") or "").strip()
                 bullets = j.get("bulletFields") or []
-                external_id = str(bullets[0] or "").strip() if bullets else ""
+                bullet_id = str(bullets[0] or "").strip() if bullets else ""
+                # Preserve the established UID when the first bullet actually
+                # has the shape of a requisition id.  If it is ordinary display
+                # text (the live failure was a city/country), fall back to the
+                # provider-owned path so same-title siblings cannot collapse in
+                # storage after pagination correctly retained both of them.
+                looks_like_req_id = bool(re.fullmatch(
+                    r"(?:[A-Za-z][A-Za-z0-9._-]*\d[A-Za-z0-9._-]*|\d{4,})",
+                    bullet_id,
+                ))
+                external_id = bullet_id if looks_like_req_id else path
                 out.append(Job(
                     title=j.get("title", ""),
                     url=f"{host}/{site}{path}",
@@ -1654,7 +1697,8 @@ _JOBVITE_DETAIL_BODY = re.compile(
 )
 _JOBVITE_PAGE_COUNT = re.compile(
     r'class=["\'][^"\']*\bjv-pagination-text\b[^"\']*["\'][^>]*>'
-    r'\s*(\d+)\s*-\s*(\d+)\s+of\s+(\d+)\b',
+    r'\s*([0-9][0-9,]*)\s*-\s*([0-9][0-9,]*)\s+of\s+'
+    r'([0-9][0-9,]*)\b',
     re.S | re.I,
 )
 _JOBVITE_EMPTY_COUNT = re.compile(
@@ -1670,58 +1714,177 @@ def _jobvite_proven_empty(text: str) -> bool:
                 and _JOBVITE_EMPTY_COUNT.search(text))
 
 
+_JOBVITE_DEFAULT_PAGES = 50
+_JOBVITE_MAX_PAGES = 100
+
+
 @adapter("jobvite")
 def jobvite(cfg: dict) -> list[Job]:
-    """Jobvite embeds its job list as JSON inside the careers page."""
+    """Traverse Jobvite's server-rendered, zero-based search pages."""
     slug = cfg["slug"]
-    status, text = fetch(f"https://jobs.jobvite.com/{slug}/search")
-    if status != 200:
-        return []
-    matches = list(re.finditer(
+    pages_cap = _bounded_pages(
+        cfg,
+        feed_name="jobvite",
+        default=_JOBVITE_DEFAULT_PAGES,
+        maximum=_JOBVITE_MAX_PAGES,
+    )
+    base_url = f"https://jobs.jobvite.com/{slug}/search"
+    link_pattern = re.compile(
         r'href=(["\'])(/' + re.escape(slug)
-        + r'/job/([A-Za-z0-9]+))\1[^>]*>\s*(?:<[^>]+>\s*)*([^<]{3,120})',
-        text, re.I,
-    ))
-    candidate_links = len(re.findall(
-        r'href=["\']/' + re.escape(slug) + r'/job/[A-Za-z0-9]+', text, re.I))
-    if not matches:
-        if not _jobvite_proven_empty(text):
-            http.mark_partial(
-                "jobvite search page had no recognized rows or proven empty marker")
-        return []
-    if candidate_links > len(matches):
-        http.mark_partial(
-            f"jobvite search page could parse {len(matches)} of "
-            f"{candidate_links} candidate job links")
+        + r'/job/([A-Za-z0-9_-]+))\1[^>]*>\s*'
+        + r'(?:<[^>]+>\s*)*([^<]{3,120})',
+        re.I,
+    )
+    candidate_pattern = re.compile(
+        r'href=["\']/' + re.escape(slug)
+        + r'/job/[A-Za-z0-9_-]+',
+        re.I,
+    )
 
-    out = []
-    for m in matches:
-        out.append(Job(
-            title=strip_html(m.group(4)),
-            url=f"https://jobs.jobvite.com{m.group(2)}",
-            external_id=m.group(3), source="jobvite", raw={}, **_base(cfg),
-        ))
-    seen, uniq = set(), []
-    for j in out:
-        if j.external_id in seen:
-            continue
-        seen.add(j.external_id)
-        uniq.append(j)
-    page_count = _JOBVITE_PAGE_COUNT.search(text)
-    if page_count:
-        first, last, total = (int(value) for value in page_count.groups())
-        advertised_page_size = last - first + 1
-        if first < 1 or last < first or total < last:
-            http.mark_partial("jobvite pagination text was internally inconsistent")
-        elif len(uniq) != advertised_page_size:
+    out: list[Job] = []
+    seen: set[str] = set()
+    page_fingerprints: set[tuple[str, ...]] = set()
+    advertised_total: int | None = None
+    expected_first = 1
+    reached_cap = False
+
+    for page_index in range(pages_cap):
+        status, text = fetch(f"{base_url}?p={page_index}")
+        page_number = page_index + 1
+        if status != 200:
             http.mark_partial(
-                f"jobvite parsed {len(uniq)} of {advertised_page_size} "
-                "advertised rows on the current page")
-        if len(uniq) < total:
+                f"jobvite listing page {page_number} returned HTTP {status}")
+            break
+
+        matches = list(link_pattern.finditer(text))
+        candidate_links = len(candidate_pattern.findall(text))
+        if not matches:
+            if page_index == 0 and _jobvite_proven_empty(text):
+                break
+            if _jobvite_proven_empty(text):
+                http.mark_partial(
+                    f"jobvite listing page {page_number} ended before the "
+                    "advertised total")
+            else:
+                http.mark_partial(
+                    f"jobvite listing page {page_number} had no recognized "
+                    "rows or proven empty marker")
+            break
+        if candidate_links > len(matches):
+            http.mark_partial(
+                f"jobvite listing page {page_number} could parse {len(matches)} "
+                f"of {candidate_links} candidate job links")
+
+        page_rows: list[tuple[str, Job]] = []
+        page_seen: set[str] = set()
+        page_order: list[str] = []
+        for match in matches:
+            external_id = match.group(3)
+            if external_id in page_seen:
+                continue
+            page_seen.add(external_id)
+            page_order.append(external_id)
+            page_rows.append((
+                external_id,
+                Job(
+                    title=strip_html(match.group(4)),
+                    url=f"https://jobs.jobvite.com{match.group(2)}",
+                    external_id=external_id,
+                    source="jobvite",
+                    raw={},
+                    **_base(cfg),
+                ),
+            ))
+
+        fingerprint = tuple(page_order)
+        if fingerprint in page_fingerprints:
+            http.mark_partial(
+                f"jobvite listing page {page_number} replayed an earlier page")
+            break
+        page_fingerprints.add(fingerprint)
+
+        repeated = 0
+        added = 0
+        for external_id, job in page_rows:
+            if external_id in seen:
+                repeated += 1
+                continue
+            seen.add(external_id)
+            out.append(job)
+            added += 1
+        if repeated:
+            http.mark_partial(
+                f"jobvite listing page {page_number} repeated {repeated} "
+                "identities from earlier pages")
+        if page_rows and not added:
+            http.mark_partial(
+                f"jobvite listing page {page_number} made no unique progress")
+            break
+
+        page_count = _JOBVITE_PAGE_COUNT.search(text)
+        if not page_count:
+            # A one-page board need not render pagination controls.  Without an
+            # advertised next page, guessing through the configured budget
+            # would turn every small board into dozens of duplicate requests.
+            break
+        first, last, page_total = (
+            int(value.replace(",", "")) for value in page_count.groups()
+        )
+        if advertised_total is None:
+            advertised_total = page_total
+        elif page_total != advertised_total:
+            previous_total = advertised_total
+            advertised_total = max(advertised_total, page_total)
+            http.mark_partial(
+                f"jobvite advertised total changed from {previous_total} to "
+                f"{page_total} on listing page {page_number}")
+
+        if first < 1 or last < first or page_total < last:
+            http.mark_partial(
+                f"jobvite listing page {page_number} pagination text was "
+                "internally inconsistent")
+            if len(out) > page_total:
+                http.mark_partial(
+                    f"jobvite parsed {len(out)} postings above advertised "
+                    f"total {page_total}")
+            break
+
+        advertised_page_size = last - first + 1
+        if len(page_rows) != advertised_page_size:
+            http.mark_partial(
+                f"jobvite parsed {len(page_rows)} of {advertised_page_size} "
+                f"advertised rows on listing page {page_number}")
+        if first != expected_first:
+            http.mark_partial(
+                f"jobvite listing page {page_number} advertised range "
+                f"starting at {first}, expected {expected_first}")
+        expected_first = last + 1
+        if len(out) > page_total:
+            http.mark_partial(
+                f"jobvite parsed {len(out)} postings above advertised total "
+                f"{page_total}")
+
+        if last >= page_total:
+            break
+        if len(out) >= page_total:
+            http.mark_partial(
+                f"jobvite reached {len(out)} unique postings before its "
+                f"advertised final row {page_total}")
+            break
+    else:
+        reached_cap = True
+
+    if advertised_total is not None and len(out) < advertised_total:
+        if reached_cap:
             http.mark_capped(
-                f"jobvite parsed {len(uniq)} of {total} advertised postings; "
-                "additional pages were not fetched")
-    for job in uniq:
+                f"jobvite reached its {pages_cap}-page safety cap after "
+                f"{len(out)} of {advertised_total} advertised postings")
+        else:
+            http.mark_partial(
+                f"jobvite parsed {len(out)} of {advertised_total} "
+                "advertised postings")
+
+    for job in out:
         if _looks_relevant(job.title):
             st, tx = fetch(job.url)
             if st == 200:
@@ -1738,7 +1901,7 @@ def jobvite(cfg: dict) -> list[Job]:
             else:
                 http.mark_partial(
                     f"jobvite detail {job.external_id or job.url} returned HTTP {st}")
-    return uniq
+    return out
 
 
 _HRM_ROW = re.compile(r'<tr[^>]*\bdata-req-id=["\']([^"\']+)["\'][^>]*>(.*?)</tr>',

@@ -42,7 +42,7 @@ def test_one_cli_supports_a_legacy_instance_layout(tmp_path):
     root = pathlib.Path(__file__).parent.parent
     paths = {
         "CAREERKIT_HOME": tmp_path / "state",
-        "CAREERKIT_PROFILE": tmp_path / "profile-omid.yaml",
+        "CAREERKIT_PROFILE": tmp_path / "profile-example-user.yaml",
         "CAREERKIT_EMPLOYERS": tmp_path / "employers.yaml",
         "CAREERKIT_KEYS": tmp_path / "keys.yaml",
         "CAREERKIT_TRACKER": tmp_path / "job-search-tracker.md",

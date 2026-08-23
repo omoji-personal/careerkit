@@ -18,6 +18,12 @@ from datetime import date, datetime
 from pathlib import Path
 
 from .models import Job, ATS_SOURCES, _identity_url, _norm_company
+from .privatefs import (
+    ensure_private_directory,
+    harden_private_file,
+    open_private_text,
+    prepare_private_file,
+)
 
 DB_PATH = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "data" / "jobs.db"
 
@@ -143,8 +149,10 @@ def _backup_before_migration(con: sqlite3.Connection) -> Path | None:
         raise
     dest = DB_PATH.with_suffix(f".pre-migration-{date.today().isoformat()}.db")
     try:
+        prepare_private_file(dest)
         with sqlite3.connect(dest) as bck:
             con.backup(bck)
+        harden_private_file(dest)
         return dest
     except Exception:
         return None       # a failed backup must not block the user's run
@@ -214,8 +222,36 @@ def _migrate(con: sqlite3.Connection) -> None:
     con.commit()
 
 
-def connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _harden_database_files() -> None:
+    """Tighten the database and any SQLite sidecars that currently exist."""
+    for path in (
+        DB_PATH,
+        Path(f"{DB_PATH}-wal"),
+        Path(f"{DB_PATH}-shm"),
+        Path(f"{DB_PATH}-journal"),
+    ):
+        harden_private_file(path)
+
+
+def connect(readonly: bool = False) -> sqlite3.Connection:
+    """Open CareerKit state, optionally as a non-mutating diagnostic reader.
+
+    ``readonly=True`` deliberately skips directory creation, permission changes,
+    journal/synchronous pragmas, schema setup, migrations, and indexes.  SQLite's
+    URI ``mode=ro`` is the enforcement boundary, so an accidental write by a
+    diagnostic caller fails instead of quietly changing user state.
+    """
+    if readonly:
+        uri = DB_PATH.resolve().as_uri() + "?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=30)
+        con.row_factory = sqlite3.Row
+        return con
+
+    ensure_private_directory(DB_PATH.parent)
+    # sqlite3 otherwise creates the database according to the process umask
+    # (commonly 0644). Pre-creation closes that first-open privacy window and
+    # also tightens an existing database before SQLite creates its sidecars.
+    prepare_private_file(DB_PATH)
     con = sqlite3.connect(DB_PATH, timeout=30)
     con.row_factory = sqlite3.Row
     # A pull writes for minutes. Under the default rollback journal an
@@ -225,14 +261,20 @@ def connect() -> sqlite3.Connection:
     # `status` read while a pull is writing. Best-effort: a filesystem that
     # cannot do WAL (some network mounts) keeps the default rather than failing.
     try:
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.DatabaseError:
-        pass
-    con.executescript(SCHEMA)
-    _migrate(con)
-    con.executescript(INDEXES)
-    return con
+        try:
+            con.execute("PRAGMA journal_mode=WAL")
+            con.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.DatabaseError:
+            pass
+        con.executescript(SCHEMA)
+        _migrate(con)
+        con.executescript(INDEXES)
+        _harden_database_files()
+        return con
+    except Exception:
+        con.close()
+        _harden_database_files()
+        raise
 
 
 class RunLock:
@@ -300,11 +342,11 @@ class RunLock:
 
     def __enter__(self):
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_directory(self.path.parent)
             # `w` truncates before flock runs, so a losing contender erased the
             # active owner's PID. Append/update opens without mutating; only the
             # process that acquired the lock may replace the diagnostic content.
-            self._fh = open(self.path, "a+", encoding="utf-8")
+            self._fh = open_private_text(self.path, "a+", encoding="utf-8")
             self._acquire_platform_lock()
             self._fh.seek(0)
             self._fh.truncate()
@@ -514,6 +556,50 @@ def _repair_named_aggregator_identity(cur: sqlite3.Cursor, job: Job) -> None:
 
     if current is not None:
         _merge_duplicate_job_row(cur, job.uid, old)
+
+
+def _preserve_legacy_workday_identity(cur: sqlite3.Cursor, job: Job) -> None:
+    """Keep history attached across Workday's bullet-to-path ID correction.
+
+    The former adapter treated ``bulletFields[0]`` as a requisition id.  On
+    live tenants that field is display metadata such as ``Swindon`` or
+    ``LONDON, UNITED KINGDOM``, so distinct openings at one location collapsed
+    under one UID.  The corrected adapter uses ``externalPath``.  Re-sighting
+    the surviving legacy row under that path must not surface it as a new job
+    or strand an applied/rejected decision.
+
+    This is intentionally not a generic URL migration.  A candidate must be a
+    modern-schema native Workday row on the same nonempty board, in the same
+    company/title group, and at the exact canonical posting URL.  Ambiguity
+    fails closed.  The established UID remains canonical; any already-created
+    path-UID duplicate is folded into it before the ordinary refresh below.
+    """
+    if ((job.source or "").strip().casefold() != "workday"
+            or not (job.board or "").strip()
+            or not (job.external_id or "").strip()):
+        return
+    canonical_url = _identity_url(job.url)
+    if not canonical_url:
+        return
+    intrinsic_uid = job.uid
+    candidates = []
+    for row in cur.execute(
+        "SELECT * FROM jobs WHERE lower(source)='workday' "
+        "AND lower(board)=lower(?) AND group_key=? AND schema_v=2 AND uid<>?",
+        (job.board.strip(), job.group_key, intrinsic_uid),
+    ).fetchall():
+        if _identity_url(row["url"] or "") == canonical_url:
+            candidates.append(row)
+    if len(candidates) != 1:
+        return
+
+    established = candidates[0]
+    current = cur.execute(
+        "SELECT * FROM jobs WHERE uid=?", (intrinsic_uid,),
+    ).fetchone()
+    if current is not None:
+        _merge_duplicate_job_row(cur, established["uid"], current)
+    setattr(job, "_identity_uid_override", established["uid"])
 
 
 def _cross_source_key(company: str, source: str, direct_url: str,
@@ -811,6 +897,7 @@ def upsert(con: sqlite3.Connection, jobs: list[Job],
         jobs = sorted(jobs, key=lambda j: 0 if legacy_urls.get(j.group_key) == j.url else 1)
     with closing(con.cursor()) as cur:
         for j in jobs:
+            _preserve_legacy_workday_identity(cur, j)
             _repair_exact_direct_url_identity(cur, j)
             _repair_named_aggregator_identity(cur, j)
             _repair_blank_company_identity(cur, j)

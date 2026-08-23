@@ -548,7 +548,10 @@ def run_pull(con, reg: dict, keys: dict, profile, *, employers_only: bool = Fals
               )}
     qualified = sum(1 for r in rows if r["gate"] == "QUALIFIED")
     store.finish_run(con, run_id, len(all_jobs), len(new), qualified, detail)
-    path = write_report(con, rows, health=health, run_detail=detail, run_id=run_id)
+    path = write_report(
+        con, rows, health=health, run_detail=detail, run_id=run_id,
+        min_score=min_score,
+    )
 
     return {"run_id": run_id, "path": path, "pulled": len(all_jobs),
             "kept": len(keep), "new": len(new), "qualified": qualified,
@@ -603,8 +606,10 @@ def rebuild_report(con, *, min_score: int = 0, echo=print):
     last = con.execute("SELECT run_id, detail FROM runs WHERE finished IS NOT NULL "
                        "ORDER BY run_id DESC LIMIT 1").fetchone()
     detail = _json.loads(last["detail"]) if last and last["detail"] else {}
-    path = write_report(con, rows, health=health, run_detail=detail,
-                        run_id=last["run_id"] if last else None)
+    path = write_report(
+        con, rows, health=health, run_detail=detail,
+        run_id=last["run_id"] if last else None, min_score=min_score,
+    )
     echo(f"Report: {path}")
     return path
 

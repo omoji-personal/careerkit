@@ -1,9 +1,8 @@
 """What the user has already applied to, and what already said no.
 
-The defect this exists for: on 2026-08-06 the tool recommended a role as a fresh
-find. The owner had applied to it a week earlier and been rejected the previous
-day. A wider check found roughly twenty applications in forty five days against
-six the database knew about, and five with no trace anywhere at all.
+The defect this exists for: the tool recommended a role as a fresh find even
+though the user had already applied and later been rejected. A wider check found
+application history that the database did not know about.
 
 A job search tool that cannot see this is not merely incomplete, it is
 confidently wrong in the most expensive direction: it spends the user's
@@ -19,8 +18,9 @@ evidence file that anything can write:
 
 one JSON object per line:
 
-    {"company": "Delta Air Lines", "title": "Business Technology Product Owner",
-     "status": "rejected", "on": "2026-08-05", "source": "gmail",
+    {"company": "Example Airlines", "title": "CRM Platform Product Owner",
+     "url": "https://jobs.example.invalid/openings/123",
+     "status": "rejected", "on": "2026-08-05", "source": "manual",
      "evidence": "Thank you for your interest in the ... (#32177)"}
 
 `title` may be null when the evidence does not name the role, which is common:
@@ -34,10 +34,15 @@ script, a manual note, or an export works identically.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+from .privatefs import ensure_private_directory, open_private_text, prepare_private_file
+from .models import _identity_url
 
 VALID = ("applied", "rejected", "interviewing", "offer", "withdrawn")
 PREFLIGHT = ("prepared",)
@@ -48,6 +53,57 @@ DB_STATUS = {
     "applied": "applied", "rejected": "rejected", "interviewing": "applied",
     "offer": "applied", "withdrawn": "applied",
 }
+
+
+def _event_detail(rec: dict) -> str:
+    return (f"{rec.get('on') or ''} from "
+            f"{rec.get('source') or 'applications.jsonl'}").strip()
+
+
+def application_event_recorded(con: sqlite3.Connection, item: dict) -> bool:
+    """Whether the exact evidence-backed pipeline event already exists.
+
+    The jobs row deliberately collapses interviewing, offer, withdrawn, and
+    applied into the same suppression status.  Status equality alone therefore
+    cannot prove that the richer application history has been reconciled.
+    Match the same kind, day, and generated detail used by ``reconcile(apply=True)``.
+    """
+    params = [item["uid"], f"application:{item['status']}", _event_detail(item)]
+    sql = "SELECT 1 FROM events WHERE uid=? AND kind=? AND detail=?"
+    if item.get("on"):
+        sql += " AND substr(at,1,10)=?"
+        params.append(str(item["on"]).strip()[:10])
+    return con.execute(sql + " LIMIT 1", params).fetchone() is not None
+
+
+def latest_application_db_status(
+    con: sqlite3.Connection, uid: str,
+) -> str | None:
+    """Suppression status implied by the newest recorded application event."""
+    latest = con.execute(
+        "SELECT kind FROM events WHERE uid=? AND kind LIKE 'application:%' "
+        "ORDER BY at DESC, event_id DESC LIMIT 1", (uid,),
+    ).fetchone()
+    if latest is None:
+        return None
+    stage = str(latest["kind"]).split(":", 1)[-1]
+    return DB_STATUS.get(stage)
+
+
+def application_history_synchronized(con: sqlite3.Connection, item: dict) -> bool:
+    """Whether this evidence exists and the row reflects the latest stage.
+
+    An older ``applied`` record remains synchronized after a later rejection;
+    comparing the row to every historical item independently would repeatedly
+    try to regress rejected back to applied.
+    """
+    if not application_event_recorded(con, item):
+        return False
+    expected = latest_application_db_status(con, item["uid"])
+    row = con.execute(
+        "SELECT status FROM jobs WHERE uid=?", (item["uid"],),
+    ).fetchone()
+    return expected is not None and row is not None and row["status"] == expected
 
 
 def _norm(s: str) -> str:
@@ -85,6 +141,46 @@ def _title_overlap(a: str, b: str) -> float:
     return len(wa & wb) / len(wa | wb)
 
 
+def _posting_url_key(value: str) -> str:
+    """Normalize an evidence URL without conflating different requisitions."""
+    raw = (value or "").strip()
+    normalized = _identity_url(raw)
+    if not normalized:
+        return ""
+    try:
+        parsed = urlsplit(normalized)
+    except ValueError:
+        return normalized
+    path = parsed.path.rstrip("/") or "/"
+    # Pinpoint exposes the same posting with and without a locale segment.
+    # This is a vendor-specific alias, not a general path rewrite.
+    if (parsed.hostname or "").lower().endswith(".pinpointhq.com"):
+        parts = path.split("/")
+        if (len(parts) >= 4 and re.fullmatch(r"[a-z]{2}(?:-[a-z]{2})?", parts[1], re.I)
+                and parts[2].lower() == "postings"):
+            path = "/" + "/".join(parts[2:])
+    # ``_identity_url`` deliberately discards fragments because they are
+    # usually document anchors.  Application evidence needs the safer rule:
+    # hash-routed career sites put the requisition path in the fragment, so
+    # ``.../app#/jobs/REQ-1`` and ``.../app#/jobs/REQ-2`` are different
+    # openings.  Preserve every nonempty fragment here.  A cosmetic fragment
+    # may therefore require manual review, which is preferable to writing an
+    # application status onto the wrong requisition.
+    fragment = raw.split("#", 1)[1] if "#" in raw else ""
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, fragment))
+
+
+def _evidence_identity(rec: dict) -> tuple[str, str, str, str, str]:
+    """Stable append identity without collapsing distinct applications."""
+    return (
+        _norm(rec.get("company", "")),
+        (rec.get("title") or "").lower(),
+        _posting_url_key(rec.get("url") or ""),
+        (rec.get("status") or "").lower(),
+        str(rec.get("on") or "").strip(),
+    )
+
+
 def load_evidence(path: str | Path) -> list[dict]:
     """Read applications.jsonl, skipping malformed lines rather than dying.
 
@@ -120,14 +216,26 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
               apply: bool = False, min_title_overlap: float = 0.6) -> dict:
     """Match evidence to stored postings.
 
-    Returns three buckets. `matched` is safe to write. `ambiguous` is evidence
-    that identifies a company but not which requisition, which is exactly the
-    case that must never be auto-applied. `unmatched` is evidence for a company
-    that is not in the database at all, which is itself a finding: it means the
-    user applied somewhere the tool never surfaced.
+    `matched` includes useful title-based mappings for analytics, but only items
+    marked ``safe_to_apply`` may write. That flag requires exact posting-URL
+    evidence. `ambiguous` identifies a company but not
+    a unique requisition. `unmatched` includes evidence for an opening the
+    database never surfaced.
     """
     matched, ambiguous, unmatched, pending, problems = [], [], [], [], []
-    rows = con.execute("SELECT uid, company, title, status FROM jobs").fetchall()
+    rows = con.execute(
+        "SELECT uid, company, title, status, url, url_direct FROM jobs"
+    ).fetchall()
+    sighting_urls: dict[str, set[str]] = {}
+    try:
+        for sighting in con.execute("SELECT uid,url FROM sightings WHERE url<>''"):
+            key = _posting_url_key(sighting["url"])
+            if key:
+                sighting_urls.setdefault(sighting["uid"], set()).add(key)
+    except sqlite3.OperationalError:
+        # Small reusable fixtures and pre-sightings databases can still be
+        # reconciled from the canonical job row fields.
+        pass
     by_company: dict[str, list] = {}
     for r in rows:
         by_company.setdefault(_norm(r["company"]), []).append(r)
@@ -149,16 +257,47 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
             unmatched.append({**rec, "why": "no posting from this employer in the database"})
             continue
 
+        evidence_url = _posting_url_key(rec.get("url") or "")
+        if evidence_url:
+            url_matches = []
+            for candidate in candidates:
+                candidate_urls = {
+                    _posting_url_key(candidate["url"] or ""),
+                    _posting_url_key(candidate["url_direct"] or ""),
+                    *sighting_urls.get(candidate["uid"], set()),
+                }
+                candidate_urls.discard("")
+                if evidence_url in candidate_urls:
+                    url_matches.append(candidate)
+            if len(url_matches) == 1:
+                best = url_matches[0]
+                matched.append({
+                    **rec, "uid": best["uid"], "matched_title": best["title"],
+                    "confidence": "exact posting URL", "safe_to_apply": True,
+                })
+            elif len(url_matches) > 1:
+                ambiguous.append({
+                    **rec,
+                    "candidates": [
+                        {"uid": c["uid"], "title": c["title"]}
+                        for c in url_matches
+                    ],
+                    "why": "the exact posting URL maps to multiple stored rows",
+                })
+            else:
+                unmatched.append({
+                    **rec,
+                    "why": "the evidence posting URL does not match a stored "
+                           "posting for this employer",
+                })
+            continue
+
         title = rec.get("title")
         if not title:
-            if len(candidates) == 1:
-                matched.append({**rec, "uid": candidates[0]["uid"],
-                                "matched_title": candidates[0]["title"],
-                                "confidence": "company only, single posting"})
-            else:
-                ambiguous.append({**rec, "candidates": [
-                    {"uid": c["uid"], "title": c["title"]} for c in candidates],
-                    "why": f"evidence names no role and {len(candidates)} are stored"})
+            ambiguous.append({**rec, "candidates": [
+                {"uid": c["uid"], "title": c["title"]} for c in candidates],
+                "why": f"evidence names no role and {len(candidates)} are stored; "
+                       "company-only evidence is never auto-written"})
             continue
 
         scored = sorted(((_title_overlap(title, c["title"]), c)
@@ -167,7 +306,8 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
         runner = scored[-2][0] if len(scored) > 1 else 0.0
         if best_score >= min_title_overlap and best_score - runner >= 0.15:
             matched.append({**rec, "uid": best["uid"], "matched_title": best["title"],
-                            "confidence": f"title overlap {best_score:.0%}"})
+                            "confidence": f"title overlap {best_score:.0%}; manual only",
+                            "safe_to_apply": False})
         elif best_score >= min_title_overlap:
             ambiguous.append({**rec, "candidates": [
                 {"uid": c["uid"], "title": c["title"]} for s, c in scored if s >= min_title_overlap],
@@ -182,15 +322,32 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
     if apply and matched:
         from engine import store
         for m in matched:
+            if not m.get("safe_to_apply"):
+                continue
             # Empty notes are deliberate: store.set_status preserves whatever
             # free-form note is already on the row. The former direct UPDATE
             # replaced it with generated evidence text.
-            detail = (f"{m.get('on') or ''} from "
-                      f"{m.get('source') or 'applications.jsonl'}").strip()
+            detail = _event_detail(m)
+            # Undated append-only evidence must not create a fresh event every
+            # day it is reconciled.  For dated evidence the helper matches the
+            # exact day; without a date, kind + deterministic detail is the
+            # stable identity available in the evidence itself.
+            if application_event_recorded(con, m):
+                m["written"] = False
+                expected = latest_application_db_status(con, m["uid"])
+                current = con.execute(
+                    "SELECT status FROM jobs WHERE uid=?", (m["uid"],),
+                ).fetchone()
+                if (expected is not None and current is not None
+                        and current["status"] != expected):
+                    store.set_status(con, m["uid"], expected, "")
+                    m["repaired"] = True
+                continue
             try:
-                store.record_application_stage(
+                m["written"] = store.record_application_stage(
                     con, m["uid"], m["status"], on=m.get("on"), detail=detail)
             except ValueError as e:
+                m["written"] = False
                 problems.append(f"line {m.get('_line')}: {e}")
 
     return {"matched": matched, "ambiguous": ambiguous,
@@ -200,7 +357,7 @@ def reconcile(con: sqlite3.Connection, evidence: list[dict], *,
 def surfacing_a_closed_door(con: sqlite3.Connection) -> list[str]:
     """Rows the report would show that the user has already been rejected for.
 
-    The Delta case, generalised: same employer, similar title, already declined.
+    The closed-door case, generalised: same employer, similar title, already declined.
     Worth warning about even when the requisition id differs, because employers
     repost, and a repost of a role you were declined for is not a fresh find.
     """
@@ -238,21 +395,22 @@ def surfacing_a_closed_door(con: sqlite3.Connection) -> list[str]:
 def write_evidence(path: str | Path, records: list[dict]) -> int:
     """Append records, skipping ones already present. Returns the number written."""
     p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(p.parent, harden_existing=False)
+    prepare_private_file(p, harden_parent=False)
     seen = set()
     for rec in load_evidence(p):
         if not rec.get("_bad"):
-            seen.add((_norm(rec.get("company", "")), (rec.get("title") or "").lower(),
-                      rec.get("status")))
+            seen.add(_evidence_identity(rec))
     n = 0
-    with p.open("a", encoding="utf-8") as fh:
+    with open_private_text(p, "a", encoding="utf-8") as fh:
         for rec in records:
-            key = (_norm(rec.get("company", "")), (rec.get("title") or "").lower(),
-                   rec.get("status"))
+            key = _evidence_identity(rec)
             if key in seen:
                 continue
             seen.add(key)
             rec.setdefault("on", date.today().isoformat())
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
             n += 1
+        fh.flush()
+        os.fsync(fh.fileno())
     return n

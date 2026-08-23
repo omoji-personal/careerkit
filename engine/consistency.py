@@ -22,6 +22,7 @@ import hashlib
 import json
 import re
 import sqlite3
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -40,8 +41,16 @@ _URL_OMITTED = "URL omitted (invalid or unsafe external target)"
 _URL = re.compile(r"^- (?P<url>https?://\S+|URL omitted \(invalid or unsafe external target\))$")
 _TAIL = re.compile(
     r"^- (?P<score>\d+) · \*\*Title\*\* (?P<title>.*?) · "
-    r"\*\*Company\*\* (?P<company>.*?)(?: \(\+\d+ reqs\))? · "
+    r"\*\*Company\*\* (?P<company>.*?)(?: \(\+(?P<siblings>\d+) reqs\))? · "
     r"\*\*Check\*\* (?P<reason>.*?) · \*\*UID\*\* `(?P<uid>[^`]+)`$")
+_SIBLING = re.compile(
+    r"^  - (?P<location>.*) \| (?P<gate>[a-z-]+) (?P<score>\d+) \| "
+    r"\*\*UID\*\* `(?P<uid>[^`]+)`$")
+_VISIBLE_UID = re.compile(r"\*\*UID\*\* `(?P<uid>[^`]+)`")
+_REPORT_UIDS_V1 = re.compile(
+    r"^<!-- careerkit-report-uids-v1: (?P<uids>.*?) -->$", re.MULTILINE)
+_REPORT_UIDS_V2 = re.compile(
+    r"^<!-- careerkit-report-uids-v2: (?P<metadata>.*?) -->$", re.MULTILINE)
 _STATE = re.compile(
     r"^<!-- careerkit-report-state-v1: (?P<digest>[0-9a-f]{64}) -->$",
     re.MULTILINE,
@@ -133,11 +142,14 @@ def _blocks(text: str) -> list[dict]:
         if m:
             if cur:
                 out.append(cur)
+            raw_label = m.group("label")
+            count = re.search(r"  \((\d+) open reqs\)(?:\s|$)", raw_label)
             label = re.sub(
                 r" ⚠ STALE \(not sighted in 2\+ days - verify live before acting\)$",
-                "", m.group("label")).strip()
+                "", raw_label).strip()
             label = re.sub(r"  \(\d+ open reqs\)$", "", label).strip()
-            cur = {"label": label, "lines": []}
+            cur = {"label": label, "lines": [],
+                   "expected_reqs": int(count.group(1)) if count else 1}
             continue
         # The low-score VERIFY summary is also a level-three heading, but not a
         # posting. End the prior block here so its one-line tail cannot be folded
@@ -171,10 +183,93 @@ def _tail_entries(text: str) -> list[dict]:
             shown = lines[i + 1].strip()
             if re.match(r"^https?://\S+$", shown) or shown == _URL_OMITTED:
                 url = shown
+        end = len(lines)
+        for j in range(i + 1, len(lines)):
+            if _TAIL.match(lines[j]) or lines[j].startswith(("### ", "---", "## ")):
+                end = j
+                break
+        siblings = _sibling_entries(lines[i + 2:end])
         out.append({"uid": m.group("uid"), "score": int(m.group("score")),
                     "url": url, "title": m.group("title"),
-                    "company": m.group("company"), "reason": m.group("reason")})
+                    "company": m.group("company"), "reason": m.group("reason"),
+                    "expected_reqs": 1 + int(m.group("siblings") or 0),
+                    "siblings": siblings})
     return out
+
+
+def _sibling_entries(lines: list[str]) -> list[dict]:
+    """Parse the explicit UID/URL rows nested under one grouped posting."""
+    out = []
+    index = 0
+    while index < len(lines):
+        match = _SIBLING.match(lines[index])
+        if not match:
+            # Sibling rows are contiguous.  Once one group has started, the
+            # next ordinary line belongs to the next report entry/section.
+            if out:
+                break
+            index += 1
+            continue
+        url = ""
+        advance = 1
+        if index + 1 < len(lines):
+            shown = lines[index + 1].strip()
+            if re.match(r"^https?://\S+$", shown) or shown == _URL_OMITTED:
+                url = shown
+                advance = 2
+        out.append({
+            "uid": match.group("uid"),
+            "score": int(match.group("score")),
+            "gate": match.group("gate").upper(),
+            "location": match.group("location"),
+            "url": url,
+        })
+        index += advance
+    return out
+
+
+def _check_siblings(
+    con: sqlite3.Connection,
+    entries: list[dict],
+    *,
+    context: str,
+    group_key: str,
+) -> list[str]:
+    """Validate every grouped requisition, not only the representative row."""
+    problems = []
+    for entry in entries:
+        row = con.execute("SELECT * FROM jobs WHERE uid=?", (entry["uid"],)).fetchone()
+        if row is None:
+            problems.append(
+                f"{context}: report shows sibling uid {entry['uid']!r} "
+                "that the database does not have")
+            continue
+        where = f"{row['company']} / {row['title']}"
+        row_group = row["group_key"] or row["uid"]
+        if row_group != group_key:
+            problems.append(
+                f"{where}: report groups uid {entry['uid']!r} under {context}, "
+                "but the database assigns it to a different role")
+        want_location = sanitize_external(row["location"], 40) or "location not stated"
+        if entry["location"] != want_location:
+            problems.append(
+                f"{where}: sibling row shows location {entry['location']!r}, "
+                f"database says {want_location!r}")
+        if entry["gate"] != row["gate"]:
+            problems.append(
+                f"{where}: sibling row says gate {entry['gate']}, "
+                f"database says {row['gate']}")
+        if entry["score"] != row["score"]:
+            problems.append(
+                f"{where}: sibling row says score {entry['score']}, "
+                f"database says {row['score']}")
+        if not entry["url"]:
+            problems.append(f"{where}: sibling row is missing its URL field")
+        elif entry["url"] != _expected_url(row):
+            problems.append(
+                f"{where}: sibling row shows URL {entry['url']!r}, "
+                f"database says {_expected_url(row)!r}")
+    return problems
 
 
 def report_is_stale(con: sqlite3.Connection, report_path: str | Path) -> str | None:
@@ -225,6 +320,11 @@ def check_report(con: sqlite3.Connection, report_path: str | Path) -> list[str]:
         uid = None
         url = None
         for line in block["lines"]:
+            # Nested sibling URLs belong to their own UIDs.  Stripping their
+            # indentation here made the last sibling URL overwrite the primary
+            # URL before any comparison happened.
+            if line[:1].isspace():
+                continue
             m = _UID.match(line.strip())
             if m:
                 uid = m.group("uid")
@@ -340,6 +440,17 @@ def check_report(con: sqlite3.Connection, report_path: str | Path) -> list[str]:
         if uid:
             for missing in sorted({"score", "location", "source", "why"} - seen):
                 problems.append(f"{where}: report block is missing its {missing} field")
+        sibling_entries = _sibling_entries(block["lines"])
+        if 1 + len(sibling_entries) != block["expected_reqs"]:
+            problems.append(
+                f"{where}: report heading promises {block['expected_reqs']} open reqs "
+                f"but renders {1 + len(sibling_entries)} UID(s)")
+        problems.extend(_check_siblings(
+            con,
+            sibling_entries,
+            context=where,
+            group_key=row["group_key"] or row["uid"],
+        ))
     # The compact tail is part of the report too. It used to be invisible to the
     # checker, so changing 40 -> 99 or replacing its URL still returned "agree".
     for entry in _tail_entries(text):
@@ -372,6 +483,98 @@ def check_report(con: sqlite3.Connection, report_path: str | Path) -> list[str]:
         elif entry["url"] != _expected_url(row):
             problems.append(f"{where}: report shows URL {entry['url']!r}, database says "
                             f"{_expected_url(row)!r}")
+        if 1 + len(entry["siblings"]) != entry["expected_reqs"]:
+            problems.append(
+                f"{where}: VERIFY tail promises {entry['expected_reqs']} reqs "
+                f"but renders {1 + len(entry['siblings'])} UID(s)")
+        problems.extend(_check_siblings(
+            con,
+            entry["siblings"],
+            context=f"VERIFY tail {where}",
+            group_key=row["group_key"] or row["uid"],
+        ))
+
+    # New reports carry the score floor and exact set the renderer intended to
+    # expose.  The old checker proved only that every row it happened to see was
+    # truthful; it returned clean when both rendering and its manifest omitted
+    # the same active UID.  Version 2 therefore compares against an independent
+    # database query as well as independently parsed visible UIDs.  Version 1
+    # remains readable, but has no score floor from which to derive that query.
+    manifests = [
+        (1, match) for match in _REPORT_UIDS_V1.finditer(text)
+    ] + [
+        (2, match) for match in _REPORT_UIDS_V2.finditer(text)
+    ]
+    if len(manifests) > 1:
+        problems.append("report contains more than one UID completeness marker")
+    elif manifests:
+        version, manifest = manifests[0]
+        min_score = None
+        try:
+            payload = json.loads(
+                manifest.group("uids") if version == 1
+                else manifest.group("metadata")
+            )
+            if version == 1:
+                expected_values = payload
+            else:
+                if not isinstance(payload, dict):
+                    raise ValueError("v2 marker is not an object")
+                min_score = payload.get("min_score")
+                if isinstance(min_score, bool) or not isinstance(min_score, int):
+                    raise ValueError("v2 marker min_score is not an integer")
+                expected_values = payload.get("uids")
+            if (not isinstance(expected_values, list)
+                    or any(not isinstance(value, str) or not value
+                           for value in expected_values)):
+                raise ValueError("UID marker is not a list of non-empty strings")
+            if version == 2 and expected_values != sorted(expected_values):
+                raise ValueError("v2 marker UIDs are not sorted")
+        except (json.JSONDecodeError, ValueError) as exc:
+            problems.append(f"report UID completeness marker is invalid: {exc}")
+        else:
+            expected = set(expected_values)
+            if len(expected) != len(expected_values):
+                problems.append("report UID completeness marker contains duplicate UIDs")
+            if version == 2:
+                reportable = {
+                    row[0] for row in con.execute(
+                        "SELECT uid FROM jobs WHERE gate IN ('QUALIFIED','VERIFY') "
+                        "AND score >= ? AND status NOT IN "
+                        "('rejected','ignored','applied') "
+                        "AND delisted_on IS NULL",
+                        (min_score,),
+                    )
+                }
+                for value in sorted(reportable - expected):
+                    problems.append(
+                        f"report completeness marker omits reportable uid "
+                        f"{value!r} at min_score {min_score}"
+                    )
+                for value in sorted(expected - reportable):
+                    problems.append(
+                        f"report completeness marker includes non-reportable uid "
+                        f"{value!r} at min_score {min_score}"
+                    )
+            visible_values = [match.group("uid") for match in
+                              _VISIBLE_UID.finditer(text)]
+            visible_counts = Counter(visible_values)
+            for value, count in sorted(visible_counts.items()):
+                if count > 1:
+                    problems.append(
+                        f"report renders uid {value!r} {count} times")
+            visible = set(visible_values)
+            for value in sorted(expected - visible):
+                problems.append(
+                    f"report omits active uid {value!r} named by its completeness marker")
+            for value in sorted(visible - expected):
+                problems.append(
+                    f"report renders uid {value!r} outside its completeness marker")
+            for value in sorted(expected):
+                if con.execute("SELECT 1 FROM jobs WHERE uid=?", (value,)).fetchone() is None:
+                    problems.append(
+                        f"report completeness marker names uid {value!r} "
+                        "that the database does not have")
     return problems
 
 

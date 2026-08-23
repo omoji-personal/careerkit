@@ -6,6 +6,7 @@ dead adapter never masquerades as "nothing new this week".
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -14,6 +15,7 @@ import os
 import datetime as _dt
 
 from .models import ATS_SOURCES, sanitize_external, sanitize_external_url
+from .privatefs import atomic_write_private_text, ensure_private_directory
 OUT_DIR = Path(os.environ.get("CAREERKIT_HOME") or Path(__file__).resolve().parent.parent) / "out"
 
 _URL_OMITTED = "URL omitted (invalid or unsafe external target)"
@@ -181,13 +183,11 @@ def _row_block(rows: list[sqlite3.Row], idx: int, new_uids: set | None = None) -
         # alone made the grouping destructive in practice: the user could see
         # that other requisitions existed but could not open or mark any of them.
         lines.append(f"- **Also open ({len(rows) - 1} more):**")
-        for o in rows[1:12]:
+        for o in rows[1:]:
             lines.append(
                 f"  - {sanitize_external(o['location'], 40) or 'location not stated'} "
-                f"| {o['gate'].lower()} {o['score']} | `{o['uid']}`\n"
+                f"| {o['gate'].lower()} {o['score']} | **UID** `{o['uid']}`\n"
                 f"    {_display_url(o['url'])}")
-        if len(rows) > 12:
-            lines.append(f"  - ...and {len(rows) - 12} more")
     return "\n".join(lines)
 
 
@@ -212,10 +212,20 @@ def _tail_line(rows: list[sqlite3.Row]) -> str:
     else:
         miss = m.split(" | ")[0]
     sib = f" (+{len(rows) - 1} reqs)" if len(rows) > 1 else ""
-    return (f"- {r['score']} · **Title** {sanitize_external(r['title'], 70)} · "
-            f"**Company** {sanitize_external(r['company'], 40) or 'employer not named'}{sib} · "
-            f"**Check** {sanitize_external(miss, 70)} · **UID** `{r['uid']}`\n"
-            f"  {_display_url(r['url'])}")
+    lines = [
+        f"- {r['score']} · **Title** {sanitize_external(r['title'], 70)} · "
+        f"**Company** {sanitize_external(r['company'], 40) or 'employer not named'}{sib} · "
+        f"**Check** {sanitize_external(miss, 70)} · **UID** `{r['uid']}`",
+        f"  {_display_url(r['url'])}",
+    ]
+    for sibling in rows[1:]:
+        lines.append(
+            f"  - {sanitize_external(sibling['location'], 40) or 'location not stated'} "
+            f"| {sibling['gate'].lower()} {sibling['score']} | "
+            f"**UID** `{sibling['uid']}`\n"
+            f"    {_display_url(sibling['url'])}"
+        )
+    return "\n".join(lines)
 
 
 def _scope_notice(run_detail: dict) -> list[str]:
@@ -261,8 +271,9 @@ def _scope_notice(run_detail: dict) -> list[str]:
 
 def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
                  health: list[sqlite3.Row], run_detail: dict,
-                 filename: str | None = None, run_id: int | None = None) -> Path:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+                 filename: str | None = None, run_id: int | None = None,
+                 min_score: int = 0) -> Path:
+    ensure_private_directory(OUT_DIR)
     today = date.today().isoformat()
     path = OUT_DIR / (filename or f"sourcing-{today}.md")
 
@@ -363,6 +374,23 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
             L.append(f"- **{name}** - {ats}:`{slug}` ({count} open)")
         L.append("")
 
+    # The checker needs an independent completeness contract, not merely the
+    # ability to validate whichever rows happened to render.  Keep both the
+    # requested score floor and exact intended UID set in a machine-only marker
+    # so the checker can derive the reportable set from the database itself.
+    # Version 1 carried only the UID list; consistency still reads that legacy
+    # shape, but cannot safely infer a filtered report's score floor from it.
+    report_uids = sorted({row["uid"] for group in qual + verify for row in group})
+    L += [
+        "<!-- careerkit-report-uids-v2: "
+        + json.dumps(
+            {"min_score": min_score, "uids": report_uids},
+            separators=(",", ":"),
+        )
+        + " -->",
+        "",
+    ]
+
     # A hidden logical-state marker lets consistency distinguish a real
     # post-report database change from SQLite checkpointing identical WAL data
     # into jobs.db after this file is written.
@@ -377,7 +405,8 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     if state:
         L += [f"<!-- careerkit-report-state-v1: {state} -->", ""]
 
-    path.write_text("\n".join(L), encoding="utf-8")
+    rendered = "\n".join(L)
+    atomic_write_private_text(path, rendered, encoding="utf-8")
     # latest.md follows the report EVERY time one is written, not just on a pull.
     # It used to be copied by the pull command only, so after a `rescore` the
     # dated report held the new verdicts while latest.md still showed the old
@@ -386,7 +415,9 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     # postings as QUALIFIED that the database had already excluded.
     if filename is None:
         try:
-            (OUT_DIR / "latest.md").write_text("\n".join(L), encoding="utf-8")
+            atomic_write_private_text(
+                OUT_DIR / "latest.md", rendered, encoding="utf-8",
+            )
         except OSError as e:
             print(f"  (could not refresh latest.md: {e})")
     return path

@@ -1997,12 +1997,12 @@ def test_a_failed_mark_records_nothing(db):
 
 def test_claims_lint_flags_a_fabricated_number_and_credential():
     from engine.claims import lint
-    reg = "- Salesforce Consultant at TechBridge.\n- Reduced handling time by 30%."
+    reg = "- Salesforce Consultant at Example Consultancy.\n- Reduced handling time by 30%."
     found = {f["text"] for f in lint(
-        "At TechBridge I grew revenue 65% and hold the Marketing Cloud Consultant cert.", reg)}
+        "At Example Consultancy I grew revenue 65% and hold the Marketing Cloud Consultant cert.", reg)}
     assert "65%" in found
     assert "Marketing Cloud Consultant" in found
-    assert not any("TechBridge" == f for f in found), "a backed employer must not be flagged"
+    assert not any("Example Consultancy" == f for f in found), "a backed employer must not be flagged"
 
 
 def test_claims_lint_passes_a_fully_backed_draft():
@@ -2311,7 +2311,7 @@ def test_smartrecruiters_probe_rejects_a_slug_that_does_not_exist(monkeypatch):
     assert discover._p_smartrecruiters("asdfqwerzxcv") is None
 
     monkeypatch.setattr(discover, "fetch_json", lambda url, **k: {"totalFound": 571, "content": []})
-    assert discover._p_smartrecruiters("KIPP") == 571
+    assert discover._p_smartrecruiters("CaseCo") == 571
 
     monkeypatch.setattr(discover, "fetch_json", lambda url, **k: None)
     assert discover._p_smartrecruiters("whatever") is None
@@ -2353,7 +2353,7 @@ def test_a_generic_first_word_is_not_a_slug_candidate():
     forever. Same family as the two-letter initials collision."""
     from engine.discover import slug_candidates
     assert "national" not in slug_candidates("National Public Radio")
-    assert "delta" not in slug_candidates("Delta Air Lines")
+    assert "delta" not in slug_candidates("Delta Community Health")
 
 
 def test_a_distinctive_two_word_name_still_offers_its_first_word():
@@ -2423,7 +2423,9 @@ def test_consistency_never_claims_a_stale_report_agrees(db, tmp_path, capsys):
     future = rpt.stat().st_mtime + 5
     os.utime(db_path, (future, future))
 
-    careerkit.cmd_consistency(SimpleNamespace(report=str(rpt), repair=False))
+    with pytest.raises(SystemExit) as exc:
+        careerkit.cmd_consistency(SimpleNamespace(report=str(rpt), repair=False))
+    assert exc.value.code == 1
     out = capsys.readouterr().out
     assert "stale report was skipped" in out
     assert "Consistent." not in out
@@ -2591,20 +2593,20 @@ def test_registry_level_rails_exempt_survives_a_rescore(db, tmp_path):
 # --------------------------------------------------------------------------
 
 def test_the_same_posting_reposted_keeps_its_rejected_status(db):
-    """Half of the Delta case, and the half already handled. Two titles that
+    """Half of the closed-door case, and the half already handled. Two titles that
     differ only by a suffix normalise to one uid, so a repost adopts the
     existing row and its status rather than arriving as a fresh find. Asserted
     because it is load-bearing: if uid normalisation ever tightens, the tool
     starts recommending rejected roles again."""
     from engine import store
-    first = J(company="Delta Air Lines", title="Business Technology Product Owner (Salesforce)",
+    first = J(company="Example Airlines", title="CRM Platform Product Owner (Salesforce)",
               url="https://example.test/d1")
     first.gate = "VERIFY"
     store.upsert(db, [first])
     db.execute("UPDATE jobs SET status='rejected' WHERE uid=?", (first.uid,))
     db.commit()
 
-    repost = J(company="Delta Air Lines", title="Business Technology Product Owner",
+    repost = J(company="Example Airlines", title="CRM Platform Product Owner",
                url="https://example.test/d2")
     repost.gate = "QUALIFIED"
     store.upsert(db, [repost])
@@ -2615,11 +2617,11 @@ def test_the_same_posting_reposted_keeps_its_rejected_status(db):
     # one entry with siblings, and the rejection stays visible rather than being
     # overwritten by the repost.
     rows = db.execute("SELECT uid, status, group_key FROM jobs "
-                      "WHERE company='Delta Air Lines'").fetchall()
+                      "WHERE company='Example Airlines'").fetchall()
     assert len({r["group_key"] for r in rows}) == 1, "siblings must group together"
     assert any(r["status"] == "rejected" for r in rows), "the rejection must survive"
     from engine import applied
-    assert any("Delta" in text for _kind, text in applied.surfacing_a_closed_door(db)), \
+    assert any("Example Airlines" in text for _kind, text in applied.surfacing_a_closed_door(db)), \
         "a live sibling at an employer that declined you must be flagged"
 
 
@@ -2629,10 +2631,10 @@ def test_a_different_role_at_an_employer_who_declined_you_is_flagged(db):
     of it. Worth surfacing rather than excluding, because a different team at a
     large employer is a genuinely different conversation."""
     from engine import applied, store
-    old = J(company="Delta Air Lines", title="Salesforce Product Owner",
+    old = J(company="Example Airlines", title="Salesforce Product Owner",
             url="https://example.test/d1")
     old.gate = "VERIFY"
-    live = J(company="Delta Air Lines", title="Salesforce Platform Analyst",
+    live = J(company="Example Airlines", title="Salesforce Platform Analyst",
              url="https://example.test/d2")
     live.gate = "QUALIFIED"
     store.upsert(db, [old, live])
@@ -2640,7 +2642,7 @@ def test_a_different_role_at_an_employer_who_declined_you_is_flagged(db):
     db.commit()
 
     doors = applied.surfacing_a_closed_door(db)
-    assert any("Delta" in text for _kind, text in doors), doors
+    assert any("Example Airlines" in text for _kind, text in doors), doors
 
 
 def test_an_unrelated_role_at_the_same_employer_reads_differently(db):
@@ -2713,6 +2715,7 @@ def test_application_evidence_preserves_notes_and_maps_pipeline_states(db):
     store.upsert(db, [job])
     store.set_status(db, job.uid, "reviewed", "recruiter and resume details")
     evidence = [{"company": "Acme", "title": "Architect", "status": "interviewing",
+                 "url": "https://example.test/interview",
                  "on": "2026-08-08", "source": "manual", "_line": 1}]
     res = applied.reconcile(db, evidence, apply=True)
     assert len(res["matched"]) == 1
@@ -2727,6 +2730,29 @@ def test_application_evidence_preserves_notes_and_maps_pipeline_states(db):
     applied.reconcile(db, evidence, apply=True)
     events = store.history(db, job.uid)
     assert len([e for e in events if e["kind"] == "application:interviewing"]) == 1
+
+
+def test_undated_application_evidence_is_idempotent_across_days(db):
+    from engine import applied, store
+
+    job = J(company="Acme", title="Architect", url="https://example.test/undated")
+    store.upsert(db, [job])
+    evidence = [{"company": "Acme", "title": "Architect", "status": "applied",
+                 "url": "https://example.test/undated", "_line": 1}]
+    applied.reconcile(db, evidence, apply=True)
+    db.execute(
+        "UPDATE events SET at='2026-08-01T12:00:00' "
+        "WHERE uid=? AND kind='application:applied'", (job.uid,)
+    )
+    db.commit()
+
+    matched = applied.reconcile(db, evidence, apply=False)["matched"][0]
+    assert applied.application_event_recorded(db, matched)
+    applied.reconcile(db, evidence, apply=True)
+    assert db.execute(
+        "SELECT COUNT(*) FROM events WHERE uid=? AND kind='application:applied'",
+        (job.uid,),
+    ).fetchone()[0] == 1
 
 
 def test_careerkit_home_moves_the_profile_too(tmp_path, monkeypatch):
@@ -3440,9 +3466,9 @@ def test_a_url_shared_by_two_requisitions_is_not_a_contradiction(db, tmp_path):
 # Per-company score floor.
 #
 # An employer can be worth watching while being unreachable in practice.
-# Salesforce allows three self-applications per twelve months and Omid's are
-# spent (2026-07-28), so every further req there is a recruiter ask rather than
-# an application, and a report full of them is a report he cannot act on.
+# Some employers cap self-applications over a rolling period. Once a fictional
+# user's allotment is spent, every further requisition is a recruiter ask rather
+# than an application, and a report full of them is not an actionable report.
 # Suppressing the employer outright is wrong too: it would hide the one req
 # worth spending that ask on. So the rule is a FLOOR, not a ban.
 #
@@ -3586,8 +3612,8 @@ def test_a_re_sighting_heals_a_row_whose_remote_flag_predates_the_column(db):
 
     The consequence is not cosmetic. location_verdict reads remote_flag, so on
     the `rescore` the README tells you to run after any criteria change, those
-    rows are re-judged as onsite and excluded on location. Nine of Omid's live
-    rows demoted this way in one rescore, including a QUALIFIED 50 and a
+    rows are re-judged as onsite and excluded on location. Multiple live
+    fixture rows demoted this way in one rescore, including a QUALIFIED 50 and a
     VERIFY 64, both genuinely remote."""
     from engine import store
     stale = J(url="https://b/900", location="Portland, OR, US", external_id="900")

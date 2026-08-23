@@ -187,6 +187,27 @@ def _count(row: Any) -> int:
         return 0
 
 
+def _consecutive_failures(row: Any) -> int:
+    try:
+        return max(0, int(_value(row, "consecutive_failures", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _health_gap_item(*, label: str, source_id: str, state: str, row: Any) -> dict:
+    """Build one privacy-safe gap, retaining only a failure count diagnostic."""
+    item = {
+        "label": label,
+        "source_id": source_id,
+        "state": state,
+        "last_count": _count(row),
+    }
+    failures = _consecutive_failures(row)
+    if failures:
+        item["consecutive_failures"] = failures
+    return item
+
+
 def build_coverage_ledger(
     registry: Mapping[str, Any],
     source_health: Iterable[Any] | None = None,
@@ -323,24 +344,17 @@ def build_coverage_ledger(
         row = _source_health_row(health_exact, health_folded, board, label)
         state = _health_state(row, as_of, stale_after_days)
         if state:
-            health_gaps.append({
-                "label": label,
-                "source_id": board,
-                "state": state,
-                "last_count": _count(row),
-            })
+            health_gaps.append(_health_gap_item(
+                label=label, source_id=board, state=state, row=row))
     operational_names = {item["name"] for item in feed_groups["operational"]}
     for name in sorted(operational_names, key=str.casefold):
         source_id = _feed_label(name).casefold()
         row = _source_health_row(health_exact, health_folded, source_id)
         state = _health_state(row, as_of, stale_after_days)
         if state:
-            health_gaps.append({
-                "label": _feed_label(name),
-                "source_id": source_id,
-                "state": state,
-                "last_count": _count(row),
-            })
+            health_gaps.append(_health_gap_item(
+                label=_feed_label(name), source_id=source_id,
+                state=state, row=row))
 
     capped = []
     for entry in sorted(

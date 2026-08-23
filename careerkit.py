@@ -88,6 +88,13 @@ from engine.score import Profile, ProfileError, score  # noqa: E402
 from engine import score as _score_mod
 from engine import search as _search
 from engine import coverage as _coverage
+from engine.privatefs import (
+    atomic_write_private_text,
+    ensure_private_directory,
+    harden_private_file,
+    open_private_text,
+    prepare_private_file,
+)
 from engine.search import resolve  # noqa: E402
 from engine.verify import verify_entry  # noqa: E402
 
@@ -327,24 +334,25 @@ def cmd_privacy(args) -> None:
 
     # An install being migrated already has its search criteria; recording those
     # phases as pending would send a working setup back through an interview it
-    # does not need. The optional phases were never run *as phases*, which is
-    # what "skipped" means here, and /setup can still open any of them later.
+    # does not need.  A genuinely fresh install is different: none of the
+    # optional phases has been offered yet, so calling them "skipped" would turn
+    # an implementation default into a user decision and /setup would never
+    # resume them automatically.
     configured = PROFILE.exists()
     states = {
         "Privacy": "complete",
         "Search Core": "complete" if configured else "pending",
-        "First Win": "skipped",
-        "Source Expansion": "skipped",
-        "Career Pack": "skipped",
+        "First Win": "skipped" if configured else "pending",
+        "Source Expansion": "skipped" if configured else "pending",
+        "Career Pack": "skipped" if configured else "pending",
         "Final Checks": "complete" if configured else "pending",
     }
     body = "# CareerKit setup checkpoint (content-free)\n" + "".join(
         f"{phase}: {states[phase]}\n" for phase in _ONBOARDING_PHASES
     )
-    progress_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = progress_path.with_suffix(".md.tmp")
-    tmp.write_text(body, encoding="utf-8")
-    tmp.replace(progress_path)
+    atomic_write_private_text(
+        progress_path, body, encoding="utf-8", harden_parent=False,
+    )
 
     print("\nRecorded at " + str(progress_path) + ".")
     if configured:
@@ -545,23 +553,15 @@ def _profile_readiness_failures(
 
 
 def save_employers(data: dict) -> None:
-    EMPLOYERS.parent.mkdir(parents=True, exist_ok=True)
     rendered = yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
     # Registry discovery is cumulative and expensive. A killed process between
     # truncating employers.yaml and finishing write_text used to destroy it.
-    # Write beside the target, fsync, then atomically replace.
-    tmp = EMPLOYERS.with_name(f".{EMPLOYERS.name}.{os.getpid()}.tmp")
-    try:
-        with tmp.open("w", encoding="utf-8") as fh:
-            fh.write(rendered)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, EMPLOYERS)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+    # Write beside the target, fsync, then atomically replace at mode 0600.
+    # A configured registry may live outside CAREERKIT_HOME; secure the file and
+    # any newly-created parents without changing an existing shared parent.
+    atomic_write_private_text(
+        EMPLOYERS, rendered, encoding="utf-8", harden_parent=False,
+    )
 
 
 def _registry_key(entry: dict) -> str:
@@ -596,9 +596,11 @@ def cmd_pull(args) -> None:
     try:
         import shutil
         runs_dir = path.parent / "runs"
-        runs_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(runs_dir)
         stamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-        shutil.copy2(path, runs_dir / f"{stamp}-run-{r['run_id']:04d}.md")
+        artifact = runs_dir / f"{stamp}-run-{r['run_id']:04d}.md"
+        shutil.copy2(path, artifact)
+        harden_private_file(artifact)
         # latest.md is refreshed by write_report itself now, so that rescore and
         # rebuild_report keep it current too. One writer, no drift.
     except Exception as e:
@@ -646,6 +648,10 @@ def cmd_audit(args) -> None:
     kills = Counter()
     samples: dict[str, list] = {}
     for j in all_jobs:
+        # Audit must judge the same bytes a pull can persist and later rescore.
+        # Scoring a longer transient body here made a role pass or fail on text
+        # that the database intentionally discards at DESCRIPTION_LIMIT.
+        _pull.clip_description(j)
         score(j, profile)
         if j.gate not in ("EXCLUDED", "SLOT-BLOCKED"):
             continue
@@ -750,8 +756,9 @@ def cmd_search(args) -> None:
     added = _ingest(urls)
 
     qpath = ROOT / "out" / "search-queries.txt"
-    qpath.parent.mkdir(parents=True, exist_ok=True)
-    qpath.write_text("\n".join(queries) + "\n", encoding="utf-8")
+    atomic_write_private_text(
+        qpath, "\n".join(queries) + "\n", encoding="utf-8",
+    )
     print(f"Query matrix: {qpath}")
     print(f"Search registered {len(added)} new employer(s). Bing RSS is shallow; "
           "run the saved matrix through a stronger search tool for fuller coverage.")
@@ -880,7 +887,11 @@ def _ingest(raw_urls: list[str]) -> list[dict]:
 def cmd_verify(args) -> None:
     from concurrent.futures import ThreadPoolExecutor
     reg = load_registry(required=True)
-    emps = [e for e in reg["employers"] if args.all or e.get("verified") is None]
+    terminal_states = {"ok", "review", "bad"}
+    emps = [
+        e for e in reg["employers"]
+        if args.all or e.get("verified") not in terminal_states
+    ]
     print(f"Verifying {len(emps)} employer boards...", flush=True)
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(verify_entry, emps))
@@ -932,13 +943,14 @@ def cmd_report(args) -> None:
         # database is the only place this data existed and SQL is not a
         # reasonable thing to ask a non-programmer for.
         out = OUT_DIR_FOR_EXPORT()
-        out.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(out)
         cols = ["uid", "company", "title", "location", "score", "gate", "status",
                 "source", "comp_min", "comp_max", "comp_source", "first_seen",
                 "last_seen", "url"]
         path = out / f"export-{date.today().isoformat()}.{fmt}"
         if fmt == "json":
-            path.write_text(
+            atomic_write_private_text(
+                path,
                 json.dumps([{c: r[c] for c in cols} for r in rows], indent=1),
                 encoding="utf-8",
             )
@@ -947,6 +959,7 @@ def cmd_report(args) -> None:
             # The CSV is explicitly for spreadsheets. UTF-8 with a BOM is the
             # portable signal that keeps Excel on native Windows from decoding
             # non-ASCII employer, title, and location text as the ANSI locale.
+            prepare_private_file(path)
             with path.open("w", encoding="utf-8-sig", newline="") as fh:
                 w = csv.writer(fh)
                 w.writerow(cols)
@@ -1082,7 +1095,10 @@ def cmd_history(args) -> None:
     The jobs row holds only the CURRENT status, so applying and then being
     rejected left no trace of the first event and no way to ask how long
     anything took."""
-    con = store.connect()
+    if not store.DB_PATH.exists():
+        print("No events recorded yet. Run a pull before inspecting history.")
+        return
+    con = store.connect(readonly=True)
     rows = store.history(con, uid=getattr(args, "uid", None))
     if not rows:
         print("No events recorded yet. They accumulate as you mark postings.")
@@ -1163,7 +1179,9 @@ def cmd_consistency(args) -> None:
     another, so they disagreed silently, and the CSV export dropped the band for
     a third of the postings that had one."""
     from engine import consistency as _cons
-    con = store.connect()
+    if not store.DB_PATH.exists():
+        sys.exit("No database yet. Run a pull before checking consistency.")
+    con = store.connect(readonly=not args.repair)
 
     db_problems = _cons.check_db(con)
     rpt = args.report or _latest_report()
@@ -1194,6 +1212,7 @@ def cmd_consistency(args) -> None:
         if stale:
             print("Database checks passed. The stale report was skipped; "
                   "regenerate it before checking database-to-report agreement.")
+            raise SystemExit(1)
         else:
             print(f"Consistent. Database and {Path(rpt).name if rpt else 'report'} agree.")
         return
@@ -1217,24 +1236,32 @@ def _latest_report():
 def cmd_applied(args) -> None:
     """Reconcile profile/applications.jsonl against the database.
 
-    Exists because the tool recommended a role the owner had been rejected from
-    the previous day, and a wider check found roughly twenty applications in six
-    weeks against six the database knew about. Evidence that names a company but
-    not a role is never written automatically: at an employer with several
-    openings that marks the wrong one."""
+    Exists because a role can look fresh after the user already applied or was
+    rejected when that evidence never reached the database. Evidence that names
+    a company but not a role is never written automatically: at an employer with
+    several openings that could mark the wrong one."""
     from engine import applied as _applied
-    con = store.connect()
     path = Path(args.file) if args.file else APPLICATIONS
     ev = _applied.load_evidence(path)
     if not ev:
         print(f"No evidence file at {path}.")
         print("Write one line of JSON per application, e.g.")
-        print('  {"company": "Acme", "title": "Salesforce Admin", "status": "rejected", "on": "2026-08-05"}')
+        print('  {"company": "Acme", "title": "Salesforce Admin", "url": "https://jobs.example.invalid/123", "status": "rejected", "on": "2026-08-05"}')
         return
+
+    if not store.DB_PATH.exists():
+        sys.exit("No database yet. Run a pull before reconciling application evidence.")
+    con = store.connect(readonly=not args.apply)
 
     res = _applied.reconcile(con, ev, apply=args.apply)
     for m in res["matched"]:
-        verb = "recorded" if args.apply else "would record"
+        if not m.get("safe_to_apply"):
+            verb = "review only"
+        elif args.apply:
+            verb = ("recorded" if m.get("written") else
+                    "repaired status" if m.get("repaired") else "already synced")
+        else:
+            verb = "would record"
         print(f"  {verb} {m['status']:<13} {m['company'][:28]:<28} {m['matched_title'][:44]}")
         print(f"      ({m['confidence']})")
         if m["db_status"] != m["status"]:
@@ -1255,10 +1282,14 @@ def cmd_applied(args) -> None:
     for pr in res["problems"]:
         print(f"  x  {pr}")
 
-    print(f"\n{len(res['matched'])} matched, {len(res['ambiguous'])} ambiguous, "
+    safe_matches = sum(1 for item in res["matched"] if item.get("safe_to_apply"))
+    print(f"\n{len(res['matched'])} mapped ({safe_matches} exact/safe), "
+          f"{len(res['ambiguous'])} ambiguous, "
           f"{len(res['unmatched'])} unmatched, {len(res['pending'])} pre-submission.")
-    if res["matched"] and not args.apply:
-        print("Nothing written. Re-run with --apply to record the matched ones.")
+    if safe_matches and not args.apply:
+        print("Nothing written. Re-run with --apply to record exact/safe matches only.")
+    elif res["matched"] and not safe_matches:
+        print("Nothing written. Title-only mappings are manual review, never auto-applied.")
 
     try:
         from engine import ghost as _ghost
@@ -1320,6 +1351,50 @@ def cmd_enrich(args) -> None:
         print("Run `rescore` to re-judge them against the fuller text.")
 
 
+def _career_pack_missing(raw_profile: dict) -> list[str]:
+    """Return named Career Pack destinations that are not actually complete."""
+    missing = []
+
+    def nonempty_file(path: Path) -> bool:
+        try:
+            return path.is_file() and bool(path.read_text(encoding="utf-8").strip())
+        except OSError:
+            return False
+
+    for key in ("identity", "work_auth", "eeo"):
+        value = raw_profile.get(key)
+        if not isinstance(value, dict) or not value:
+            missing.append(f"profile.yaml.{key}")
+    autonomy = raw_profile.get("autonomy")
+    if not isinstance(autonomy, dict) or autonomy.get("submit") != "ask_each":
+        missing.append("profile.yaml.autonomy.submit=ask_each")
+    for path, label in (
+        (PROFILE.parent / "person.md", "person.md"),
+        (CLAIMS, "claims.md"),
+        (PROFILE.parent / "style.md", "style.md"),
+        (TRACKER, "tracker.md"),
+    ):
+        if not nonempty_file(path):
+            missing.append(label)
+    return missing
+
+
+def _stale_unfinished_runs(con, *, older_than_hours: int = 6) -> list:
+    """Return abandoned-looking runs without mistaking a live pull for one."""
+    stale = []
+    now = datetime.now()
+    for row in con.execute(
+            "SELECT run_id, started, state FROM runs WHERE finished IS NULL "
+            "ORDER BY run_id"):
+        try:
+            age_hours = (now - datetime.fromisoformat(row["started"])).total_seconds() / 3600
+        except (TypeError, ValueError):
+            age_hours = float("inf")
+        if age_hours >= older_than_hours:
+            stale.append(row)
+    return stale
+
+
 def cmd_doctor(args) -> None:
     """One place that answers "is this thing working?".
 
@@ -1371,7 +1446,7 @@ def cmd_doctor(args) -> None:
     # A readiness check should not create a database merely because a new user
     # asked what remains.  Once a database exists, open it normally so migrations
     # and all historical diagnostics still run.
-    con = store.connect() if store.DB_PATH.exists() else None
+    con = store.connect(readonly=True) if store.DB_PATH.exists() else None
     raw_profile = {}
     profile = None
     if not PROFILE.exists():
@@ -1414,6 +1489,14 @@ def cmd_doctor(args) -> None:
         notes.append(
             f"onboarding Final Checks are {progress.get('Final Checks', 'missing')}"
         )
+    if progress.get("Career Pack") == "complete":
+        missing_pack = _career_pack_missing(raw_profile)
+        if missing_pack:
+            problems.append(
+                "onboarding Career Pack is marked complete but these destinations "
+                "are missing or incomplete: " + ", ".join(missing_pack)
+                + " - run /setup to reconcile the checkpoint"
+            )
 
     health_rows = list(con.execute("SELECT * FROM source_health")) if con else []
     coverage = _coverage.build_coverage_ledger(
@@ -1457,9 +1540,11 @@ def cmd_doctor(args) -> None:
     for gap in coverage["health_gap_sources"]:
         if gap["source_id"] in ceiling_ids and gap["state"] == "capped":
             continue
+        repeated = gap.get("consecutive_failures", 0)
+        repeat_note = f", failing x{repeated}" if repeated >= 2 else ""
         problems.append(
             f"current source coverage gap: {gap['label']} is {gap['state']} "
-            f"({gap['last_count']} usable postings retained)"
+            f"({gap['last_count']} usable postings retained{repeat_note})"
         )
     missing_families = coverage["ats_families"]["supported_unrepresented"]
     if missing_families:
@@ -1497,16 +1582,65 @@ def cmd_doctor(args) -> None:
         except Exception:
             pass
 
+    if con is not None and APPLICATIONS.exists():
+        try:
+            from engine import applied as _applied
+            evidence = _applied.load_evidence(APPLICATIONS)
+            application_drift = _applied.reconcile(con, evidence, apply=False)
+            drift_counts = {
+                key: len(application_drift[key])
+                for key in ("matched", "ambiguous", "unmatched", "pending", "problems")
+            }
+            actionable_matches = sum(
+                1 for item in application_drift["matched"]
+                if (item.get("safe_to_apply")
+                    and not _applied.application_history_synchronized(con, item))
+            )
+            manual_matches = sum(
+                1 for item in application_drift["matched"]
+                if not item.get("safe_to_apply")
+            )
+            if (actionable_matches or drift_counts["ambiguous"]
+                    or drift_counts["problems"]):
+                problems.append(
+                    "application evidence needs review: "
+                    f"{actionable_matches} unsynchronized safe match(es), "
+                    f"{drift_counts['ambiguous']} ambiguous, "
+                    f"{drift_counts['problems']} invalid; run `applied` to review"
+                )
+            if (drift_counts["unmatched"] or drift_counts["pending"]
+                    or manual_matches):
+                notes.append(
+                    "application evidence outside automatic database matching: "
+                    f"{drift_counts['unmatched']} unmatched history record(s), "
+                    f"{drift_counts['pending']} prepared but unsubmitted, "
+                    f"{manual_matches} title-only manual match(es); "
+                    "run `applied` to review"
+                )
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            problems.append(
+                "application evidence could not be checked: "
+                f"{type(exc).__name__}; run `applied` for details"
+            )
+
     if con is not None:
         broken = _pull.broken_sources(con, reg)
+        diagnosed = {
+            str(value).casefold()
+            for gap in coverage["health_gap_sources"]
+            for value in (gap.get("source_id"), gap.get("label"))
+            if value
+        }
         for b in broken:
+            if str(b["source"]).casefold() in diagnosed:
+                continue
             problems.append(f"source failing x{b['consecutive_failures']}: {b['source']} "
                             f"({(b['last_error'] or '')[:40]})")
         for d in store.dropped_to_zero(con):
             problems.append(f"{d['source']} returned 0 but had {d['prev_count']} last run")
 
-    last = (con.execute("SELECT started, finished FROM runs "
-                        "ORDER BY run_id DESC LIMIT 1").fetchone()
+    last = (con.execute("SELECT run_id, started, finished FROM runs "
+                        "WHERE finished IS NOT NULL ORDER BY run_id DESC LIMIT 1").fetchone()
             if con is not None else None)
     if last is None:
         notes.append("no completed run yet - try: ./careerkit.py pull")
@@ -1514,8 +1648,25 @@ def cmd_doctor(args) -> None:
         age = (datetime.now() - datetime.fromisoformat(last["started"])).days
         if age >= 7:
             problems.append(f"last run was {age} days ago - postings may be stale")
-        if not last["finished"]:
-            problems.append("the last run did not finish (interrupted?)")
+        report_dir = store.DB_PATH.parent.parent / "out"
+        reports = sorted(report_dir.glob("sourcing-*.md")) if report_dir.exists() else []
+        if reports:
+            from engine import consistency as _cons
+            stale_report = _cons.report_is_stale(con, reports[-1])
+            if stale_report:
+                problems.append(stale_report)
+        else:
+            notes.append("a completed run has no sourcing report - run: ./careerkit.py report")
+
+    if con is not None:
+        unfinished = _stale_unfinished_runs(con)
+        if unfinished:
+            ids = ", ".join(str(row["run_id"]) for row in unfinished[:12])
+            extra = f" (+{len(unfinished) - 12} more)" if len(unfinished) > 12 else ""
+            problems.append(
+                f"{len(unfinished)} unfinished run(s) are more than 6 hours old "
+                f"(run ids {ids}{extra}); review before treating run history as complete"
+            )
 
     if con is not None:
         drift = tracker_drift(con)
@@ -1579,8 +1730,8 @@ def cmd_coverage(args) -> None:
     reg = load_registry(required=True)
     profile = load_profile()
     keys = load_yaml(KEYS, {})
-    con = store.connect()
-    health = list(con.execute("SELECT * FROM source_health"))
+    con = store.connect(readonly=True) if store.DB_PATH.exists() else None
+    health = list(con.execute("SELECT * FROM source_health")) if con else []
     ledger = _coverage.build_coverage_ledger(
         reg, health, keys=keys, as_of=date.today(),
         search_term_count=len(profile.search_terms))
@@ -1639,8 +1790,12 @@ def cmd_coverage(args) -> None:
 
     incomplete_ids = {item["source_id"] for item in ledger["health_gap_sources"]}
     incomplete_ids.update(ceiling_ids)
+    blocking_dormant = sum(
+        1 for item in feeds["dormant"]
+        if item.get("reason") != "explicit_opt_in_disabled"
+    )
     gaps = (employers["duplicate_rows"] + feeds["duplicate_rows"]
-            + feeds["dormant_count"]
+            + blocking_dormant
             + feeds["unsupported_count"]
             + len(incomplete_ids))
     if gaps:
@@ -1652,7 +1807,16 @@ def cmd_coverage(args) -> None:
 def cmd_status(args) -> None:
     # Validate config before printing a partial "healthy" database summary.
     reg = load_registry(required=True)
-    con = store.connect()
+    if not store.DB_PATH.exists():
+        print(f"Database: {store.DB_PATH}")
+        print("  postings tracked : 0")
+        print("  completed runs   : 0")
+        print("  by gate          : ")
+        print("  top sources      : ")
+        print(f"\nRegistry: {len(reg.get('employers', []))} employers, "
+              f"{len(reg.get('feeds', []))} feeds")
+        return
+    con = store.connect(readonly=True)
     s = store.stats(con)
     print(f"Database: {store.DB_PATH}")
     print(f"  postings tracked : {s['total']}")
@@ -1696,7 +1860,8 @@ def cmd_status(args) -> None:
         print(f"\n{len(broken)} sources failing repeatedly (silent coverage loss):")
         for b in broken[:20]:
             print(f"  {b['source']:<46} x{b['consecutive_failures']}  {(b['last_error'] or '')[:50]}")
-        print("  (deactivate one in employers.yaml to stop polling and silence it)")
+        print("  Review the source configuration or provider response. Deactivate a "
+              "source only if you intentionally want to stop covering it.")
 
 
 DISCOVERED_QUEUE = ROOT / "data" / "discovered-pending.json"
@@ -1711,13 +1876,15 @@ def queue_discovered(entries: list[dict]) -> None:
     if not entries:
         return
     try:
-        DISCOVERED_QUEUE.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(DISCOVERED_QUEUE.parent)
         prev = (json.loads(DISCOVERED_QUEUE.read_text(encoding="utf-8"))
                 if DISCOVERED_QUEUE.exists() else [])
         seen = {(e.get("ats"), e.get("slug") or e.get("tenant")) for e in prev}
         prev += [e for e in entries
                  if (e.get("ats"), e.get("slug") or e.get("tenant")) not in seen]
-        DISCOVERED_QUEUE.write_text(json.dumps(prev[-200:]), encoding="utf-8")
+        atomic_write_private_text(
+            DISCOVERED_QUEUE, json.dumps(prev[-200:]), encoding="utf-8",
+        )
     except OSError:
         pass          # a report nicety must never fail a discovery run
 
@@ -1922,7 +2089,8 @@ def _append_tracker_sync(entries: list[dict]) -> None:
     """Append one sync block without rewriting a byte of existing narrative."""
     if not entries:
         return
-    TRACKER.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(TRACKER.parent, harden_existing=False)
+    prepare_private_file(TRACKER, harden_parent=False)
     needs_separator = TRACKER.exists() and TRACKER.stat().st_size > 0
     stamp = datetime.now().isoformat(timespec="seconds")
     block = (("\n\n" if needs_separator else "")
@@ -1934,7 +2102,7 @@ def _append_tracker_sync(entries: list[dict]) -> None:
     # replace its inode and makes an implementation mistake capable of erasing
     # the owner's prose. One buffered append plus fsync leaves existing bytes
     # untouched even if the process is interrupted.
-    with TRACKER.open("a", encoding="utf-8") as fh:
+    with open_private_text(TRACKER, "a", encoding="utf-8") as fh:
         fh.write(block)
         fh.flush()
         os.fsync(fh.fileno())
@@ -1948,7 +2116,9 @@ def cmd_tracker_sync(args) -> None:
     append-only block. Nothing writes unless the caller explicitly passes
     --apply.
     """
-    con = store.connect()
+    if not store.DB_PATH.exists():
+        sys.exit("No database yet. Run a pull before synchronizing the tracker.")
+    con = store.connect(readonly=not args.apply)
     plan = tracker_sync_plan(con)
     print(f"Tracker: {plan['tracker_path']}"
           + ("" if plan["tracker_exists"] else " (not created yet)"))
@@ -2008,7 +2178,9 @@ def cmd_db(args) -> None:
     The database holds months of first_seen dates and application status that
     cannot be re-derived from any job board, so it deserves the same care as the
     profile."""
-    con = store.connect()
+    if not store.DB_PATH.exists():
+        sys.exit("No database yet. Run a pull before checking or backing it up.")
+    con = store.connect(readonly=args.action == "check")
     if args.action == "check":
         row = con.execute("PRAGMA quick_check").fetchone()
         verdict = str(row[0]) if row else "unknown"
@@ -2021,8 +2193,10 @@ def cmd_db(args) -> None:
         dest = store.DB_PATH.with_suffix(
             f".backup-{datetime.now().strftime('%Y-%m-%dT%H-%M-%S')}.db")
         import sqlite3 as _s
+        prepare_private_file(dest)
         with _s.connect(dest) as b:
             con.backup(b)
+        harden_private_file(dest)
         print(f"Backed up to {dest}")
 
 
@@ -2185,7 +2359,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("applied", help="reconcile application evidence with the database")
     sp.set_defaults(fn=cmd_applied)
     sp.add_argument("--file", help="default: profile/applications.jsonl")
-    sp.add_argument("--apply", action="store_true", help="write the unambiguous matches")
+    sp.add_argument("--apply", action="store_true", help="write exact posting-URL matches only")
 
     sp = sub.add_parser("consistency", help="compare report claims with database facts")
     sp.set_defaults(fn=cmd_consistency)
