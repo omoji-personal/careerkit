@@ -17,15 +17,15 @@ def test_employer_rows_are_deduplicated_by_casefolded_board_identity(monkeypatch
     })
     registry = {
         "employers": [
-            {"name": "Kipp", "ats": "smartrecruiters", "slug": "KIPP"},
-            {"name": "KIPP Foundation", "ats": "smartrecruiters", "slug": "kipp"},
+            {"name": "CaseCo", "ats": "smartrecruiters", "slug": "CASECO"},
+            {"name": "CaseCo Foundation", "ats": "smartrecruiters", "slug": "caseco"},
             {"name": "Acme", "ats": "workday", "tenant": "ACME", "dc": "WD1",
              "site": "External"},
             {"name": "Acme Careers", "ats": "workday", "tenant": "acme",
              "dc": "wd1", "site": "external"},
             {"name": "Acme Internal", "ats": "workday", "tenant": "acme",
              "dc": "wd1", "site": "Internal"},
-            {"name": "Parked", "ats": "smartrecruiters", "slug": "KIPP",
+            {"name": "Parked", "ats": "smartrecruiters", "slug": "CASECO",
              "active": False},
         ],
         "feeds": [],
@@ -39,10 +39,10 @@ def test_employer_rows_are_deduplicated_by_casefolded_board_identity(monkeypatch
         "duplicate_rows": 2,
         "duplicate_boards": [
             {
-                "board_id": "smartrecruiters:kipp",
+                "board_id": "smartrecruiters:caseco",
                 "row_count": 2,
                 "duplicate_rows": 1,
-                "labels": ["smartrecruiters:Kipp", "smartrecruiters:KIPP Foundation"],
+                "labels": ["smartrecruiters:CaseCo", "smartrecruiters:CaseCo Foundation"],
             },
             {
                 "board_id": "workday:acme/wd1/external",
@@ -449,7 +449,8 @@ def test_exact_stable_health_key_wins_over_casefold_colliding_legacy_row(
     assert secret not in json.dumps(result, sort_keys=True)
 
 
-def test_coverage_cli_reports_real_unique_and_operational_counts(monkeypatch, capsys):
+def test_coverage_cli_reports_real_unique_and_operational_counts(
+        tmp_path, monkeypatch, capsys):
     import careerkit
 
     registry = {
@@ -466,11 +467,14 @@ def test_coverage_cli_reports_real_unique_and_operational_counts(monkeypatch, ca
     con = sqlite3.connect(":memory:")
     con.row_factory = sqlite3.Row
     con.execute("CREATE TABLE source_health (source,last_count)")
+    db_path = tmp_path / "jobs.db"
+    db_path.touch()
+    monkeypatch.setattr(careerkit.store, "DB_PATH", db_path)
     monkeypatch.setattr(careerkit, "load_registry", lambda **_kw: registry)
     monkeypatch.setattr(
         careerkit, "load_profile", lambda: Namespace(search_terms=["crm"]))
     monkeypatch.setattr(careerkit, "load_yaml", lambda *_a, **_kw: {})
-    monkeypatch.setattr(careerkit.store, "connect", lambda: con)
+    monkeypatch.setattr(careerkit.store, "connect", lambda **_kwargs: con)
 
     careerkit.cmd_coverage(Namespace(json=False))
     text = capsys.readouterr().out
@@ -499,7 +503,7 @@ def test_coverage_parser_is_read_only_and_has_json_mode():
 
 
 def test_coverage_cli_prints_single_run_partial_feed_as_a_blocking_gap(
-        monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys):
     import careerkit
 
     registry = {"employers": [], "feeds": [{"name": "remotive"}]}
@@ -512,11 +516,14 @@ def test_coverage_cli_prints_single_run_partial_feed_as_a_blocking_gap(
         "INSERT INTO source_health VALUES (?,?,?)",
         ("feed:remotive", 42, "partial: provider page two timed out"),
     )
+    db_path = tmp_path / "jobs.db"
+    db_path.touch()
+    monkeypatch.setattr(careerkit.store, "DB_PATH", db_path)
     monkeypatch.setattr(careerkit, "load_registry", lambda **_kw: registry)
     monkeypatch.setattr(
         careerkit, "load_profile", lambda: Namespace(search_terms=["crm"]))
     monkeypatch.setattr(careerkit, "load_yaml", lambda *_a, **_kw: {})
-    monkeypatch.setattr(careerkit.store, "connect", lambda: con)
+    monkeypatch.setattr(careerkit.store, "connect", lambda **_kwargs: con)
 
     careerkit.cmd_coverage(Namespace(json=False))
 

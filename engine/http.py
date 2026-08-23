@@ -24,6 +24,12 @@ from urllib.parse import urljoin, urlsplit
 import requests
 import urllib3
 
+from .privatefs import (
+    atomic_write_private_text,
+    ensure_private_directory,
+    open_private_text,
+)
+
 _local = threading.local()
 
 # Honours CAREERKIT_HOME like store.DB_PATH and report.OUT_DIR do. Without it a
@@ -497,6 +503,7 @@ def prune_cache(max_age: int = CACHE_TTL) -> int:
     cost. Runs once per process, lazily, on the first fetch."""
     if not CACHE_DIR.exists():
         return 0
+    ensure_private_directory(CACHE_DIR)
     cutoff = time.time() - max_age
     n = 0
     for p in CACHE_DIR.glob("*.json"):
@@ -539,7 +546,7 @@ def fetch(
         except UnsafeExternalURL:
             _local.last_status = 0
             raise
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(CACHE_DIR)
     if not _pruned:
         _pruned = True
         prune_cache()
@@ -556,7 +563,8 @@ def fetch(
     use_cache = use_cache and _cache_enabled
     if use_cache and cp.exists() and (time.time() - cp.stat().st_mtime) < CACHE_TTL:
         try:
-            blob = json.loads(cp.read_text(encoding="utf-8"))
+            with open_private_text(cp, "r", encoding="utf-8") as fh:
+                blob = json.load(fh)
             # Record the status on this path too. Only 200s are ever cached, so
             # a cache hit IS a success - but returning without setting it left
             # the thread-local holding a previous board's value (or None after
@@ -603,8 +611,8 @@ def fetch(
 
     if use_cache and status == 200:
         try:
-            cp.write_text(
-                json.dumps({"status": status, "text": text}),
+            atomic_write_private_text(
+                cp, json.dumps({"status": status, "text": text}),
                 encoding="utf-8",
             )
         except Exception:
@@ -723,6 +731,7 @@ def clear_cache() -> int:
     """Drop the HTTP cache. Returns files removed."""
     if not CACHE_DIR.exists():
         return 0
+    ensure_private_directory(CACHE_DIR)
     n = 0
     for p in CACHE_DIR.glob("*.json"):
         try:

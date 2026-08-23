@@ -64,6 +64,10 @@ Every checkpoint update must be atomic: render the complete allowed checklist
 to a sibling temporary file, close it, then atomically replace
 `profile/setup-progress.md`. If replacement fails, preserve the previous
 checkpoint and tell the user; never leave a half-written checklist as truth.
+On POSIX systems, keep CareerKit-owned `profile/`, `data/`, and `out/`
+directories owner-only (`0700`) and the private files inside them owner-only
+(`0600`). Do not recursively chmod a user-selected export directory or another
+external/shared parent; secure only the configured private file itself there.
 
 ### After acknowledgment — inspect and resume
 
@@ -238,6 +242,19 @@ asks only for missing application fields. Mark it `complete` only when every
 destination is complete.
 
 ## Phase 5 — Final Checks and handoff
+
+Before the checks, enforce the local-state permission invariant after every
+artifact/checkpoint write. On POSIX (and Git Bash where these commands are
+supported), run:
+
+```sh
+chmod 700 profile data out 2>/dev/null || true
+find profile data out -type d -exec chmod 700 {} + 2>/dev/null || true
+find profile data out -type f -exec chmod 600 {} + 2>/dev/null || true
+```
+
+This is limited to CareerKit-owned state. Never recursively chmod a destination
+chosen for an external export or an existing shared parent directory.
 
 Run these in order. A warning or failure becomes a named gap; never silently
 repair state or describe setup as fully healthy:

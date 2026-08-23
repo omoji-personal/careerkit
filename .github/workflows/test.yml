@@ -3,6 +3,10 @@ name: tests
 on:
   push:
   pull_request:
+  schedule:
+    # Re-resolve lower-bounded dependencies and rerun the vulnerability scan
+    # even when the repository is quiet.
+    - cron: "17 11 * * 1"
 
 permissions:
   contents: read

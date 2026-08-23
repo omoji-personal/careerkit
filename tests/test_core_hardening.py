@@ -117,13 +117,13 @@ def test_applied_cli_reports_non_object_jsonl_without_crashing(
 
     evidence = tmp_path / "applications.jsonl"
     evidence.write_text('[]\nnull\n"string"\n42\n')
-    monkeypatch.setattr(careerkit.store, "connect", lambda: db)
+    monkeypatch.setattr(careerkit.store, "connect", lambda **_kwargs: db)
 
     careerkit.cmd_applied(argparse.Namespace(file=str(evidence), apply=False))
     output = capsys.readouterr().out
     for raw in ("[]", "null", '"string"', "42"):
         assert f"not valid JSON: {raw}" in output
-    assert "0 matched, 0 ambiguous, 0 unmatched, 0 pre-submission" in output
+    assert "0 mapped (0 exact/safe), 0 ambiguous, 0 unmatched, 0 pre-submission" in output
 
 
 def test_blank_company_uid_migration_adopts_exact_source_url_and_history(db):
@@ -687,7 +687,7 @@ def test_consistency_repair_never_claims_the_old_report_still_agrees(
 
     monkeypatch.setattr(report, "OUT_DIR", tmp_path)
     monkeypatch.setattr(store, "DB_PATH", tmp_path / "data" / "jobs.db")
-    monkeypatch.setattr(careerkit.store, "connect", lambda: db)
+    monkeypatch.setattr(careerkit.store, "connect", lambda **_kwargs: db)
     job = _job(external_id="repair-stales-report")
     store.upsert(db, [job])
     db.execute("UPDATE jobs SET comp_min=1000, comp_max=20000, comp_source='body' "
@@ -696,7 +696,9 @@ def test_consistency_repair_never_claims_the_old_report_still_agrees(
     row = db.execute("SELECT * FROM jobs WHERE uid=?", (job.uid,)).fetchone()
     path = report.write_report(db, [row], health=[], run_detail={})
 
-    careerkit.cmd_consistency(SimpleNamespace(report=str(path), repair=True))
+    with pytest.raises(SystemExit) as exc:
+        careerkit.cmd_consistency(SimpleNamespace(report=str(path), repair=True))
+    assert exc.value.code == 1
     output = capsys.readouterr().out
     assert "stale report was skipped" in output
     assert "Consistent." not in output

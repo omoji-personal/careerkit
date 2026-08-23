@@ -112,6 +112,31 @@ def _optional_provider_count(data: dict, key: str, label: str) -> int:
     return parsed
 
 
+def _bounded_pages(cfg: dict, *, feed_name: str, default: int,
+                   maximum: int = 20) -> int:
+    """Read a bounded whole-page budget without lossy integer coercion."""
+    raw = cfg.get("pages", default)
+    message = f"{feed_name} pages must be a whole number from 1 to {maximum}"
+    if isinstance(raw, bool):
+        raise ValueError(message)
+    if isinstance(raw, int):
+        pages = raw
+    elif isinstance(raw, float):
+        if not math.isfinite(raw) or not raw.is_integer():
+            raise ValueError(message)
+        pages = int(raw)
+    elif isinstance(raw, str):
+        value = raw.strip()
+        if not re.fullmatch(r"\+?[0-9]+(?:\.0*)?", value):
+            raise ValueError(message)
+        pages = int(value.split(".", 1)[0].lstrip("+") or "0")
+    else:
+        raise ValueError(message)
+    if pages < 1 or pages > maximum:
+        raise ValueError(message)
+    return pages
+
+
 def _unique_mapping_page(
     items: list,
     *,
@@ -242,9 +267,10 @@ def remoteok(_cfg: dict) -> list[Job]:
 
 
 @feed("arbeitnow")
-def arbeitnow(_cfg: dict) -> list[Job]:
+def arbeitnow(cfg: dict) -> list[Job]:
     out, seen, prior_pages = [], set(), set()
-    for page in (1, 2, 3):
+    pages = _bounded_pages(cfg, feed_name="arbeitnow", default=3)
+    for page in range(1, pages + 1):
         d = fetch_json(f"https://www.arbeitnow.com/api/job-board-api?page={page}")
         items = _required_feed_objects(
             d, "data", f"arbeitnow listing page {page}")
@@ -254,9 +280,11 @@ def arbeitnow(_cfg: dict) -> list[Job]:
         meta = d.get("meta") if isinstance(d.get("meta"), dict) else {}
         last_page = _optional_provider_count(
             meta, "last_page", f"arbeitnow listing page {page}")
-        if page == 3 and (links.get("next") or d.get("next") or
-                          last_page > page):
-            http.mark_capped("arbeitnow stopped at page 3 while another page was advertised")
+        provider_has_more = (last_page > page if last_page else
+                             bool(links.get("next") or d.get("next")))
+        if page == pages and provider_has_more:
+            http.mark_capped(
+                f"arbeitnow stopped at page {pages} while another page was advertised")
         unique, replayed = _unique_mapping_page(
             items, label=f"arbeitnow listing page {page}", seen=seen,
             prior_pages=prior_pages,
@@ -272,43 +300,73 @@ def arbeitnow(_cfg: dict) -> list[Job]:
             ))
         if replayed or (page > 1 and items and not unique):
             break
+        # Arbeitnow numbers pages from one and publishes the inclusive final
+        # page.  A larger local safety budget is not evidence that another
+        # vendor page exists; requesting one turns a complete feed into a
+        # spurious empty/error page.
+        if last_page and page >= last_page:
+            break
     return out
 
 
 @feed("himalayas")
-def himalayas(_cfg: dict) -> list[Job]:
-    out, seen, prior_pages = [], set(), set()
-    prior_page_was_short = False
-    for page in (1, 2):
-        d = fetch_json(f"https://himalayas.app/jobs/api?limit=100&offset={(page-1)*100}")
-        items = _required_feed_objects(
-            d, "jobs", f"himalayas listing page {page}")
-        if items is None:
-            continue
-        if page == 2 and len(items) >= 100:
-            http.mark_capped("himalayas reached its 200-result safety cap")
-        if page > 1 and prior_page_was_short and items:
-            http.mark_partial(
-                "himalayas returned more jobs after a short page; fixed offsets "
-                "may have skipped postings")
-        unique, replayed = _unique_mapping_page(
-            items, label=f"himalayas listing page {page}", seen=seen,
-            prior_pages=prior_pages,
-            identity=lambda item: item.get("guid") or item.get("applicationLink"),
-        )
-        for j in unique:
-            out.append(_j(
-                company=j.get("companyName", ""), title=j.get("title", ""),
-                url=j.get("applicationLink", "") or j.get("guid", ""),
-                location=", ".join(j.get("locationRestrictions", []) or []) or "Remote",
-                description=strip_html(j.get("description", "")),
-                comp_min=j.get("minSalary"), comp_max=j.get("maxSalary"),
-                posted_at=str(j.get("pubDate", ""))[:10], remote_flag=True,
-                external_id=str(j.get("guid", "")), source="himalayas", raw=j,
-            ))
-        if replayed or (page > 1 and items and not unique):
-            break
-        prior_page_was_short = len(items) < 100
+def himalayas(cfg: dict) -> list[Job]:
+    """Search relevant terms through the current page API, not the retired offset API."""
+    out, emitted = [], set()
+    pages = _bounded_pages(cfg, feed_name="himalayas", default=2)
+    for term_index, term in enumerate(TERMS, 1):
+        seen, prior_pages = set(), set()
+        provider_total = 0
+        for page in range(1, pages + 1):
+            d = fetch_json(
+                "https://himalayas.app/jobs/api/search?"
+                f"q={quote_plus(str(term))}&page={page}"
+            )
+            label = f"himalayas term {term_index} page {page}"
+            items = _required_feed_objects(d, "jobs", label)
+            if items is None:
+                continue
+            provider_total = max(
+                provider_total,
+                _optional_provider_count(d, "totalCount", label),
+            )
+            unique, replayed = _unique_mapping_page(
+                items, label=label, seen=seen, prior_pages=prior_pages,
+                identity=lambda item: item.get("guid") or item.get("applicationLink"),
+            )
+            for item_index, j in enumerate(unique, 1):
+                identity = str(j.get("guid") or j.get("applicationLink") or "").strip()
+                if not _usable_feed_row(
+                        identity=identity, title=j.get("title"),
+                        company=j.get("companyName"),
+                        label=f"{label} item {item_index}"):
+                    continue
+                if identity in emitted:
+                    continue
+                emitted.add(identity)
+                out.append(_j(
+                    company=j.get("companyName", ""), title=j.get("title", ""),
+                    url=j.get("applicationLink", "") or j.get("guid", ""),
+                    location=", ".join(j.get("locationRestrictions", []) or []) or "Remote",
+                    description=strip_html(j.get("description", "")),
+                    comp_min=j.get("minSalary"), comp_max=j.get("maxSalary"),
+                    posted_at=str(j.get("pubDate", ""))[:10], remote_flag=True,
+                    external_id=str(j.get("guid", "")), source="himalayas", raw=j,
+                ))
+            if replayed or not items:
+                break
+            if provider_total and len(seen) >= provider_total:
+                break
+            if page == pages and not provider_total:
+                http.mark_capped(
+                    f"himalayas term {term_index} filled its {pages}-page budget "
+                    "without a provider total"
+                )
+        if provider_total and len(seen) < provider_total:
+            http.mark_capped(
+                f"himalayas term {term_index} fetched {len(seen)} of "
+                f"{provider_total} advertised jobs within its {pages}-page budget"
+            )
     return out
 
 
@@ -365,12 +423,12 @@ def weworkremotely(cfg: dict) -> list[Job]:
 def jobicy(_cfg: dict) -> list[Job]:
     out, emitted = [], set()
     for term_index, q in enumerate(TERMS, 1):
-        d = fetch_json(f"https://jobicy.com/api/v2/remote-jobs?count=50&tag={quote_plus(q)}")
+        d = fetch_json(f"https://jobicy.com/api/v2/remote-jobs?count=100&tag={quote_plus(q)}")
         items = _required_feed_objects(d, "jobs", f"jobicy term {term_index}")
         if items is None:
             continue
-        if len(items) >= 50:
-            http.mark_capped(f"jobicy term {term_index} reached its 50-result cap")
+        if len(items) >= 100:
+            http.mark_capped(f"jobicy term {term_index} reached its 100-result cap")
         for item_index, j in enumerate(items, 1):
             identity = str(j.get("id") or j.get("url") or "").strip()
             if not _usable_feed_row(
@@ -417,7 +475,8 @@ def themuse(cfg: dict) -> list[Job]:
     for cat in cats:
         for loc in locs:
             seen, prior_pages = set(), set()
-            for page in (0, 1):
+            pages = _bounded_pages(cfg, feed_name="themuse", default=2)
+            for page in range(pages):
                 url = ("https://www.themuse.com/api/public/jobs?"
                        f"category={cat.replace(' ', '%20').replace('&', '%26')}"
                        f"&location={loc.replace(' ', '%20').replace('/', '%2F')}"
@@ -429,9 +488,10 @@ def themuse(cfg: dict) -> list[Job]:
                     continue
                 page_count = _optional_provider_count(
                     d, "page_count", label)
-                if page == 1 and (page_count > 2 or (not page_count and len(items) >= 20)):
+                if page == pages - 1 and (
+                        page_count > pages or (not page_count and len(items) >= 20)):
                     http.mark_capped(
-                        "themuse stopped at page 2 while more results may remain")
+                        f"themuse stopped at page {pages} while more results may remain")
                 unique, replayed = _unique_mapping_page(
                     items,
                     label=f"themuse category/location page {page + 1}",
@@ -454,6 +514,11 @@ def themuse(cfg: dict) -> list[Job]:
                         external_id=str(j.get("id", "")), source="themuse", raw=j,
                     ))
                 if replayed or (page > 0 and items and not unique):
+                    break
+                # The Muse requests page 0 first, while ``page_count`` is a
+                # count.  Therefore page_count=2 is complete after pages 0 and
+                # 1, even when the configured safety budget is much larger.
+                if page_count and page + 1 >= page_count:
                     break
     return out
 
@@ -1545,7 +1610,7 @@ FEED_KEYS = {
 # terms, they make no request at all; that is dormant configuration, never a
 # healthy zero-result observation that can authorize retirement of old rows.
 TERM_FEEDS = frozenset({
-    "remotive", "jobicy", "freehire", "adzuna", "usajobs", "findwork",
+    "remotive", "himalayas", "jobicy", "freehire", "adzuna", "usajobs", "findwork",
     "careerjet", "linkedin_guest", "jobspy",
 })
 

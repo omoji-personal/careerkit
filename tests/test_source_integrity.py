@@ -1034,7 +1034,8 @@ def test_invalid_optional_feed_pagination_metadata_is_partial(monkeypatch):
     assert error and "invalid pages" in error
 
 
-def test_himalayas_nonempty_page_after_short_page_is_partial(monkeypatch):
+def test_himalayas_nonempty_final_page_without_total_is_capped(monkeypatch):
+    monkeypatch.setattr(aggregators, "TERMS", ("crm",))
     pages = [
         {"jobs": [{
             "guid": f"first-{index}", "companyName": "Acme",
@@ -1054,7 +1055,7 @@ def test_himalayas_nonempty_page_after_short_page_is_partial(monkeypatch):
     jobs, error = aggregators.run_feed("himalayas", {})
 
     assert len(jobs) == 70
-    assert error and "after a short page" in error
+    assert error and "filled its 2-page budget" in error
 
 
 def test_workday_retains_valid_rows_when_one_element_is_malformed(monkeypatch):

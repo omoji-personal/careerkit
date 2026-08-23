@@ -5,10 +5,10 @@ part that decides whether you can actually do the job lives in a Qualifications
 block that the row frequently does not include. Four roles were recommended on
 their titles in a single day and every one died in that block:
 
-  KIPP            required Application Architect plus Platform Developer II
-  Optomi          was Microsoft Dynamics 365, with Salesforce nowhere in it
-  Nelson Mullins  required Platform Developer II and expert Apex
-  Axiom           required ten years plus direct reports
+  Posting A  required Application Architect plus Platform Developer II
+  Posting B  was Microsoft Dynamics 365, with Salesforce nowhere in it
+  Posting C  required Platform Developer II and expert Apex
+  Posting D  required ten years plus direct reports
 
 In a real database, 62 of 170 live rows had no requirements section stored at
 all. The rails cannot screen text that is not there, so they passed, and the

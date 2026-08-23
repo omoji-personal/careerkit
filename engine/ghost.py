@@ -93,7 +93,8 @@ def flag(row, threshold: int = 4) -> str | None:
 def review(con, threshold: int = 4) -> list[str]:
     """Every live row that looks unverified, worst first."""
     rows = con.execute(
-        "SELECT * FROM jobs WHERE gate IN ('QUALIFIED','VERIFY') AND status='new'"
+        "SELECT * FROM jobs WHERE gate IN ('QUALIFIED','VERIFY') AND status='new' "
+        "AND delisted_on IS NULL"
     ).fetchall()
     out = []
     for r in rows:

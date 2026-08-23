@@ -121,7 +121,8 @@ def test_evidence_reconciliation_uses_evidence_day_not_reconciliation_day(db):
     store.upsert(db, [j])
     result = applied.reconcile(db, [{"company": "Acme", "title": "Architect",
                                      "status": "rejected", "on": "2026-07-17",
-                                     "source": "gmail", "_line": 1}], apply=True)
+                                     "url": "https://example.test/d",
+                                     "source": "manual", "_line": 1}], apply=True)
     assert result["problems"] == []
     event = next(e for e in store.history(db, j.uid)
                  if e["kind"] == "application:rejected")

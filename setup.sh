@@ -134,8 +134,20 @@ fi
 "$VENV_PY" -m pip check
 echo "  dependencies installed into .venv"
 
-mkdir -p profile data out
-[ -f profile/employers.yaml ] || printf 'employers: []\nfeeds:\n- {name: remotive, active: true}\n- {name: remoteok, active: true}\n- {name: himalayas, active: true}\n- {name: jobicy, active: true}\n- {name: themuse, active: true}\n- {name: weworkremotely, active: true}\n- {name: workingnomads, active: true}\n- {name: arbeitnow, active: true}\n- {name: freehire, active: false, pages: 10, results_per_page: 100, detail_cap: 100, posted_within_days: 14, countries: [], canonical_enrichment: false}\n' > profile/employers.yaml
+(umask 077; mkdir -p profile data out)
+# These roots contain profiles, application history, reports, and cached job
+# descriptions. Tighten an upgraded checkout as well as a first run; Windows
+# filesystems may not implement POSIX modes, so permission metadata is best
+# effort there while the Python writers still use private creation primitives.
+if command -v chmod >/dev/null 2>&1 && command -v find >/dev/null 2>&1; then
+  chmod 700 profile data out 2>/dev/null || true
+  find profile data out -type d -exec chmod 700 {} + 2>/dev/null || true
+  find profile data out -type f -exec chmod 600 {} + 2>/dev/null || true
+fi
+if [ ! -f profile/employers.yaml ]; then
+  (umask 077; printf 'employers: []\nfeeds:\n- {name: remotive, active: true}\n- {name: remoteok, active: true}\n- {name: himalayas, active: true, pages: 3}\n- {name: jobicy, active: true}\n- {name: themuse, active: true, pages: 3}\n- {name: weworkremotely, active: true}\n- {name: workingnomads, active: true}\n- {name: arbeitnow, active: true, pages: 5}\n- {name: freehire, active: false, pages: 10, results_per_page: 100, detail_cap: 100, posted_within_days: 14, countries: [], canonical_enrichment: false}\n' > profile/employers.yaml)
+fi
+chmod 600 profile/employers.yaml 2>/dev/null || true
 
 "$VENV_PY" -c "import sys; sys.path.insert(0,'.'); import engine.score, engine.adapters" \
   && echo "  engine OK"
@@ -181,7 +193,7 @@ EOF
 CareerKit's Python environment is ready, but Claude Code is not usable yet.
 
   Next:  claude doctor   # diagnose the present Claude installation
-         npm install -g @anthropic-ai/claude-code
+         curl -fsSL https://claude.ai/install.sh | bash
          ./setup.sh      # safe recheck; it should print a Claude version
 
 Do not start /setup until this check reports a usable Claude version.

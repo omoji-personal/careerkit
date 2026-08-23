@@ -91,6 +91,90 @@ US_TOKEN = re.compile(
     r",\s?(AL|AK|AZ|CA|CT|FL|GA|HI|IA|KS|KY|LA|ME|MD|MI|MN|"
     r"MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|"
     r"WV|WI|WY|DC)\b")
+
+# Positive country words are not eligibility evidence when the posting uses
+# them to exclude the candidate.  Location fields are terse scope labels, so
+# "Canada; not available in the US" is meaningful without an explicit subject.
+# Free-form body text is different: benefits, products, holidays, and markets
+# can all be unavailable or excluded in the US while the JOB remains US-remote.
+# Body evidence therefore requires a role/employment or applicant/hiring
+# subject instead of treating any nearby country phrase as candidate scope.
+_US_COUNTRY = r"(?:the\s+)?(?:united states(?:\s+of\s+america)?|u\.?s\.?a?\.?)"
+US_LOCATION_EXCLUSION = re.compile(
+    rf"(?:"
+    rf"\bnot\s+(?!only\b)(?:currently\s+)?"
+    rf"(?:available|open|offered|supported|permitted)\b[^.;:\n]{{0,40}}"
+    rf"{_US_COUNTRY}(?=\W|$)"
+    rf"|\b(?:unavailable|closed)\b[^.;:\n]{{0,35}}"
+    rf"{_US_COUNTRY}(?=\W|$)"
+    rf"|\b(?:except(?:ing)?|excluding|outside|other\s+than)\s+"
+    rf"{_US_COUNTRY}(?=\W|$)"
+    rf"|\b{_US_COUNTRY}\s+(?:applicants?|candidates?|residents?|workers?)\b"
+    rf"[^.;:\n]{{0,35}}\b(?:not\s+eligible|ineligible|cannot\s+apply|"
+    rf"will\s+not\s+be\s+considered)\b"
+    rf"|\b(?:cannot|can\s+not|do\s+not|does\s+not|will\s+not|unable\s+to)\s+"
+    rf"(?:currently\s+)?(?:hire|employ|accept|consider)\b[^.;:\n]{{0,45}}"
+    rf"\b(?:in|from)\s+{_US_COUNTRY}(?=\W|$)"
+    rf")",
+    re.I,
+)
+_US_JOB_SUBJECT = (
+    r"(?:jobs?|roles?|positions?|openings?|opportunit(?:y|ies)|employment(?:\s+opportunities)?)"
+)
+_US_APPLICANT_SUBJECT = r"(?:applicants?|candidates?|residents?|workers?)"
+US_ELIGIBILITY_EXCLUSION = re.compile(
+    rf"(?:"
+    # A role/employment statement at the start of its sentence or clause.
+    rf"(?:^|[.;:\n]\s*)(?:(?:this|the|these|those)\s+)?{_US_JOB_SUBJECT}\s+"
+    rf"(?:(?:is|are|was|were|remain(?:s)?|will|would|can)(?:\s+be)?\s+)?"
+    rf"(?:not\s+(?!only\b)(?:currently\s+)?(?:available|open|offered|permitted)"
+    rf"|(?:isn['’]?t|aren['’]?t)\s+(?:currently\s+)?"
+    rf"(?:available|open|offered|permitted)"
+    rf"|unavailable|closed)\b[^.;:\n]{{0,40}}{_US_COUNTRY}(?=\W|$)"
+    # A job can also state positive availability followed by a country
+    # exception.  Require both the job subject and the availability verb, and
+    # require the country to end the phrase: "except the US federal market" is
+    # a market description, not applicant ineligibility.
+    rf"|(?:^|[.;:\n]\s*)(?:(?:this|the|these|those)\s+)?{_US_JOB_SUBJECT}\s+"
+    rf"(?:(?:is|are|was|were|will)(?:\s+be)?\s+)?"
+    rf"(?:available|open|offered)\b[^.;:\n]{{0,40}}"
+    rf"\b(?:except(?:ing)?|excluding|outside|other\s+than)\s+"
+    rf"{_US_COUNTRY}(?=\s*(?:[.;,\n]|$))"
+    # Multi-region postings often state the positive region first, followed by
+    # "but not in the US".  Keep the role subject mandatory so an unavailable
+    # benefit, product, or market remains irrelevant to job eligibility.
+    rf"|(?:^|[.;:\n]\s*)(?:(?:this|the|these|those)\s+)?{_US_JOB_SUBJECT}\s+"
+    rf"(?:(?:is|are|was|were|will)(?:\s+be)?\s+)?"
+    rf"(?:available|open|offered)\b[^.;:\n]{{0,60}}\bbut\s+not\s+"
+    rf"(?:available\s+)?(?:in|to)\s+{_US_COUNTRY}(?=\s*(?:[.;,\n]|$))"
+    rf"|(?:^|[.;:\n]\s*)(?:(?:this|the|these|those)\s+)?{_US_JOB_SUBJECT}\s+"
+    rf"(?:explicitly\s+)?(?:excludes?|does\s+not\s+accept)\s+"
+    rf"{_US_COUNTRY}\s+{_US_APPLICANT_SUBJECT}\b"
+    # The same scope with the country placed before employment.
+    rf"|\b{_US_COUNTRY}\s+{_US_JOB_SUBJECT}\s+"
+    rf"(?:(?:is|are|was|were|will)(?:\s+be)?\s+)?"
+    rf"(?:not\s+(?:available|open|offered|permitted)|unavailable|closed)\b"
+    # Applicant eligibility must end there or explicitly concern this job;
+    # "cannot apply for relocation benefits" is not a hiring exclusion.
+    rf"|\b(?:{_US_COUNTRY}\s+{_US_APPLICANT_SUBJECT}"
+    rf"|{_US_APPLICANT_SUBJECT}\s+(?:in|from)\s+{_US_COUNTRY})\b"
+    rf"[^.;:\n]{{0,16}}\b(?:not\s+eligible|ineligible|cannot\s+apply|"
+    rf"will\s+not\s+be\s+considered)\b"
+    rf"(?:\s+to\s+apply|\s+(?:to|for)\s+(?:(?:this|the)\s+)?{_US_JOB_SUBJECT})?"
+    rf"(?=\s*(?:[.;:\n]|$))"
+    # "Not open to US-based applicants" is explicitly about who may apply,
+    # even though the sentence omits a job noun.
+    rf"|(?:^|[.;:\n]\s*)not\s+(?:currently\s+)?open\s+to\s+"
+    rf"(?:{_US_COUNTRY}(?:[- ]based)?\s+){_US_APPLICANT_SUBJECT}\b"
+    # Hiring verbs are intrinsically about employment, even without "role".
+    rf"|\b(?:cannot|can\s+not|do\s+not|does\s+not|will\s+not|unable\s+to)\s+"
+    rf"(?:currently\s+)?(?:hire|employ|accept|consider)\b[^.;:\n]{{0,45}}"
+    rf"\b(?:in|from|within)\s+{_US_COUNTRY}(?=\W|$)"
+    rf"|\b(?:are|is)\s+not\s+hiring\b[^.;:\n]{{0,35}}"
+    rf"\b(?:in|from)\s+{_US_COUNTRY}(?=\W|$)"
+    rf")",
+    re.I,
+)
 # Deliberately ABSENT from US_TOKEN: AR, CO, DE, ID, IL, IN, MA. Each is a US
 # state abbreviation AND an ISO country code, and real boards write "Munich, DE"
 # and "Bangalore, IN" in exactly the same caps as "Denver, CO". Treating those
@@ -841,7 +925,7 @@ RESIDENCY_REQUIREMENT = re.compile(
 # based in the United States" is exactly what a remote-US candidate wants to
 # read, so treating it as a restriction would kill the best matches on the board.
 COUNTRY_LEVEL_RESIDENCY = re.compile(
-    r"\b(?:u\.?s\.?a?\b|united states|america|continental us|contiguous us|"
+    r"\b(?:u\.?s\.?a?\b|united states|continental us|contiguous us|"
     r"anywhere in the (?:us|united states)|lower 48)",
     re.I)
 
@@ -1049,6 +1133,19 @@ def location_verdict(job: Job, p: Profile) -> tuple[str, str]:
     # evidence was ", CA" in its text silently lost it.
     us_here = (bool(US_EVIDENCE.search(blob)) or bool(US_TOKEN.search(blob))
                or bool(US_EVIDENCE.search(body[:600])) or bool(US_TOKEN.search(body[:600])))
+
+    # ``US_EVIDENCE`` is intentionally lexical, but a country name inside an
+    # exclusion is evidence of ineligibility, not eligibility.  Check that
+    # explicit statement before a foreign marker can be suppressed by
+    # ``us_here`` ("Canada; not available in the United States" was otherwise
+    # promoted all the way to QUALIFIED).
+    location_excluded = US_LOCATION_EXCLUSION.search(loc)
+    body_excluded = US_ELIGIBILITY_EXCLUSION.search(body[:600])
+    us_excluded = location_excluded or body_excluded
+    if us_excluded:
+        eligibility_text = loc if location_excluded else body[:600]
+        evidence = _sentence_around(eligibility_text, us_excluded)
+        return "fail", f"US eligibility excluded: {evidence!r}"
 
     if NON_US.search(f"{blob} {company}") and not us_here:
         return "fail", f"non-US: {loc[:60] or company[:40]}"

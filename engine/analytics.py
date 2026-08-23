@@ -18,6 +18,7 @@ from statistics import median
 
 from . import applied
 from .models import sanitize_external_url
+from .privatefs import atomic_write_private_text, ensure_private_directory
 from .report import OUT_DIR
 
 
@@ -362,7 +363,7 @@ def _safe_url(value: str) -> str:
 def write_dashboard(con: sqlite3.Connection, snapshot: dict,
                     opportunities: list[sqlite3.Row], *, filename: str | None = None) -> Path:
     """Write an app-like command center with no telemetry or remote resources."""
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(OUT_DIR)
     path = OUT_DIR / (filename or f"dashboard-{snapshot['as_of']}.html")
     esc = lambda v: html.escape("" if v is None else str(v), quote=True)
     s = snapshot["summary"]
@@ -605,7 +606,7 @@ sortJobs();renderJobs();
 <section class="panel full" id="opportunities"><div class="panel-head"><div><div class="eyebrow">Decision queue</div><h2>Actionable opportunities</h2><p>Ranked by the transparent rules in your profile. VERIFY means evidence is incomplete.</p></div></div><div class="opportunity-tools"><label class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="job-search" aria-label="Search opportunities" placeholder="Search role, employer, location, lane…"></label><div class="chips" aria-label="Filter by gate"><button class="chip active" data-filter-gate="">All</button><button class="chip" data-filter-gate="QUALIFIED">Qualified</button><button class="chip" data-filter-gate="VERIFY">Verify</button></div><label><span class="skip">Sort opportunities</span><select id="job-sort"><option value="score">Highest score</option><option value="newest">Newest first</option><option value="company">Company A–Z</option></select></label><span class="results" id="result-count" aria-live="polite"></span></div><div class="table-wrap"><table><thead><tr><th>Score</th><th>Role</th><th>Decision</th><th>Location & comp</th><th>Provenance</th></tr></thead><tbody id="job-rows">{''.join(job_rows)}</tbody></table></div></section>
 <section class="panel full" id="sources"><div class="panel-head"><div><div class="eyebrow">Coverage integrity</div><h2>Source health</h2><p>Issues first. Dormant optional integrations are not failures.</p></div><div class="source-summary"><span>{healthy} healthy</span><span>{len(dormant)} dormant</span><span>{len(failing)} failing</span></div></div><div class="issue-grid">{issue_cards}</div><details class="source-details"><summary>Inspect all {len(health)} sources</summary><div class="source-table"><table><thead><tr><th>Source</th><th>Status</th><th>Last OK</th><th>Count</th><th>Last error</th></tr></thead><tbody>{''.join(health_rows)}</tbody></table></div></details></section>
 <footer class="footer"><b>CareerKit · local command center</b><span>Generated {esc(generated)} · no telemetry, remote fonts, analytics, or network-loaded scripts.</span></footer></main></div></div><script>{script}</script></body></html>'''
-    path.write_text(page, encoding="utf-8")
+    atomic_write_private_text(path, page, encoding="utf-8")
     return path
 
 

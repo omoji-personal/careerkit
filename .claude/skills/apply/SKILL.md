@@ -44,3 +44,6 @@ description: Build the application pack and fill the form as far as policy allow
    both cases, log APPLIED in tracker.md with date, link,
    comp, resume used, and any commitments made on the form (AI clauses,
    disclosures). A prepared or filled form is never recorded as submitted.
+   After either append, keep the CareerKit-owned evidence private on POSIX:
+   `chmod 600 profile/applications.jsonl profile/tracker.md 2>/dev/null || true`.
+   Do not change an external/shared parent directory.

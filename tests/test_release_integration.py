@@ -73,7 +73,13 @@ def test_product_text_boundaries_never_inherit_the_windows_ansi_locale():
             if name in {"read_text", "write_text"}:
                 if not any(kw.arg == "encoding" for kw in node.keywords):
                     missing.append(f"{path.relative_to(ROOT)}:{node.lineno} {name}")
-            if name == "open" and node.args:
+            is_os_open = (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "os"
+                and node.func.attr == "open"
+            )
+            if name == "open" and node.args and not is_os_open:
                 mode_node = node.args[1] if isinstance(node.func, ast.Name) and len(node.args) > 1 else node.args[0]
                 mode = mode_node.value if isinstance(mode_node, ast.Constant) else ""
                 if isinstance(mode, str) and "b" not in mode:
@@ -93,7 +99,7 @@ def test_csv_export_round_trips_non_ascii_for_windows_spreadsheets(
               external_id="unicode", location="Zürich, Schweiz")
     job.score, job.gate, job.reasons = 70, "QUALIFIED", ["fit"]
     store.upsert(db, [job])
-    monkeypatch.setattr(careerkit.store, "connect", lambda: db)
+    monkeypatch.setattr(careerkit.store, "connect", lambda **_kwargs: db)
     monkeypatch.setattr(careerkit, "OUT_DIR_FOR_EXPORT", lambda: tmp_path)
 
     careerkit.cmd_report(SimpleNamespace(min_score=0, format="csv"))

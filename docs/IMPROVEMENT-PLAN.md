@@ -29,16 +29,14 @@ example tests, because an invariant survives a rewrite and an example does not.
 
 ## 1. Ingest email as ground truth for application state
 
-**The failure.** On 2026-08-06 the tool surfaced Delta "Business Technology
-Product Owner (Salesforce)" as a top recommendation. The owner had applied on
-7/30 and been rejected on 8/05, the day before. Separately, a Gmail audit found
-roughly twenty applications in forty five days against six the database knew
-about, and five with no trace in either the database or the tracker.
+**The failure.** The tool surfaced a previously rejected CRM role as a top
+recommendation the next day. Separately, a mailbox audit found substantially
+more applications than the database and tracker knew about.
 
 **Why it matters more than anything else here.** A job search tool whose central
 promise is "surface genuinely new roles" cannot see the single most important
 fact about a role: whether you already applied and were told no. Every wrong
-recommendation costs the owner attention and, worse, credibility if he acts on it.
+recommendation costs the owner attention and, worse, credibility if they act on it.
 
 **Build.**
 - `engine/mailsync.py`: read-only Gmail search for the confirmation and rejection
@@ -48,9 +46,9 @@ recommendation costs the owner attention and, worse, credibility if he acts on i
   `"will not advance"`, `"decided to move forward with other candidates"`,
   `"pursuing other candidates"`.
 - Match to stored postings on `company` first, then fuzzy title. **Never
-  auto-mark on a company-only match**: KnowBe4 and Delta matched cleanly, but
-  "Smartsheet" and "OpenAI" confirmations name no role at all. Company-only hits
-  go to a review queue, not to `status`.
+  auto-mark on a company-only match**: some employer-plus-title pairs matched
+  cleanly, while several real confirmations named no role at all. Company-only
+  hits go to a review queue, not to `status`.
 - New command `./careerkit.py mailsync [--apply]`. Default prints the diff; the
   flag writes it. Same shape as the existing `--no-cache` discipline.
 - Extend `doctor` to fail loudly when a QUALIFIED row belongs to a company with a
@@ -65,12 +63,11 @@ and it must never write to or send mail. Read-only scopes only.
 ## 2. Fetch the Qualifications section before scoring, not after
 
 **The failure.** Four roles were recommended on their titles and died on their
-requirements the same day: KIPP (needed Application Architect plus Platform
-Developer II), Optomi (Microsoft Dynamics 365, not Salesforce at all), Nelson
-Mullins and Axiom (Platform Developer II or ten years plus direct reports). The
-aggregator rows that surfaced them carried a title, a company, a location and
-sometimes a band. The disqualifier lived in a Qualifications block the row never
-contained.
+requirements the same day: one required advanced architect and developer
+credentials, one was for a competing CRM platform, and two required an advanced
+developer credential or extensive people-management experience. The aggregator
+rows carried a title, company, location and sometimes a band; the disqualifier
+lived in a Qualifications block the row never contained.
 
 **Build.**
 - `engine/jd.py`: for any row reaching QUALIFIED or VERIFY whose stored
@@ -90,12 +87,11 @@ wasted recommendation.**
 
 ## 3. Detect postings that are not real, or no longer live
 
-**The failures.** Tria Prima "Principal Salesforce Solution Consultant" scored 43
-with the highest band on the board, $299-366K. The band was an hourly contract
-rate annualised, the domain was parked for sale, and no such consultancy existed
-in Atlanta. Separately, Slalom's Life Sciences CRM Architect was recommended on
-2026-08-06 although the posting says "We will accept applicants until July 30,
-2026". Nobody read the sentence.
+**The failures.** A principal consulting role scored highly with the largest
+band on the board. The band was an hourly contract rate annualised, the domain
+was parked for sale, and the employer could not be verified. Separately, an
+expired CRM architect posting was recommended because nobody read its explicit
+application deadline.
 
 **Build.**
 - **Ghost score**, surfaced in the report rather than used to silently drop:
@@ -107,7 +103,7 @@ in Atlanta. Separately, Slalom's Life Sciences CRM Architect was recommended on
   `apply by <date>`, `posting closes <date>`. Past date sets gate `EXCLUDED`
   with reason `posting closed <date>`.
 - **Repost detection**: same `group_key` reappearing with a new posting date
-  after the owner already applied. That is what Delta looked like.
+  after the owner already applied.
 
 **Effort.** One to two days.
 
@@ -152,11 +148,10 @@ definition a missing column. This turns a whole bug class into an arithmetic che
 
 ## 6. Verify a discovered board actually belongs to the employer
 
-**The failures.** SmartRecruiters answers `200 {"totalFound": 0}` for any slug,
-which registered 27 employers that do not exist. Two-letter initials found a
-Polish IT company for Fisher Phillips and a Belgian firm for DLA Piper. Today,
-"National Public Radio" produced the candidate `national`, a live greenhouse
-board belonging to a public-affairs firm in Toronto.
+**The failures.** One ATS answers `200 {"totalFound": 0}` for any slug, which
+registered employers that did not exist there. Short initials matched unrelated
+companies in other countries, and a generic name fragment found a live board
+belonging to an entirely different employer.
 
 Each was patched individually. The underlying problem is that **discovery never
 checks who answered.**
@@ -176,7 +171,7 @@ $500,000, and an Indeed band of `$1.00 - $250,000.00 per year` annualised to
 $520,000,000. Both are fixed. What is still missing is **judgement**:
 
 - Warn when a QUALIFIED row's band tops out below `screen_floor` rather than
-  waiting for a human to notice. NPR at $85,500-$105,000 against a $130,000 floor
+  waiting for a human to notice. A role capped well below the configured floor
   should never present as a clean match.
 - Record comp provenance (`board field`, `parsed from body`, `absent`) so the
   report can distinguish "they said $120K" from "we guessed $120K".
@@ -189,16 +184,16 @@ $520,000,000. Both are fixed. What is still missing is **judgement**:
 
 ## 8. Remember the relationship, not just the posting
 
-**The failure.** NPR was recommended as a fresh find. The owner had been through
-four rounds there in 2025, including a stakeholder panel, and holds a written
-invitation from the Talent Acquisition Manager to contact her directly. The tool
-knew none of it, and would have sent him through the portal to a more junior,
-lower-banded req.
+**The failure.** A target employer was recommended as a fresh find even though
+the owner had already completed a multi-round interview process there and held a
+written invitation to contact recruiting directly. The tool knew none of it and
+would have routed the owner through the portal for a more junior, lower-banded
+role.
 
 **Build.** An `employer_history` table: applications, interview stages, named
 contacts, outcomes, and any standing invitation. Populated by `mailsync` (item 1)
 and by hand. Any row at a company with history gets a banner in the report:
-`4 interview rounds 2025, declined, open invitation from csmith@npr.org`.
+`prior interview process, declined, open invitation from recruiter@example.invalid`.
 
 **Value.** This is the difference between a job board and something that knows
 your search. It is also what turns a rejection into an asset.
@@ -255,7 +250,7 @@ run that produced it", which happened twice today.
 ## T4. Test the checkers
 
 Three times today a check failed for the wrong reason: the publish gate matched
-"kipp" inside "skipped", pyflakes was absent from the Python being used so the
+a short client token inside "skipped", pyflakes was absent from the Python being used so the
 lint silently passed as failure, and a consistency check regex ran on lines long
 enough to hang. **A check that cannot fail correctly is worse than no check**,
 which is already a stated theme of the project and is not yet applied to its own

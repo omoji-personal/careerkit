@@ -1,7 +1,7 @@
 """Do the safety checks fail when they should?
 
 Three times in one day a check failed for the wrong reason. The publish gate
-reported "client or employer names present" because it matched "kipp" inside the
+reported "client or employer names present" because it matched a short token inside the
 word "skipped". A lint reported clean because pyflakes was absent from the
 interpreter running it. A consistency regex hung on a file with very long lines
 and was recorded as producing no findings.
@@ -19,10 +19,11 @@ import pytest
 
 
 # --------------------------------------------------------------------------
-# Word-boundary matching. The "kipp" in "skipped" failure.
+# Word-boundary matching. A short token inside "skipped" was the failure.
 # --------------------------------------------------------------------------
 
-SENSITIVE = re.compile(r"\b(techbridge|jacoby|kipp|nelson mullins)\b", re.I)
+SENSITIVE = re.compile(
+    r"\b(privateclientalpha|privateclientbeta|privateclientgamma)\b", re.I)
 
 
 @pytest.mark.parametrize("text", [
@@ -37,9 +38,9 @@ def test_the_secret_scan_does_not_match_inside_a_word(text):
 
 
 @pytest.mark.parametrize("text", [
-    "we built this for KIPP last year",
-    "the Techbridge internal org",
-    "Nelson Mullins required Platform Developer II",
+    "we built this for PrivateClientAlpha last year",
+    "the PrivateClientBeta internal org",
+    "PrivateClientGamma required Platform Developer II",
 ])
 def test_the_secret_scan_still_catches_the_real_thing(text):
     assert SENSITIVE.search(text), f"the gate missed a real client name: {text!r}"

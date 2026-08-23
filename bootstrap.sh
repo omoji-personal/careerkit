@@ -32,7 +32,8 @@ CareerKit prerequisite installer
   ./bootstrap.sh --yes        skip the confirmation prompt (for unattended use)
 
 Installs, only when missing: Homebrew (macOS, only if needed for Python),
-Python 3.10+, and Claude Code.  Then hands off to ./setup.sh.
+Python 3.10+, Claude Code, and curl when a Linux download needs it.  Then hands
+off to ./setup.sh.
 
 Claude Code counts as installed if you have either the terminal command or
 the desktop app.
@@ -115,9 +116,32 @@ CLAUDE_STATE="$CAREERKIT_CLAUDE_STATE"
 case "$CLAUDE_STATE" in
   ready)   record "claude code" 0 "$CAREERKIT_CLAUDE_VERSION" ;;
   desktop) record "claude code" 0 "desktop app" ;;
+  unusable) record "claude code" 1 "(present but unusable; repair required)" ;;
   not-on-path) record "claude code" 1 "(installed, but not on this shell's PATH)" ;;
   missing) record "claude code" 1 "" ;;
 esac
+
+# curl is not a universal CareerKit prerequisite.  It is needed only when this
+# run must download Claude Code, or when a Mac without Homebrew must download
+# Homebrew before installing Python.  Keeping it conditional means a desktop-app
+# user with an otherwise complete checkout is not blocked by a tool they never
+# use.  Minimal Linux images often omit it, so record and install it before the
+# first download instead of discovering that halfway through the plan.
+CURL_REQUIRED=0
+case "$CLAUDE_STATE:$PLATFORM" in
+  missing:windows|unusable:windows) ;;
+  missing:*|unusable:*) CURL_REQUIRED=1 ;;
+esac
+if [ "$PLATFORM" = "macos" ] && ! python_ok && ! have brew; then
+  CURL_REQUIRED=1
+fi
+if [ "$CURL_REQUIRED" -eq 1 ]; then
+  if have curl; then
+    record curl 0 "$(curl --version 2>/dev/null | awk 'NR == 1 {print $2}')"
+  else
+    record curl 1 "(required for downloads)"
+  fi
+fi
 
 say "CareerKit prerequisites"
 for line in "${STATUS_LINES[@]}"; do say "$line"; done
@@ -171,20 +195,30 @@ needs() { # needs <name> -> 0 when that requirement is missing
 UNSUPPORTED=0
 case "$PLATFORM" in
   macos)
-    needs git && plan "Xcode Command Line Tools (provides git)" "xcode-select --install"
-    if needs python && ! have brew; then
-      plan "Homebrew (the macOS package manager)" \
-        '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-      plan "put Homebrew on your PATH (this is the step people miss)" \
-        "eval \"\$($BREW_PREFIX/bin/brew shellenv)\"  # and append the same line to your shell profile"
+    # macOS normally ships /usr/bin/curl.  If it has genuinely disappeared,
+    # neither the Homebrew nor Claude installer has a trustworthy bootstrap
+    # transport; stop with a precise manual prerequisite instead of planning a
+    # command that is guaranteed to fail.
+    if needs curl; then
+      UNSUPPORTED=1
+    else
+      needs git && plan "Xcode Command Line Tools (provides git)" "xcode-select --install"
+      if needs python && ! have brew; then
+        plan "Homebrew (the macOS package manager)" \
+          '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+        plan "put Homebrew on your PATH (this is the step people miss)" \
+          "eval \"\$($BREW_PREFIX/bin/brew shellenv)\"  # and append the same line to your shell profile"
+      fi
+      needs python && plan "Python 3.13" "brew install python@3.13"
     fi
-    needs python && plan "Python 3.13" "brew install python@3.13"
     ;;
   linux)
     if have apt-get; then
+      needs curl   && plan "curl" "sudo apt-get install -y curl"
       needs git    && plan "git" "sudo apt-get install -y git"
       needs python && plan "Python 3 and venv" "sudo apt-get install -y python3 python3-venv python3-pip"
     elif have dnf; then
+      needs curl   && plan "curl" "sudo dnf install -y curl"
       needs git    && plan "git" "sudo dnf install -y git"
       needs python && plan "Python 3" "sudo dnf install -y python3 python3-pip"
     else
@@ -199,7 +233,8 @@ esac
 # Claude Code's native installer is self-contained and works the same on macOS,
 # Linux and WSL, so it is planned outside the platform switch.  It needs no
 # Node.js, unlike the npm route.
-if [ "$CLAUDE_STATE" = "missing" ] && [ "$PLATFORM" != "windows" ] && [ "$UNSUPPORTED" -eq 0 ]; then
+if { [ "$CLAUDE_STATE" = "missing" ] || [ "$CLAUDE_STATE" = "unusable" ]; } \
+    && [ "$PLATFORM" != "windows" ] && [ "$UNSUPPORTED" -eq 0 ]; then
   plan "Claude Code" "curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
@@ -207,14 +242,21 @@ if [ "$UNSUPPORTED" -eq 1 ] || [ ${#STEP_CMDS[@]} -eq 0 ]; then
   say "This installer cannot install packages on this system automatically, so"
   say "here is what to install by hand:"
   say ""
+  needs curl   && say "  curl      https://curl.se/download.html   (required for installers)"
   needs git    && say "  git       https://git-scm.com/downloads"
   needs python && say "  Python    https://www.python.org/downloads/   (3.10 or newer)"
-  if [ "$CLAUDE_STATE" = "missing" ]; then
-    say "  Claude    desktop app, no terminal needed:  https://claude.ai/download"
-    say "            or in a terminal:  curl -fsSL https://claude.ai/install.sh | bash"
-    say "            (Windows PowerShell:  irm https://claude.ai/install.ps1 | iex)"
-    say "            (Windows WinGet:      winget install Anthropic.ClaudeCode)"
-  fi
+  case "$CLAUDE_STATE" in
+    missing)
+      say "  Claude    desktop app, no terminal needed:  https://claude.ai/download"
+      say "            or in a terminal:  curl -fsSL https://claude.ai/install.sh | bash"
+      say "            (Windows PowerShell:  irm https://claude.ai/install.ps1 | iex)"
+      say "            (Windows WinGet:      winget install Anthropic.ClaudeCode)"
+      ;;
+    unusable)
+      say "  Claude    run claude doctor, then repair with the current installer:"
+      say "            curl -fsSL https://claude.ai/install.sh | bash"
+      ;;
+  esac
   say ""
   say "Then run: ./setup.sh"
   exit 1
