@@ -39,11 +39,18 @@ def _bootstrap_env(
     hide_curl: bool,
     hide_claude: bool = True,
     desktop: str = " ",
+    hide_tools: tuple[str, ...] = (),
 ) -> dict[str, str]:
     """Pin platform/tool detection without removing real Python and git."""
     bash_env = tmp_path / "controlled-shell.sh"
     hidden_curl = "curl" if hide_curl else "never-hide-curl"
     hidden_claude = "claude" if hide_claude else "never-hide-claude"
+    extra_hidden = "\n".join(
+        f'''  if [ "${{1-}}" = -v ] && [ "${{2-}}" = {tool} ]; then
+    return 1
+  fi'''
+        for tool in hide_tools
+    )
     bash_env.write_text(
         f'''command() {{
   if [ "${{1-}}" = -v ] && [ "${{2-}}" = {hidden_claude} ]; then
@@ -52,6 +59,7 @@ def _bootstrap_env(
   if [ "${{1-}}" = -v ] && [ "${{2-}}" = {hidden_curl} ]; then
     return 1
   fi
+{extra_hidden}
   builtin command "$@"
 }}
 uname() {{
@@ -177,7 +185,13 @@ def test_linux_dry_run_installs_missing_curl_before_any_download(
     )
     package_manager.chmod(0o755)
 
-    env = _bootstrap_env(tmp_path, platform="Linux", hide_curl=True)
+    other_manager = "dnf" if manager == "apt-get" else "apt-get"
+    env = _bootstrap_env(
+        tmp_path,
+        platform="Linux",
+        hide_curl=True,
+        hide_tools=(other_manager,),
+    )
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     result = _run_bootstrap(checkout, env)
 
