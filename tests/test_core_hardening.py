@@ -755,3 +755,41 @@ def test_report_omits_unsafe_primary_sibling_and_tail_urls(db):
     assert report._URL_OMITTED in tail
     assert "javascript:" not in full + tail
     assert "127.0.0.1" not in full + tail
+
+
+def test_cross_gate_duplicate_sighting_is_not_rendered_twice(db, tmp_path, monkeypatch):
+    """One opening seen via two aggregators must not appear as two findings.
+
+    _group() runs separately inside the QUALIFIED and VERIFY buckets, so a role
+    whose sightings straddle the gate boundary was rendered twice: once as a
+    qualified entry and again, unlinked, in the manual-check list at whatever
+    lower score that sighting earned. Seen 2026-08-25 on a real job captured by
+    two feeds, 64/QUALIFIED and 52/VERIFY, presented as two unrelated roles.
+    """
+    from engine import report, store
+
+    monkeypatch.setattr(report, "OUT_DIR", tmp_path)
+
+    # Same company + title => same group_key. Different source/url => distinct
+    # uids, which is what let both survive into the report.
+    good = _job(company="Crowe", title="Lead Salesforce Consultant",
+                url="https://feed-a.test/1", source="greenhouse",
+                external_id="a1", gate="QUALIFIED", score=64)
+    shadow = _job(company="Crowe", title="Lead Salesforce Consultant",
+                  url="https://feed-b.test/1", source="himalayas",
+                  external_id="b1", gate="VERIFY", score=52)
+    assert good.group_key == shadow.group_key, "precondition: same role"
+    assert good.uid != shadow.uid, "precondition: distinct sightings"
+
+    store.upsert(db, [good, shadow])
+    rows = list(db.execute(
+        "SELECT * FROM jobs WHERE gate IN ('QUALIFIED','VERIFY') ORDER BY score DESC"))
+    text = Path(report.write_report(db, rows, health=[], run_detail={})).read_text()
+
+    # The qualified sighting is kept.
+    assert "64" in text and "Lead Salesforce Consultant" in text
+    # The shadow must not be presented as a second, separate manual-check role.
+    assert shadow.uid not in text, (
+        "the VERIFY sighting of an already-qualified role was rendered again")
+    # Suppression is disclosed, never silent.
+    assert "hidden as duplicate sightings" in text

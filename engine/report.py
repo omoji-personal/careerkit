@@ -281,6 +281,20 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
     _new_uids = {r["uid"] for r in new_rows}
     qual = _group([r for r in rows if r["gate"] == "QUALIFIED"])
     verify = _group([r for r in rows if r["gate"] == "VERIFY"])
+
+    # _group() runs inside each gate bucket, so a role whose sightings straddle
+    # the gate boundary was rendered TWICE: once as a qualified entry and again,
+    # unlinked, in the manual-check list at whatever lower score that sighting
+    # happened to earn. Observed 2026-08-25 on one job seen via two aggregators:
+    # 64/QUALIFIED from one feed and 52/VERIFY from another, presented as two
+    # unrelated findings. The reader cannot tell they are the same opening, and
+    # the manual-check copy invites re-verifying a role already cleared above.
+    # The qualified sighting is the better-evidenced one; suppress its shadow.
+    _qual_groups = {g[0]["group_key"] for g in qual if g[0]["group_key"]}
+    _shadowed = [g for g in verify
+                 if g[0]["group_key"] and g[0]["group_key"] in _qual_groups]
+    verify = [g for g in verify if g not in _shadowed]
+
     strong = [g for g in verify if (g[0]["score"] or 0) >= STRONG_VERIFY]
     tail = [g for g in verify if (g[0]["score"] or 0) < STRONG_VERIFY]
 
@@ -293,7 +307,9 @@ def write_report(con: sqlite3.Connection, rows: list[sqlite3.Row], *,
         f"**Pulled** {run_detail.get('pulled', 0)} postings from "
         f"{run_detail.get('sources_ok', 0)} complete sources | "
         f"**{len(new_rows)} new** | **{len(qual)} qualified roles** "
-        f"({sum(len(g) for g in qual)} reqs) | {len(verify)} need a check",
+        f"({sum(len(g) for g in qual)} reqs) | {len(verify)} need a check"
+        + (f" | {len(_shadowed)} manual-check row(s) hidden as duplicate "
+           f"sightings of a role already qualified above" if _shadowed else ""),
         "",
     ]
     errors = run_detail.get("errors") or {}
