@@ -8,5 +8,5 @@
   "author": "Omid Mojtahedi",
   "license": "MIT",
   "engines": { "node": ">=20" },
-  "devDependencies": { "playwright": "1.62.1" }
+  "devDependencies": { "playwright": "1.63.0" }
 }
